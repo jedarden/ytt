@@ -108,7 +108,7 @@ Runs **before** any `extract_info`; two URL forms of one video must collapse to 
 
 ### Fetch core (in-server, no third-party API)
 
-In-process via the yt-dlp Python API (Unlicense). The `extract_info(url, download=False)` call also yields the **metadata** we surface (title, channel, duration, upload date). See `docs/research/yt-dlp-caption-extraction.md`.
+In-process via the yt-dlp Python API (Unlicense). The `extract_info(url, download=False)` call also yields the **metadata** we surface (title, channel, duration, `published`). See `docs/research/yt-dlp-caption-extraction.md`.
 
 1. **Captions** — `skip_download=True`, `writesubtitles=True`, `writeautomaticsub=True`, `subtitlesformat='json3'`, `extractor_args={'youtube': {'player_client': ['tv','web_embedded','mweb']}}` (avoid `web` — its subtitle endpoint needs a PoToken, returns empty bodies). Prefer manual `subtitles`, fall back to `automatic_captions`. Fetch the json3 track URL in-process.
 2. **json3 parse — MUST dedup rolling auto-captions.** Auto-caption (`kind == "asr"`) tracks are a *rolling* stream: events re-emit prior words + one new word, with overlapping `[tStartMs, tStartMs+dDurationMs]` windows and append markers. Naive `"".join(events[].segs[].utf8)` over all events **doubles the text and poisons the cache** (confirmed yt-dlp gotcha #6274/#1734; cf. `srt_fix`). Algorithm: walk events in time order; drop pure-formatting events (no `utf8`); for consecutive overlapping events, **discard an earlier event whose text is a strict prefix of the next**, keep only finalized non-overlapping cues; concat the survivors. **Manual tracks (`kind != "asr"`) are clean** → straight concat. Mandatory fixtures: one real rolling auto track (assert no doubling) + one manual track. This is the single most likely "looks done, is broken" bug — gate Phase 2 on it.
@@ -128,7 +128,7 @@ In-process via the yt-dlp Python API (Unlicense). The `extract_info(url, downloa
 - **ETA / timeout / duration are reconciled** (they were inconsistent): `ETA_sec = duration_sec × YTT_WHISPER_REALTIME_FACTOR` (default 1.2 — CPU transcription is ~realtime-or-slower; confirm against the live model in Phase 6). **Invariant:** `YTT_MAX_ASR_DURATION_SEC × RT_FACTOR < YTT_WHISPER_TIMEOUT_SEC`. Defaults satisfy it: `MAX_ASR_DURATION=1200` (20 min) × `1.2` = 1440s < `TIMEOUT=1800`s. Longer videos → refuse with `too_long_for_asr` (message includes cap + length).
 - **Single-flight covers discovery + job.** The single-flight key wraps the lang-agnostic `extract_info` discovery; `WhisperJob` creation is **get-or-create under a lock keyed by video_id** — a second request during `pending`/`running` returns the existing job, never starts a second run or re-downloads audio.
 - **Job state machine:** `pending → running → done | error`. First caption-less call returns `pending` + ETA + message ("No captions; transcribing now (~N min); ask me again shortly"); the tool **description tells the model to relay the ETA and stop — not tight-poll**.
-- **Audio lifecycle:** download bestaudio to a **dedicated scratch volume** (`YTT_SCRATCH_DIR`, separate from cache), cap checked **before** download, POST, then delete via context-manager (success or failure). **Startup sweep** clears audio orphaned by a crash. Needs **ffmpeg** in the image.
+- **Audio lifecycle:** download bestaudio to a **dedicated scratch volume** (`YTT_SCRATCH_DIR`, separate from cache), projected audio size checked **before** download against the cap `min(YTT_MAX_AUDIO_BYTES, statvfs(YTT_SCRATCH_DIR) free)` (reject → `too_long_for_asr`/insufficient-space), POST, then delete via context-manager (success or failure). **Startup sweep** clears audio orphaned by a crash. Needs **ffmpeg** in the image.
 - **Registry:** in-memory + TTL GC (`YTT_JOB_TTL_SEC`). On restart in-flight jobs are lost; `get_transcript_job(unknown)` → `not_found` with "re-call get_youtube_transcript" (idempotent re-kick). Completed results survive restart **only with PVC** (emptyDir loses them — stated tradeoff). Failed Futures are removed atomically; **errors are never cached as transcripts**.
 - **Progress notifications:** not relied on (clients don't uniformly honor `resetTimeoutOnProgress`); async-job + cache-poll instead. Best-effort keepalive only on the sub-60s caption path.
 
@@ -201,7 +201,7 @@ EgressReport       { ip, asn, org, via_proxy, is_residential }
 - **`status` (unified)** ∈ `{ ok, partial, pending, running, error }`. A WhisperJob `done` surfaces through `get_transcript_job` as TranscriptResult `status: ok` (explicit mapping; the job's internal `done` is never a TranscriptResult status). `EgressReport.is_residential` matches the `ytt_egress_is_residential` metric (one term); it is **derived** (ipinfo.io returns `org`/ASN, not a residential flag) by testing the ASN/org against a known-datacenter-ASN set — that derivation is the concrete test behind the residential Proof Obligation.
 - **Per-status field matrix** (what is set):
   - `ok` — text|segments, source, **transcript_quality**, lang, metadata, is_final=true; on a language-fallback hit also `requested_lang` + `available_langs` + `message`.
-  - `partial` — text, offset, total_chars, next_cursor, is_final=false.
+  - `partial` — text, source, lang, transcript_quality, offset, total_chars, next_cursor, is_final=false.
   - `pending`/`running` — eta_sec, message (no text).
   - `error` — error_code, message (no text).
 - **`transcript_quality`** (one per `source`): `caption_manual → "human-authored captions"`, `caption_auto → "auto-captions — may contain errors, no punctuation/speaker labels"`, `whisper → "ASR (Whisper) — may contain errors, no speaker labels"`.
@@ -228,6 +228,7 @@ Sizes accept human-readable forms (`2Gi`); all knobs have defaults/units.
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | ≤ volume size (startup-validated) |
 | `YTT_CACHE_RECONCILE_SEC` | `300` | counter↔disk reconcile interval |
 | `YTT_SCRATCH_DIR` | `/scratch` | audio temp; **separate** emptyDir w/ `sizeLimit` |
+| `YTT_MAX_AUDIO_BYTES` | `500Mi` | per-job audio cap; checked before download (also bounded by scratch free space) |
 | `YTT_MAX_CONCURRENT_FETCHES` | `4` | yt-dlp caption fetches |
 | `YTT_MAX_CONCURRENT_WHISPER` | `1` | shared CPU service |
 | `YTT_WHISPER_URL` | `http://whisper-openai.whisper-stt.svc.cluster.local:8000` | |
@@ -301,7 +302,7 @@ Pass/fail: 1–6,8,11,12 integration; 9,10 unit+integration; 7 canary; 13,14 man
 ## Testing Strategy
 
 - **Unit — runs ANYWHERE.** URL canonicalization (every form + idempotence), **json3 dedup (rolling vs manual fixtures)**, language fallback (served-lang/`available_langs`/note), cache LRU + `bytes≤cap` invariant under concurrency + whole-unit eviction + `.tmp` exclusion + **reconcile drift correction** + **ENOSPC degrade**, single-flight dedup **both caption and Whisper-job paths** + **failed-Future cleanup**, **Whisper FSM** (transitions, TTL GC, `not_found`, restart re-kick), **orphan-audio startup sweep + failure-path delete**, pagination/cursor (char offsets, content-hash + **eviction → cursor_stale**), error-taxonomy seed-string table + `is_livestream`/`too_long_for_asr` never start a job, authz allow/deny, **rate-limit bucket refill + per-subject isolation** + queue-full→429, OAuth metadata shape + 401-`WWW-Authenticate` + **wrong-audience token rejected**, **wrong-`YTT_WHISPER_MODEL` startup guard** (stubbed `/v1/models`). Property-based tests for Invariants 1–6; Invariant 7 via a startup-validation unit test. Gates every phase; runs in Argo CI (`ytt-build` template).
-- **Integration — `ardenone-cluster` only** (datacenter IPs blocked elsewhere). Scenarios 1–8,11,12 + a live concurrency check + a **saturation/load test** (drive the fetch semaphore to queue-full, assert `429`+`Retry-After`+`queue_depth`). Harness = `ytt test --integration` via `kubectl exec` into the pod or the `ytt-test` Deployment (no Jobs).
+- **Integration — `ardenone-cluster` only** (datacenter IPs blocked elsewhere). Scenarios 1–6,8,11,12 + a live concurrency check + a **saturation/load test** (drive the fetch semaphore to queue-full, assert `429`+`Retry-After`+`queue_depth`). Harness = `ytt test --integration` via `kubectl exec` into the pod or the `ytt-test` Deployment (no Jobs).
 - **Local-dev honesty:** stdio dev covers only stubbed/fixture logic; **any real fetch/Whisper is datacenter-blocked off-cluster** — don't chase a "blocked" local fetch; verify real behavior in-cluster (Phase 9).
 - **Manual/human-gated:** OAuth connector-add (13) and the WAF allowlist (14) — stated, not automatable.
 
@@ -321,13 +322,13 @@ Each phase's exit = its unit suite green on one commit (real-fetch behavior is v
 - [ ] **Phase 0 (prereq):** create `pyproject.toml`+lock, package skeleton, Dockerfile (with ffmpeg), and the `ytt-build` WorkflowTemplate + Sensor in declarative-config; first image build. *(Touches a second repo.)*
 - [ ] **Phase 1:** async MCP skeleton (tool stubs over Streamable HTTP), URL canonicalizer, config loader + startup validations; stdio dev. Exit: `tools/list` returns 2 tools; canonicalizer + idempotence tests green.
 - [ ] **Phase 2:** fetch core — yt-dlp json3 + **dedup** + metadata, language selection, error taxonomy. Exit: parse/dedup/taxonomy unit tests green (rolling fixture asserts no doubling).
-- [ ] **Phase 3:** concurrency — fetch pool + bounded queue + per-video single-flight (caption + job) + failed-Future cleanup. Exit: dedup + 429 tests green.
+- [ ] **Phase 3:** concurrency — fetch pool + bounded queue + per-video single-flight (caption discovery path) + failed-Future cleanup. (The WhisperJob get-or-create single-flight lands in Phase 6 with the job FSM.) Exit: caption dedup + 429 tests green.
 - [ ] **Phase 4:** cache — flat units, whole-unit LRU + lock discipline + reconcile + ENOSPC degrade + startup scan. Exit: invariant-under-concurrency tests green.
 - [ ] **Phase 5:** AuthN/AuthZ + rate limiting (ADR-001) — FastMCP OAuth (audience-bound), subject allowlist `403`, token bucket + queue `429`. Exit: authz/ratelimit/metadata/wrong-audience tests green.
 - [ ] **Phase 6:** Whisper — integrate `whisper-openai` (**confirm model via in-pod `/v1/models`**), job FSM + get-or-create + ETA + TTL GC, scratch vol + sweep, timeout, `too_long_for_asr`, `<id>.whisper.*` namespace, RT_FACTOR calibration. In Phase 6 `get_transcript_job` returns only the `pending`/`running`/`error` status envelope (a completed job's status is observable; **transcript delivery + pagination through `get_transcript_job` is wired in Phase 7**, since it depends on the chunking/cursor built there). Exit: FSM/sweep/model-guard tests green.
 - [ ] **Phase 7:** response shape — `chunk` pagination (char offset + content-hash cursor + cursor_stale + loud PARTIAL + `structuredContent`), `start`/`end`/`query`; `get_transcript_job` returns transcript when done (ADR-002: chunk-only).
 - [ ] **Phase 8:** observability + self-test — `/admin/egress`, startup egress log, metrics, `ServiceMonitor`, `PrometheusRule` (`promtool` passes), canary Deployment.
-- [ ] **Phase 9:** in-cluster harness — `ytt test --integration` in ardenone-cluster; wire unit suite into Argo CI; prove scenarios 1–8,11,12 + load test.
+- [ ] **Phase 9:** in-cluster harness — `ytt test --integration` in ardenone-cluster; wire unit suite into Argo CI; prove scenarios 1–6,8,11,12 + load test (7 is canary-verified).
 - [ ] **Phase 10 (human-gated ops):** deploy via declarative-config (ApplicationSet auto-creates the app); first-sync ordering (ExternalSecret before Deployment); **human runs the credentialed one-time ops** — OpenBao secret writes, Cloudflare WAF rule, Traefik IngressRoute on the shared tunnel; then add the connector on desktop and verify mobile (13), verify WAF (14). The agent produces all manifests; a human supplies Cloudflare/OpenBao credentials.
 
 ## Deployment notes (ardenone-cluster)
