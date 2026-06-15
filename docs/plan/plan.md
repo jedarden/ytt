@@ -150,7 +150,7 @@ No database (deliberately simple).
 - **Size budget (`YTT_CACHE_MAX_BYTES`).** In-memory total (startup scan that **excludes/cleans stray `.tmp`**), incremented **only after `os.replace` succeeds**. **Touch (mtime bump), eviction-selection, and delete all happen under the same asyncio lock** so a live unit can't be evicted while being touched. On a would-exceed write, evict whole units LRU (oldest mtime) until it fits.
 - **Reconcile.** Every `YTT_CACHE_RECONCILE_SEC` (default 300): re-`stat` all units, recompute the total, overwrite the in-memory counter, log if drift exceeds a threshold.
 - **ENOSPC.** Evict-and-retry once, then degrade to **serve-but-don't-cache** (don't error the request).
-- **Backends.** PVC (persistent; `storageClassName: longhorn` — confirm the cluster's class; size = `requests.storage`) or emptyDir (ephemeral; `sizeLimit`; loses completed Whisper results). `YTT_CACHE_MAX_BYTES` ≤ volume size (startup validation fails fast on violation). **Default: PVC, `2Gi`.**
+- **Backends.** PVC (persistent; `storageClassName: longhorn` — confirm the cluster's class; size = `requests.storage`) or emptyDir (ephemeral; `sizeLimit`; loses completed Whisper results). Startup validation reads volume size via `os.statvfs(YTT_CACHE_DIR)` (`f_blocks`×`f_frsize`) and fails fast if `YTT_CACHE_MAX_BYTES` exceeds it (note: for emptyDir, statvfs reports node disk, so the kubelet-enforced `sizeLimit` is the real ceiling — keep `YTT_CACHE_MAX_BYTES` ≤ `sizeLimit`). **Default: PVC, `2Gi`.**
 - **TTL (optional).** Captions rarely change; livestream/`processing` discovery results get a **short/zero TTL** so a finished stream isn't pinned as `is_livestream`.
 
 ### Response shape & size (MCP has no spec limit; clients cap)
@@ -161,11 +161,12 @@ Claude Code ~25K-token default, 500K-char ceiling; the API connector inlines eve
 - **Inline vs paginate.** Inline when text ≤ `YTT_INLINE_CHAR_LIMIT`. `mode:full` on an over-limit transcript still paginates (it never violates the client cap); the difference vs `chunk` is only that `full` defaults to returning chunk 1 with the continuation hint.
 - **Char-offset chunking** (`YTT_CHUNK_CHARS`), don't split mid-multibyte, segment-align when segments are returned. MCP pagination does **not** apply to tool results — this is our own arg.
 - **Token budget is conservative for non-Latin.** `YTT_INLINE_CHAR_LIMIT`/`YTT_CHUNK_CHARS` default 18000 chars ≈ 6K tokens at **3.0 chars/token** (Latin). Dense CJK/Thai/Arabic run ~1–2 chars/token, so for non-Latin scripts estimate tokens as `bytes/3` and cap on that — a fixed char count alone can approach the 25K ceiling in one chunk.
-- **Cursor.** Opaque = `hash(content + served_lang + source) + total_chars + offset`, bound to the cached unit's content. If the unit changed/refreshed → `error_code: cursor_stale` (force fresh page-1). **If the unit was evicted between pages → also `cursor_stale`** (never silently re-fetch and serve at the old offset, which could swap content). Result carries `offset`, `total_chars`, `is_final`.
+- **Filtered pagination.** When `query`/`start`/`end` are present, they produce a **filtered virtual document**; pagination (`offset`/`total_chars`/cursor) operates over that filtered document, not the full transcript, and the filter args are part of the cursor (below) so a different filter can't reuse a stale cursor.
+- **Cursor.** Opaque = `hash(content + served_lang + source + filter_args) + total_chars + offset`, bound to the (possibly filtered) addressable content. If the unit changed/refreshed → `error_code: cursor_stale` (force fresh page-1). **If the unit was evicted between pages → also `cursor_stale`** (never silently re-fetch and serve at the old offset, which could swap content). Result carries `offset`, `total_chars`, `is_final`.
 - **Loud partial.** Non-final chunk text leads with `⚠️ PARTIAL: chars A–B of T (chunk i/n). INCOMPLETE — call get_youtube_transcript again with cursor='…' before summarizing, unless the user only needs the start.` Machine-readable continuation also in `structuredContent`.
 - **ADR-002 (decided): chunking for v1.** No `https://` transcript link in v1 (it would need the public hostname + an unguessable token path + its own authz). `transcript_url` stays unset until a later phase ships it.
 
-## Invariants (named, CI-enforced via property/concurrency tests)
+## Invariants (named; 1–6 CI-enforced via property/concurrency tests, 7 via a startup assertion)
 
 1. **Cache bound:** total cache bytes ≤ `YTT_CACHE_MAX_BYTES` after every completed write.
 2. **Single fetch / single job:** for one `video_id`, concurrent requests trigger exactly one discovery fetch and at most one in-flight WhisperJob.
@@ -197,9 +198,9 @@ WhisperJob         { video_id, status("pending"|"running"|"done"|"error"),
 EgressReport       { ip, asn, org, via_proxy, is_residential }
 ```
 
-- **`status` (unified)** ∈ `{ ok, partial, pending, running, error }`. A WhisperJob `done` surfaces through `get_transcript_job` as TranscriptResult `status: ok` (explicit mapping). `EgressReport.is_residential` matches the `ytt_egress_is_residential` metric (one term).
+- **`status` (unified)** ∈ `{ ok, partial, pending, running, error }`. A WhisperJob `done` surfaces through `get_transcript_job` as TranscriptResult `status: ok` (explicit mapping; the job's internal `done` is never a TranscriptResult status). `EgressReport.is_residential` matches the `ytt_egress_is_residential` metric (one term); it is **derived** (ipinfo.io returns `org`/ASN, not a residential flag) by testing the ASN/org against a known-datacenter-ASN set — that derivation is the concrete test behind the residential Proof Obligation.
 - **Per-status field matrix** (what is set):
-  - `ok` — text|segments, source, lang, metadata, is_final=true.
+  - `ok` — text|segments, source, **transcript_quality**, lang, metadata, is_final=true; on a language-fallback hit also `requested_lang` + `available_langs` + `message`.
   - `partial` — text, offset, total_chars, next_cursor, is_final=false.
   - `pending`/`running` — eta_sec, message (no text).
   - `error` — error_code, message (no text).
@@ -283,7 +284,7 @@ Personal scale — budgets are sanity targets, not SLAs:
 1. **Captioned, short** — full transcript inline + segments + metadata; 2nd request cache-hit (no network), faster.
 2. **Captioned, long** — chunk-1 + loud PARTIAL + `next_cursor` + `structuredContent`; continuation reassembles with no gaps/overlap; `is_final` on the last.
 3. **Auto-captioned (rolling)** — transcript is **not doubled** (dedup) and matches expected text.
-4. **No captions** — `pending`+ETA; `get_transcript_job` → `running` → `done` **and returns the transcript inline**; cached `<id>.whisper.txt`; scratch audio gone.
+4. **No captions** — `pending`+ETA; `get_transcript_job` → `running` → status `ok` (the job's `done`) **and returns the transcript** (inline or paginated); cached `<id>.whisper.txt`; scratch audio gone.
 5. **Concurrent same-video** — N simultaneous (caption + no-caption) → exactly one fetch / one Whisper job; fail if a 2nd job starts.
 6. **Cache pressure** — bytes stay ≤ cap; whole units evicted LRU; `.txt`+`.json` never split.
 7. **Egress residential** — `/admin/egress`/canary reports non-datacenter ASN; fetch succeeds without a proxy.
@@ -299,7 +300,7 @@ Pass/fail: 1–6,8,11,12 integration; 9,10 unit+integration; 7 canary; 13,14 man
 
 ## Testing Strategy
 
-- **Unit — runs ANYWHERE.** URL canonicalization (every form + idempotence), **json3 dedup (rolling vs manual fixtures)**, language fallback (served-lang/`available_langs`/note), cache LRU + `bytes≤cap` invariant under concurrency + whole-unit eviction + `.tmp` exclusion + **reconcile drift correction** + **ENOSPC degrade**, single-flight dedup **both caption and Whisper-job paths** + **failed-Future cleanup**, **Whisper FSM** (transitions, TTL GC, `not_found`, restart re-kick), **orphan-audio startup sweep + failure-path delete**, pagination/cursor (char offsets, content-hash + **eviction → cursor_stale**), error-taxonomy seed-string table + `is_livestream`/`too_long_for_asr` never start a job, authz allow/deny, **rate-limit bucket refill + per-subject isolation** + queue-full→429, OAuth metadata shape + 401-`WWW-Authenticate` + **wrong-audience token rejected**, **wrong-`YTT_WHISPER_MODEL` startup guard** (stubbed `/v1/models`). Property-based tests for Invariants 1–6. Gates every phase; runs in Argo CI (`ytt-build` template).
+- **Unit — runs ANYWHERE.** URL canonicalization (every form + idempotence), **json3 dedup (rolling vs manual fixtures)**, language fallback (served-lang/`available_langs`/note), cache LRU + `bytes≤cap` invariant under concurrency + whole-unit eviction + `.tmp` exclusion + **reconcile drift correction** + **ENOSPC degrade**, single-flight dedup **both caption and Whisper-job paths** + **failed-Future cleanup**, **Whisper FSM** (transitions, TTL GC, `not_found`, restart re-kick), **orphan-audio startup sweep + failure-path delete**, pagination/cursor (char offsets, content-hash + **eviction → cursor_stale**), error-taxonomy seed-string table + `is_livestream`/`too_long_for_asr` never start a job, authz allow/deny, **rate-limit bucket refill + per-subject isolation** + queue-full→429, OAuth metadata shape + 401-`WWW-Authenticate` + **wrong-audience token rejected**, **wrong-`YTT_WHISPER_MODEL` startup guard** (stubbed `/v1/models`). Property-based tests for Invariants 1–6; Invariant 7 via a startup-validation unit test. Gates every phase; runs in Argo CI (`ytt-build` template).
 - **Integration — `ardenone-cluster` only** (datacenter IPs blocked elsewhere). Scenarios 1–8,11,12 + a live concurrency check + a **saturation/load test** (drive the fetch semaphore to queue-full, assert `429`+`Retry-After`+`queue_depth`). Harness = `ytt test --integration` via `kubectl exec` into the pod or the `ytt-test` Deployment (no Jobs).
 - **Local-dev honesty:** stdio dev covers only stubbed/fixture logic; **any real fetch/Whisper is datacenter-blocked off-cluster** — don't chase a "blocked" local fetch; verify real behavior in-cluster (Phase 9).
 - **Manual/human-gated:** OAuth connector-add (13) and the WAF allowlist (14) — stated, not automatable.
@@ -323,7 +324,7 @@ Each phase's exit = its unit suite green on one commit (real-fetch behavior is v
 - [ ] **Phase 3:** concurrency — fetch pool + bounded queue + per-video single-flight (caption + job) + failed-Future cleanup. Exit: dedup + 429 tests green.
 - [ ] **Phase 4:** cache — flat units, whole-unit LRU + lock discipline + reconcile + ENOSPC degrade + startup scan. Exit: invariant-under-concurrency tests green.
 - [ ] **Phase 5:** AuthN/AuthZ + rate limiting (ADR-001) — FastMCP OAuth (audience-bound), subject allowlist `403`, token bucket + queue `429`. Exit: authz/ratelimit/metadata/wrong-audience tests green.
-- [ ] **Phase 6:** Whisper — integrate `whisper-openai` (**confirm model via in-pod `/v1/models`**), job FSM + get-or-create + ETA + TTL GC, scratch vol + sweep, timeout, `too_long_for_asr`, `<id>.whisper.*` namespace, RT_FACTOR calibration. Exit: FSM/sweep/model-guard tests green.
+- [ ] **Phase 6:** Whisper — integrate `whisper-openai` (**confirm model via in-pod `/v1/models`**), job FSM + get-or-create + ETA + TTL GC, scratch vol + sweep, timeout, `too_long_for_asr`, `<id>.whisper.*` namespace, RT_FACTOR calibration. In Phase 6 `get_transcript_job` returns only the `pending`/`running`/`error` status envelope (a completed job's status is observable; **transcript delivery + pagination through `get_transcript_job` is wired in Phase 7**, since it depends on the chunking/cursor built there). Exit: FSM/sweep/model-guard tests green.
 - [ ] **Phase 7:** response shape — `chunk` pagination (char offset + content-hash cursor + cursor_stale + loud PARTIAL + `structuredContent`), `start`/`end`/`query`; `get_transcript_job` returns transcript when done (ADR-002: chunk-only).
 - [ ] **Phase 8:** observability + self-test — `/admin/egress`, startup egress log, metrics, `ServiceMonitor`, `PrometheusRule` (`promtool` passes), canary Deployment.
 - [ ] **Phase 9:** in-cluster harness — `ytt test --integration` in ardenone-cluster; wire unit suite into Argo CI; prove scenarios 1–8,11,12 + load test.
