@@ -267,7 +267,7 @@ CLI: `ytt serve` (uvicorn, 1 worker — the container default), `ytt test [--uni
 ## Observability
 
 - **Metrics (`prometheus-client`, `/metrics`):** `ytt_fetch_blocks_total`, `ytt_fetch_empty_body_total`, `ytt_whisper_errors_total`, `ytt_whisper_job_seconds`, `ytt_cache_bytes`, `ytt_cache_evictions_total`, `ytt_queue_depth`, `ytt_rate_limited_total`, `ytt_egress_is_residential` (gauge). Scraped via a **`ServiceMonitor`** (Prometheus-operator is present on the cluster).
-- **Alerts (`PrometheusRule`, `promtool check rules` must pass):** block-rate spike → "home IP burned"; Whisper 5xx → "Whisper down"; sustained evictions → "cache undersized"; `egress_is_residential=0` → "egress changed". Route via the cluster's existing Alertmanager receiver.
+- **Alerts (`PrometheusRule`, `promtool check rules` must pass):** block-rate spike → "home IP burned"; Whisper 5xx → "Whisper down"; sustained evictions → "cache undersized"; `ytt_egress_is_residential=0` → "egress changed". Route via the cluster's existing Alertmanager receiver.
 - **Canary:** a long-running probe Deployment (no K8s Jobs) fetches a known-captioned video every N min and alerts on failure/empty-body — catches IP-burn and yt-dlp breakage before users.
 - **Logging:** `structlog` JSON; a redaction filter guarantees tokens / subject list / transcript bodies are never logged.
 
@@ -278,7 +278,7 @@ Personal scale — budgets are sanity targets, not SLAs:
 - Caption fetch (cold, captioned video): p50 < 4 s, p99 < 12 s (network-bound).
 - Whisper ETA accuracy: within ±50% of actual (calibrate `RT_FACTOR` in Phase 6).
 - Concurrency: `YTT_MAX_CONCURRENT_FETCHES=4` is the first-cut ceiling (tune from observed memory); queue beyond it → `429`.
-- Pod first-cut resources: requests `100m`/`256Mi`, limits `1`/`1Gi`, `ephemeral-storage` limit = scratch `sizeLimit` + cache `sizeLimit` + headroom.
+- Pod first-cut resources: requests `100m`/`256Mi`, limits `1`/`1Gi`, `ephemeral-storage` limit = scratch `sizeLimit` + headroom (+ cache `sizeLimit` only when `backend=emptydir`; a PVC cache is a separate volume and doesn't count toward ephemeral-storage).
 
 ## Acceptance Scenarios
 
