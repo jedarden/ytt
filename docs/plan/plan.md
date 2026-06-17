@@ -6,7 +6,7 @@ A remote MCP server that reliably downloads transcripts from pasted YouTube link
 
 **Deployment target: `ardenone-cluster`, which egresses from a residential internet plan.** This natively solves the YouTube datacenter-IP block — yt-dlp's outbound requests come from a residential IP. This is a load-bearing assumption; it is tracked as a Proof Obligation (see that section), not silently trusted.
 
-**Public hostname (decided): `ytt.ardenone.com`** — the OAuth resource/issuer URL, `.well-known` metadata, the Cloudflare WAF allowlist, and any transcript link all derive from this exact origin (`https://ytt.ardenone.com`). DNS zone `ardenone.com` is owned on this cluster.
+**Public URL (decided): `https://mcp.ardenone.com/ytt`** — path-based, **co-hosted on the shared `mcp.ardenone.com` host alongside the existing `ibkr-mcp` (`/ibkr`)**, matching this cluster's established MCP convention. The OAuth resource/issuer URL **and the token audience** are the full path-bearing identifier `https://mcp.ardenone.com/ytt` (RFC 9728 §3.3 — byte-identical everywhere). `ytt` clones the live `k8s/ardenone-cluster/ibkr-mcp/` manifests as its template. See "Deploying alongside ibkr-mcp" in Deployment notes for the full pattern, including the one new wrinkle (per-tool `.well-known` routing).
 
 > Prior art already in the cluster: a `yt-transcript-fetcher` pod (`python:3.12-slim`) has run in `claude-code-research` for ~79 days — evidence the residential-egress + yt-dlp pattern already works here. Worth a look before building.
 
@@ -39,17 +39,20 @@ Claude mobile / desktop / web  ×N clients
    │  add-connector + consent on web/Desktop; the MCP client that
    │  calls tools is ANTHROPIC'S BACKEND (unattended, from its cloud)
    ▼
-Cloudflare edge  ──  WAF custom rule (NOT Access — Access would bounce the
-   │                  unattended backend): allow only IPv4 160.79.104.0/21
-   │                  (+ IPv6 2607:6bc0::/48, treated as unverified-but-safe)
+Cloudflare edge  ──  optional host-level WAF rule on mcp.ardenone.com (NOT Access —
+   │                  Access would bounce the unattended backend): allow only IPv4
+   │                  160.79.104.0/21 (+ IPv6 2607:6bc0::/48). NOTE: this host is
+   │                  SHARED with ibkr-mcp, so the rule is host-wide; subject
+   │                  allowlist + OAuth is the real per-tool authz.
    ▼
-Shared cluster Cloudflare Tunnel ─► Traefik ─► IngressRoute(ytt.ardenone.com)
-   │   (reuse the existing one-tunnel-per-cluster + Traefik convention;
-   │    NO per-pod cloudflared sidecar)
+Shared cluster Cloudflare Tunnel ─► Traefik ─► IngressRoute on Host(mcp.ardenone.com)
+   │   match: PathPrefix(/ytt) || PathPrefix(/.well-known/oauth-*/ytt)
+   │   (reuse the existing one-tunnel + Traefik convention; co-hosted with
+   │    ibkr at /ibkr; NO per-pod cloudflared sidecar; external-dns → tunnel CNAME)
    ▼
-ytt MCP server (async, replicas:1, uvicorn 1 worker)
-   ├─ /healthz (liveness, unauth, carved out of auth middleware)
-   ├─ OAuth resource-server endpoints (.well-known/*) — audience = https://ytt.ardenone.com
+ytt MCP server (async, replicas:1, uvicorn 1 worker, served under /ytt)
+   ├─ /ytt/health (liveness, unauth, carved out of auth middleware)
+   ├─ OAuth resource-server endpoints (path-inserted .well-known) — audience = https://mcp.ardenone.com/ytt
    ├─ AuthN: validate bearer (audience-bound) → AuthZ: subject ∈ allowlist else 403
    ├─ per-subject rate limit (token bucket) → 429
    ├─ async handler + per-video single-flight
@@ -70,7 +73,7 @@ ytt MCP server (async, replicas:1, uvicorn 1 worker)
 ### Transport decision: remote MCP, not stdio
 
 - Mobile can't run a local process → stdio is desktop-only. One remote **Streamable HTTP** server covers mobile + desktop as a custom connector.
-- Must be **publicly reachable over HTTPS** — the connector client is Anthropic's backend, not the phone. Tailscale-only is invisible to it. Exposed via the **shared cluster Cloudflare Tunnel + Traefik IngressRoute** (not a sidecar — see Deployment).
+- Must be **publicly reachable over HTTPS** — the connector client is Anthropic's backend, not the phone. Tailscale-only is invisible to it. Exposed via the **shared cluster Cloudflare Tunnel + a Traefik IngressRoute on `Host(mcp.ardenone.com)` path-prefixed `/ytt`** (not a sidecar; co-hosted with ibkr-mcp — see Deployment). The server is **path-prefix-aware** (all routes, metadata, and emitted URLs carry `/ytt`), exactly like ibkr-mcp's `MCP_PUBLIC_URL`/`MCP_PATH_PREFIX`.
 
 ### Security & Authorization
 
@@ -78,25 +81,27 @@ OAuth is **authentication**, not **authorization**. On the public internet any C
 
 - **Subject allowlist (required).** After token validation every tool call checks the token subject/email against `YTT_ALLOWED_SUBJECTS`; not listed → `403`. **Empty allowlist = deny all** (fail-closed).
 - **No open DCR in v1.** FastMCP self-issued tokens / a single known client; if DCR is ever enabled, gate behind a pre-shared token. Authorize on **subject**, never the client name (the apps register as `client_name: "claudeai"`).
-- **Inbound IP allowlist at Cloudflare WAF, not the pod and not Access.** Behind the tunnel the origin sees only the tunnel, so a NetworkPolicy/app source-IP check can't enforce it. **Cloudflare Access is wrong here** — it's an identity gate that would challenge/bounce Anthropic's unattended backend. Use a **WAF custom rule** allowing only `160.79.104.0/21` (+ the IPv6 range) on `ytt.ardenone.com`. Defense-in-depth, **not** a substitute for the subject allowlist (the ranges are shared infra).
+- **Inbound IP allowlist (optional, host-level) at Cloudflare WAF, not the pod and not Access.** Behind the tunnel the origin sees only the tunnel, so a NetworkPolicy/app source-IP check can't enforce it. **Cloudflare Access is wrong here** — it's an identity gate that would challenge/bounce Anthropic's unattended backend. A **WAF custom rule** allowing only `160.79.104.0/21` (+ the IPv6 range) can be applied — **but `mcp.ardenone.com` is shared with ibkr-mcp, so the rule is host-wide and must be coordinated** (both are Claude-only connectors, so an Anthropic-only rule is compatible with both; ibkr currently ships none). It is **defense-in-depth only** — the **subject allowlist + audience-bound OAuth is the real per-tool authz** and stands on its own if the host-level WAF is skipped.
+- **CORS middleware** (clone ibkr/stock-research): allow origins `https://claude.ai` + `https://desktop.claude.ai`, methods GET/POST/OPTIONS, headers Authorization/Content-Type/Accept — required for the browser-side of the connector add/consent flow.
 - **Per-subject rate limiting.** Token bucket (`YTT_RATE_LIMIT_PER_MIN`) + Whisper quota (`YTT_WHISPER_JOBS_PER_HOUR`); a **bounded queue** in front of the fetch semaphore returns `429`+`Retry-After` when full. Cap total in-flight WhisperJobs.
 - **Egress NetworkPolicy.** Restrict pod egress to YouTube/`googlevideo`, `whisper-openai.whisper-stt.svc`, Cloudflare, and the IP-info host (`ipinfo.io`); deny the rest. (Over-tight egress mimics IP-burn in metrics — start permissive + DNS-log, then tighten.)
 - **No YouTube cookies, ever.** A cookie file ties the household Google account to the scraper. Standing constraint.
 - **Secrets via ESO/OpenBao** (the cluster norm), not SealedSecrets. Paths under `ardenone-cluster/ytt/*` (e.g. `…/oauth-client-secret`, `…/webshare-url`). Enumerate keys in `ExternalSecret` manifests; document rotation; **never log** tokens, the subject list, or transcript bodies (enforced by a logging filter).
-- **Diagnostic hygiene.** Public `/healthz` returns only liveness. Egress IP/ASN detail is at an authenticated/cluster-internal `GET /admin/egress`, never the public tunnel; its probe uses a **fixed internal video list**, never caller input.
+- **Diagnostic hygiene.** Public `/ytt/health` returns only liveness (matches ibkr's `/ibkr/health`; it's the k8s probe path too). Egress IP/ASN detail is at an authenticated/cluster-internal `GET /admin/egress`, never the public tunnel; its probe uses a **fixed internal video list**, never caller input.
 
 ### Auth: OAuth-secured under MCP OAuth (ADR-001 decided)
 
 Server is the OAuth 2.1 **Resource Server**. See `docs/research/mcp-oauth-authentication.md` + `docs/research/claude-app-mcp-oauth-implementation.md`. Non-negotiable surface:
 
-- Unauthenticated → `401` + `WWW-Authenticate: Bearer resource_metadata="…"` (the #1 silent "Add connector" failure). `/healthz` exempt.
-- Serve RFC 9728 Protected Resource Metadata at `/.well-known/oauth-protected-resource` (resource = `https://ytt.ardenone.com`).
+- Unauthenticated → `401` + `WWW-Authenticate: Bearer resource_metadata="…"` (the #1 silent "Add connector" failure). `/ytt/health` exempt.
+- Serve RFC 9728 Protected Resource Metadata at the **path-inserted** location `https://mcp.ardenone.com/.well-known/oauth-protected-resource/ytt` (well-known at the host root, resource path `/ytt` appended — RFC 9728 §3.1). The `resource` field inside MUST equal `https://mcp.ardenone.com/ytt` exactly.
+- Emit `WWW-Authenticate: Bearer resource_metadata="https://mcp.ardenone.com/.well-known/oauth-protected-resource/ytt", scope="..."` — an **absolute, byte-stable** URL. Claude follows this verbatim, which makes discovery path-correct regardless of root-probing; the server must actually serve the doc at that exact URL (a header/route mismatch is a known failure).
 - AS metadata (RFC 8414) advertises `code_challenge_methods_supported: ["S256"]`.
-- **Audience-bound** token validation (RFC 8707) — `aud` must match `https://ytt.ardenone.com`, else confused-deputy replay.
+- **Audience-bound** token validation (RFC 8707) — `aud` must match the full path-bearing `https://mcp.ardenone.com/ytt` (no trailing slash), else confused-deputy replay. **Strict path-bearing audience is what keeps the shared host safe**: an `/ibkr` token must never validate against `/ytt`. (Residual risk: a client that normalizes the resource to origin or appends a trailing slash — known in Claude *Code* CLI, not confirmed on the hosted surfaces; ibkr already runs path-based on hosted Claude, which is the working precedent. Flag for an empirical check at connector-add.)
 
 Claude-app behavior: the connector client is Anthropic's backend (public ingress mandatory); **mobile can't ADD connectors** (no separate mobile path — get web/Desktop accepted and mobile reuses the token); **register both** `https://claude.ai/api/mcp/auth_callback` + `https://claude.com/api/mcp/auth_callback`; Advanced-settings manual client id/secret is web/Desktop only.
 
-**ADR-001 (decided): FastMCP self-issued tokens with audience binding to `https://ytt.ardenone.com`, DCR disabled**, plus the subject allowlist. FastMCP `JWTVerifier(audience=…)` / `RemoteAuthProvider` (pin FastMCP ≥ 2.11.1, exact in lockfile; verify the self-issued token emits a spec-compliant `aud`). Don't hand-roll metadata. (Rust `rmcp` is client-only → Python locked.)
+**ADR-001 (decided): FastMCP self-issued tokens with audience binding to `https://mcp.ardenone.com/ytt`, DCR disabled**, plus the subject allowlist. ytt is its own OAuth AS (as ibkr-mcp is its own); the AS metadata is served path-inserted at `https://mcp.ardenone.com/.well-known/oauth-authorization-server/ytt` so it doesn't collide with ibkr's. FastMCP `JWTVerifier(audience=…)` / `RemoteAuthProvider` (pin FastMCP ≥ 2.11.1, exact in lockfile; verify the self-issued token emits a spec-compliant `aud`). Don't hand-roll metadata. (Rust `rmcp` is client-only → Python locked.)
 
 ### URL → canonical video_id (load-bearing)
 
@@ -164,7 +169,7 @@ Claude Code ~25K-token default, 500K-char ceiling; the API connector inlines eve
 - **Filtered pagination.** When `query`/`start`/`end` are present, they produce a **filtered virtual document**; pagination (`offset`/`total_chars`/cursor) operates over that filtered document, not the full transcript, and the filter args are part of the cursor (below) so a different filter can't reuse a stale cursor.
 - **Cursor.** Opaque = `hash(content + served_lang + source + filter_args) + total_chars + offset`, bound to the (possibly filtered) addressable content. If the unit changed/refreshed → `error_code: cursor_stale` (force fresh page-1). **If the unit was evicted between pages → also `cursor_stale`** (never silently re-fetch and serve at the old offset, which could swap content). Result carries `offset`, `total_chars`, `is_final`.
 - **Loud partial.** Non-final chunk text leads with `⚠️ PARTIAL: chars A–B of T (chunk i/n). INCOMPLETE — call get_youtube_transcript again with cursor='…' before summarizing, unless the user only needs the start.` Machine-readable continuation also in `structuredContent`.
-- **ADR-002 (decided): chunking for v1.** No `https://` transcript link in v1 (it would need the public hostname + an unguessable token path + its own authz). `transcript_url` stays unset until a later phase ships it.
+- **ADR-002 (decided): chunking for v1.** No `https://` transcript link in v1 (it would need a public path under `/ytt` + an unguessable token + its own authz). `transcript_url` stays unset until a later phase ships it.
 
 ## Invariants (named; 1–6 CI-enforced via property/concurrency tests, 7 via a startup assertion)
 
@@ -179,7 +184,7 @@ Claude Code ~25K-token default, 500K-char ceiling; the API connector inlines eve
 ## Components
 
 - **MCP server** — async Streamable HTTP, **Python + FastMCP**, `replicas:1`, **uvicorn 1 worker**.
-- **Ingress** — shared cluster Cloudflare Tunnel → Traefik **IngressRoute** (`ytt.ardenone.com`); WAF IP allowlist at the edge.
+- **Ingress** — shared cluster Cloudflare Tunnel → Traefik **IngressRoute** on `Host(mcp.ardenone.com)` PathPrefix `/ytt` (co-hosted with ibkr-mcp); SSE + CORS middlewares; internal-CA origin cert; optional host-level WAF IP allowlist at the edge.
 - **AuthN/AuthZ** — FastMCP OAuth (audience-bound), DCR off, subject allowlist (`403`), per-subject rate limit + Whisper quota (`429`).
 - **URL canonicalizer**, **fetch core** (+ json3 dedup + metadata + taxonomy), **Whisper client** (httpx, scratch vol, ffmpeg), **cache** (flat units, LRU), **concurrency layer**, **observability**, **self-test**, **test harness**.
 - **Libraries (chosen):** `uvicorn`, `httpx`, `pydantic-settings`, `prometheus-client`, `structlog`, hand-rolled in-proc token bucket. IP-info host: `ipinfo.io`.
@@ -212,7 +217,7 @@ EgressReport       { ip, asn, org, via_proxy, is_residential }
 - `get_youtube_transcript(url, lang?, mode?, cursor?, start?, end?, query?)` — canonicalize → cache-first → transcript (inline or chunk-1 + `next_cursor`) or `pending`+ETA. Description tells the model: pass messy/short URLs directly; on `partial` continue with `next_cursor` before answering; on `pending` relay the ETA and stop.
 - `get_transcript_job(video_id)` — poll; **when `done`, returns the transcript directly** (same shape/pagination), collapsing 3 calls to 2. `not_found` → instruct re-call.
 
-`selftest_egress` is **not** a model tool. Egress diagnostics live at authenticated/cluster-internal `GET /admin/egress` + a startup log; public `/healthz` is liveness only; probe uses a fixed internal video list.
+`selftest_egress` is **not** a model tool. Egress diagnostics live at authenticated/cluster-internal `GET /admin/egress` + a startup log; public `/ytt/health` is liveness only; probe uses a fixed internal video list.
 
 ## Configuration
 
@@ -240,7 +245,9 @@ Sizes accept human-readable forms (`2Gi`); all knobs have defaults/units.
 | `YTT_INLINE_CHAR_LIMIT` | `18000` | ~6K tokens (Latin); non-Latin uses bytes/3 |
 | `YTT_CHUNK_CHARS` | `18000` | char-offset chunk size |
 | `YTT_PROXY_URL` | *(unset)* | optional Webshare fallback (itself datacenter IP) |
-| OAuth | — | client id/secret, issuer/resource = `https://ytt.ardenone.com`, DCR off |
+| `YTT_PATH_PREFIX` | `/ytt/` | path the server is mounted under (matches the IngressRoute) |
+| `YTT_PUBLIC_URL` | `https://mcp.ardenone.com/ytt` | public base URL; OAuth resource/audience + emitted metadata derive from it |
+| OAuth | — | client id/secret, issuer/resource = `https://mcp.ardenone.com/ytt`, DCR off |
 
 ## Deliverables (file tree the agent must produce)
 
@@ -261,7 +268,8 @@ ytt/                      (repo root — already scaffolded: README, docs/)
 CLI: `ytt serve` (uvicorn, 1 worker — the container default), `ytt test [--unit|--integration]`, `ytt selftest` (egress probe). Exit 0/nonzero; `ytt test` emits JSON to stdout and the `/admin` endpoint.
 
 **Manifests in `jedarden/declarative-config` (separate repo):**
-- `k8s/ardenone-cluster/ytt/`: Deployment (`replicas:1`, `strategy: Recreate`, resource limits, ephemeral-storage limit, scratch+cache volumes), Service, PVC (`longhorn`, 2Gi), `ExternalSecret` (ESO/OpenBao), Traefik `IngressRoute` (`ytt.ardenone.com`), `NetworkPolicy` (egress + whisper-allow), `ServiceMonitor`, `PrometheusRule`, canary Deployment, `ytt-test` Deployment. (ArgoCD ApplicationSet **auto-discovers** this dir → app `ytt-ns-ardenone-cluster`, ns `ytt`, `CreateNamespace=true`.)
+- `k8s/ardenone-cluster/ytt/` (clone the live `k8s/ardenone-cluster/ibkr-mcp/` manifests as the template): Deployment (`replicas:1`, `strategy: Recreate`, resource limits, ephemeral-storage limit, scratch+cache volumes; container port 8080), Service (ClusterIP `:8080`), PVC (`longhorn`, 2Gi), `ExternalSecret` (ESO/OpenBao), Traefik `IngressRoute` on `Host(mcp.ardenone.com)` + `Middleware`s (SSE no-buffering + CORS), cert-manager `Certificate` for `mcp.ardenone.com` via `ardenone-ca-issuer` (secret `mcp-ardenone-com-tls` in the `ytt` ns), `NetworkPolicy` (egress + whisper-allow), `ServiceMonitor`, `PrometheusRule`, canary Deployment, `ytt-test` Deployment. (ArgoCD ApplicationSet **auto-discovers** this dir → app `ytt-ns-ardenone-cluster`, ns `ytt`, `CreateNamespace=true`.)
+- **Coordinated edit to `k8s/ardenone-cluster/ibkr-mcp/ibkr-mcp-ingressroute.yml`** (a *different* app's manifest): its route currently matches the broad `PathPrefix(/.well-known)`, which would swallow ytt's `/.well-known/oauth-protected-resource/ytt`. Narrow **both** routes to per-tool well-known subpaths (and/or set explicit Traefik `priority`) so each tool only receives its own metadata. This is the one cross-tool change co-hosting requires.
 - `k8s/iad-ci/argo-workflows/ytt-build-workflowtemplate.yml` + `k8s/iad-ci/argo-events/ytt-sensor.yml`: Docker build → `ronaldraygun/ytt:<tag>` → auto-bump the tag in `k8s/ardenone-cluster/ytt/` (model on `telegram-claude-bridge-build`). Add a `ytt-build` row to CLAUDE.md's template table.
 
 ## Observability
@@ -295,7 +303,7 @@ Personal scale — budgets are sanity targets, not SLAs:
 11. **URL forms** — `youtu.be`/`/shorts/`/`&list=`/bare id → one cache entry; playlist/channel → `bad_url`.
 12. **Dependency-down** — whisper-openai 5xx/timeout → job lands `error` with `no_captions_asr_failed`; ENOSPC → serve-but-don't-cache.
 13. **Connector add (manual)** — add on Claude desktop completes OAuth; same tool works from mobile without re-adding.
-14. **WAF (manual)** — request from a non-allowlisted IP is blocked at the edge; allowlisted IP reaches the `401`.
+14. **Co-hosting isolation (manual)** — `ytt`'s `/.well-known/oauth-protected-resource/ytt` resolves correctly (not swallowed by ibkr's route) with `resource = https://mcp.ardenone.com/ytt`; an `/ibkr`-audience token is **rejected** by `ytt` (and vice-versa); `/ibkr` still works unchanged. If the optional host-level WAF is adopted: a non-allowlisted IP is blocked at the edge, an allowlisted IP reaches the `401`.
 
 Pass/fail: 1–6,8,11,12 integration; 9,10 unit+integration; 7 canary; 13,14 manual deploy checklist (explicitly human-gated).
 
@@ -329,19 +337,40 @@ Each phase's exit = its unit suite green on one commit (real-fetch behavior is v
 - [ ] **Phase 7:** response shape — `chunk` pagination (char offset + content-hash cursor + cursor_stale + loud PARTIAL + `structuredContent`), `start`/`end`/`query`; `get_transcript_job` returns transcript when done (ADR-002: chunk-only).
 - [ ] **Phase 8:** observability + self-test — `/admin/egress`, startup egress log, metrics, `ServiceMonitor`, `PrometheusRule` (`promtool` passes), canary Deployment.
 - [ ] **Phase 9:** in-cluster harness — `ytt test --integration` in ardenone-cluster; wire unit suite into Argo CI; prove scenarios 1–6,8,11,12 + load test (7 is canary-verified).
-- [ ] **Phase 10 (human-gated ops):** deploy via declarative-config (ApplicationSet auto-creates the app); first-sync ordering (ExternalSecret before Deployment); **human runs the credentialed one-time ops** — OpenBao secret writes, Cloudflare WAF rule, Traefik IngressRoute on the shared tunnel; then add the connector on desktop and verify mobile (13), verify WAF (14). The agent produces all manifests; a human supplies Cloudflare/OpenBao credentials.
+- [ ] **Phase 10 (human-gated ops):** deploy via declarative-config (ApplicationSet auto-creates the app); first-sync ordering (ExternalSecret before Deployment); land the **coordinated ibkr-mcp IngressRoute edit** (per-tool `.well-known` routing) in the same change so the two MCPs don't collide; **human runs the credentialed one-time ops** — OpenBao secret writes and (if adopted) the host-level Cloudflare WAF rule. DNS + the IngressRoute need no manual step (external-dns auto-creates the `mcp.ardenone.com` record → the existing tunnel, and the cert is issued by the in-cluster CA). Then add the connector on desktop (URL `https://mcp.ardenone.com/ytt`) and verify mobile (13); verify the per-tool well-known + audience isolation against ibkr (14). The agent produces all manifests; a human supplies OpenBao/Cloudflare credentials.
 
 ## Deployment notes (ardenone-cluster)
 
 - **GitOps only** via `jedarden/declarative-config` + ArgoCD; never `kubectl apply` (selfHeal reverts). The cluster is read-only from the EX44 box.
 - **ApplicationSet auto-discovers** `k8s/ardenone-cluster/ytt/` → app `ytt-ns-ardenone-cluster`, ns `ytt`. No hand-authored Application. First sync: ExternalSecret must materialize before the Deployment mounts it (expect a transient CrashLoop, or use sync-waves).
-- **Ingress:** Service + Traefik **IngressRoute** for `ytt.ardenone.com` on the **existing shared cluster tunnel** — **no per-pod cloudflared sidecar** (one edge exposure per cluster). WAF allowlist applied at the Cloudflare edge.
+### Deploying alongside ibkr-mcp (shared `mcp.ardenone.com` host)
+
+`ytt` co-hosts with the live `ibkr-mcp` (`/ibkr`) on one host, reusing the **existing shared cluster Cloudflare Tunnel + Traefik** — no new tunnel, no per-pod cloudflared sidecar. Clone the `k8s/ardenone-cluster/ibkr-mcp/` manifests; the only structural difference is the path (`/ytt`) and the per-tool `.well-known` routing.
+
+- **IngressRoute** (`ytt` namespace), mirroring ibkr's:
+  ```
+  match: Host(`mcp.ardenone.com`) && (PathPrefix(`/ytt`)
+         || PathPrefix(`/.well-known/oauth-protected-resource/ytt`)
+         || PathPrefix(`/.well-known/oauth-authorization-server/ytt`))
+  entryPoints: [websecure, vpn]
+  services: [{ name: ytt, port: 8080 }]
+  middlewares: [ytt-sse, ytt-cors]
+  tls: { secretName: mcp-ardenone-com-tls }
+  annotations:  # external-dns auto-creates the DNS → existing tunnel
+    external-dns.alpha.kubernetes.io/hostname: mcp.ardenone.com
+    external-dns.alpha.kubernetes.io/target: 062c8e8a-8c15-4afb-ad08-9430743550fe.cfargotunnel.com
+  ```
+- **The one new wrinkle — per-tool `.well-known` routing.** ibkr's route matches the broad `PathPrefix(/.well-known)` and would swallow ytt's metadata. Fix in the **same** declarative-config change: narrow ytt to its `/.well-known/oauth-*/ytt` subpaths (above) and **narrow ibkr's** route to `/.well-known/oauth-*/ibkr` (or set explicit Traefik `priority` so the longer, tool-specific match wins). MCP SDKs probe well-known at the host root, so this routing is what makes path-based OAuth discovery work for *both* tools. Each tool serves RFC 9728/8414 metadata path-inserted under its own suffix; the `WWW-Authenticate` header points Claude at the exact absolute URL.
+- **Middlewares** (clone ibkr/stock-research): `ytt-sse` sets `X-Accel-Buffering: no` + `Cache-Control: no-cache` (un-buffer Streamable HTTP); `ytt-cors` allows `https://claude.ai` + `https://desktop.claude.ai`.
+- **TLS:** cert-manager `Certificate` for CN `mcp.ardenone.com` via the internal `ardenone-ca-issuer` ClusterIssuer → secret `mcp-ardenone-com-tls` **in the `ytt` namespace** (secrets are namespaced; ytt needs its own copy even though ibkr has one for the same host). This is the origin cert (cloudflared→Traefik); Claude sees Cloudflare's edge cert.
+- **App is path-prefix-aware:** set `YTT_PUBLIC_URL=https://mcp.ardenone.com/ytt` and `YTT_PATH_PREFIX=/ytt/` (mirrors ibkr's `MCP_PUBLIC_URL`/`MCP_PATH_PREFIX`); all transport routes, health (`/ytt/health`), `.well-known`, `resource`, and `aud` derive from it.
+- **Optional host-level WAF:** if the Anthropic-IP allowlist is adopted, it applies to the whole `mcp.ardenone.com` host (shared with ibkr) — coordinate it as a host concern, or skip it and rely on the per-tool OAuth + subject allowlist (the real authz). ibkr currently ships none.
 - **Image tags, not digests** (matches the repo's `sed`-based auto-bump): `ronaldraygun/ytt:<semver-or-sha>`, no `:latest`. Bump SOP: edit deps → CI builds tag → run integration suite in-cluster → `sed`-bump tag in `k8s/ardenone-cluster/ytt/` → commit → Argo syncs. **Rollback = `git revert` the bump commit** (never `kubectl`; selfHeal undoes live edits).
 - **Whisper dep:** `whisper-openai.whisper-stt.svc:8000` (ClusterIP, same cluster). NetworkPolicy allows egress to `whisper-openai` in ns `whisper-stt` (not the `whisper-stt` service).
 - **Storage:** `longhorn` class (confirm name); PVC vs emptyDir per `YTT_CACHE_BACKEND`.
 - **Resources:** set the first-cut requests/limits + ephemeral-storage from the Performance budget; confirm a node has room for the (light) ytt pod.
 - **Secrets:** ESO `ExternalSecret` from OpenBao paths `ardenone-cluster/ytt/*`; documented rotation; never logged. **No cookies.**
-- **Decommission (reverse of bootstrap):** remove the connector in Claude → remove WAF rule + IngressRoute → delete `k8s/ardenone-cluster/ytt/` (Argo prunes) → delete the OpenBao paths.
+- **Decommission (reverse of bootstrap):** remove the connector in Claude → remove any host-level WAF rule → **revert the ibkr-mcp IngressRoute narrowing** (restore its broad `/.well-known` match since it's the only tool again) → delete `k8s/ardenone-cluster/ytt/` (Argo prunes the app + external-dns removes the shared DNS only if ytt was the last claimant — ibkr also annotates it, so the record persists) → delete the OpenBao paths.
 
 ## Risks & posture
 
@@ -359,4 +388,4 @@ Each phase's exit = its unit suite green on one commit (real-fetch behavior is v
 
 ## Resolved (was open)
 
-- Self-host (yt-dlp), no third-party API. · Python + FastMCP. · Host on `ardenone-cluster` (residential, proven via self-test/canary). · Whisper = cluster `whisper-openai`. · Cache = flat files on PVC/emptyDir, LRU. · Integration tests in-cluster; unit anywhere. · Mobile OAuth path: none to build; register both callbacks. · AuthZ = subject allowlist (fail-closed) + DCR off + rate limits. · `replicas:1`. · `mode:summary` dropped → `start/end/query` slicing. · Inbound IP allowlist = Cloudflare **WAF** (not Access; not the pod). · **Hostname = `ytt.ardenone.com`.** · **ADR-001 = FastMCP self-issued, audience-bound, DCR off.** · **ADR-002 = chunk-only v1.** · **Edge = shared tunnel + Traefik IngressRoute (no sidecar).** · **Secrets = ESO/OpenBao.** · **Image = immutable tags (not digests).** · **ffmpeg in image.** · **json3 rolling dedup required.** · **ETA/timeout/duration reconciled.**
+- Self-host (yt-dlp), no third-party API. · Python + FastMCP. · Host on `ardenone-cluster` (residential, proven via self-test/canary). · Whisper = cluster `whisper-openai`. · Cache = flat files on PVC/emptyDir, LRU. · Integration tests in-cluster; unit anywhere. · Mobile OAuth path: none to build; register both callbacks. · AuthZ = subject allowlist (fail-closed) + DCR off + rate limits. · `replicas:1`. · `mode:summary` dropped → `start/end/query` slicing. · Inbound IP allowlist = Cloudflare **WAF** (not Access; not the pod). · **Public URL = `https://mcp.ardenone.com/ytt`** (path-based, co-hosted with ibkr-mcp; clone its manifests). · **ADR-001 = FastMCP self-issued, audience-bound to the path-bearing URL, DCR off.** · **ADR-002 = chunk-only v1.** · **Edge = existing shared tunnel + Traefik IngressRoute on `Host(mcp.ardenone.com)/ytt` (no sidecar, no new tunnel); per-tool `.well-known` routing coordinated with ibkr.** · **Secrets = ESO/OpenBao.** · **Image = immutable tags (not digests).** · **ffmpeg in image.** · **json3 rolling dedup required.** · **ETA/timeout/duration reconciled.**
