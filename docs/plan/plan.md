@@ -31,6 +31,7 @@ A remote MCP server that reliably downloads transcripts from pasted YouTube link
 - **Whisper via the cluster's universal `whisper-openai` deployment.** Don't bundle a model.
 - **Testing in `ardenone-cluster`.** Integration tests hit YouTube → can't run on the EX44 box or Argo/iad-ci (datacenter IPs → blocked). The in-cluster harness is part of the deliverable.
 - **Do no harm to `ibkr-mcp` (hard constraint).** `ytt` shares the `mcp.ardenone.com` host, the Cloudflare tunnel, and the Traefik instance with the live `ibkr-mcp`. **Deployment and testing must not change, degrade, or risk ibkr.** This is achieved by being **purely additive** — `ytt` adds its own higher-priority, more-specific routes and **never edits ibkr's manifests**; tests target ytt's own ClusterIP/namespace; and an **ibkr regression smoke check gates the rollout** (ibkr's `.well-known` + a basic call must pass before *and* after). No host-level change (WAF, tunnel, ibkr route) is made unless verified non-impacting to ibkr.
+- **Public + portable (the repo is open-source).** The image is published to **GHCR for anyone to run**, and the code must carry **no ardenone-cluster specifics** — every deployment fact (public URL, Whisper endpoint, egress/proxy, OAuth subjects, storage) is env/manifest config so a stranger can self-host. In-repo **end-user + contributor documentation is a deliverable**, not an afterthought.
 
 ## Architecture
 
@@ -252,13 +253,27 @@ Sizes accept human-readable forms (`2Gi`); all knobs have defaults/units.
 
 ## Deliverables (file tree the agent must produce)
 
+This repo is **public** — the deliverables include a publishable image (GHCR) and end-user/contributor docs, not just internal code.
+
 ```
 ytt/                      (repo root — already scaffolded: README, docs/)
+  README.md               PUBLIC front door: what it is, quick-start (docker pull
+                          ghcr.io/jedarden/ytt + run), env-config reference, "add as a
+                          Claude connector" steps, self-hosting requirements/caveats
+  LICENSE                 OSS license (e.g. MIT/Apache-2.0) — required for a public repo
+  CONTRIBUTING.md  SECURITY.md  CHANGELOG.md
+  docs/                   (internal: notes/, research/, plan/) + a public docs/usage/:
+    usage/configuration.md   full env-var reference (the Configuration table, expanded)
+    usage/self-hosting.md    deploy anywhere: BYO Whisper, BYO residential egress/proxy,
+                             BYO OAuth subjects; what's required vs optional
+    usage/connector.md       add to Claude desktop/mobile; OAuth/allowlist setup
+    usage/deploy-ardenone.md the ardenone-cluster/ibkr co-hosting specifics (reference)
   pyproject.toml          uv-managed; pinned Python 3.12.x; pinned exact fastmcp,
                           yt-dlp, uvicorn, httpx, pydantic-settings, prometheus-client,
                           structlog; uv.lock committed. [project.scripts] ytt=ytt.cli:main
   Dockerfile             multi-stage; base python:3.12-slim + `apt-get install -y ffmpeg`;
-                          installs locked deps; non-root; CMD ["ytt","serve"]. Pinned digest.
+                          a test stage runs `pytest` (red = failed build); installs locked
+                          deps; non-root; CMD ["ytt","serve"]. OCI labels → repo. Pinned digest.
   ytt/
     __init__.py (__version__)  __main__.py  cli.py  config.py  server.py
     canonicalize.py  fetch.py  parse_json3.py  whisper.py  cache.py
@@ -268,10 +283,23 @@ ytt/                      (repo root — already scaffolded: README, docs/)
 ```
 CLI: `ytt serve` (uvicorn, 1 worker — the container default), `ytt test [--unit|--integration]`, `ytt selftest` (egress probe). Exit 0/nonzero; `ytt test` emits JSON to stdout and the `/admin` endpoint.
 
+### Documentation (in-repo, public-facing)
+
+Because the repo is public, documentation is a tracked deliverable, written *alongside* the code (not deferred to the end):
+
+- **`README.md`** — the front door: one-paragraph what/why, **quick-start** (`docker run ghcr.io/jedarden/ytt …` with the minimal env), the tool list, a link into `docs/usage/`, and an honest "requirements & caveats" box (needs a residential egress IP or a proxy; needs a Whisper endpoint for caption-less videos; single-replica). Required **before** the repo is advertised as usable by others.
+- **`docs/usage/configuration.md`** — the full env-var reference (the Configuration table expanded with units/defaults/examples). Lands when config stabilizes (Phase 1, updated per phase).
+- **`docs/usage/self-hosting.md`** — deploy-anywhere guide: BYO Whisper, BYO residential egress/proxy, BYO OAuth subjects; what's required vs optional; a plain `docker-compose`/single-pod example that does **not** assume ardenone/ibkr.
+- **`docs/usage/connector.md`** — how to add the server to Claude desktop/mobile, the OAuth flow, and setting the subject allowlist.
+- **`docs/usage/deploy-ardenone.md`** — the ardenone-cluster + `mcp.ardenone.com/ytt` + ibkr co-hosting specifics, as a concrete reference deployment (keeps cluster-specifics out of the generic docs).
+- **`LICENSE`** (OSS), **`CONTRIBUTING.md`**, **`SECURITY.md`** (how to report; the authz/abuse posture), **`CHANGELOG.md`** (keep-a-changelog; entries gate each release tag).
+
+The existing `docs/notes`, `docs/research`, `docs/plan` stay as the **internal** design record; `docs/usage/` is the **external** surface. Docs are verified as part of the release gate (README quick-start must actually work against the published GHCR image).
+
 **Manifests in `jedarden/declarative-config` (separate repo):**
 - `k8s/ardenone-cluster/ytt/` (clone the live `k8s/ardenone-cluster/ibkr-mcp/` manifests as the template): Deployment (`replicas:1`, `strategy: Recreate`, resource limits, ephemeral-storage limit, scratch+cache volumes; container port 8080), Service (ClusterIP `:8080`), PVC (`longhorn`, 2Gi), `ExternalSecret` (ESO/OpenBao), Traefik `IngressRoute` on `Host(mcp.ardenone.com)` + `Middleware`s (SSE no-buffering + CORS), cert-manager `Certificate` for `mcp.ardenone.com` via `ardenone-ca-issuer` (secret `mcp-ardenone-com-tls` in the `ytt` ns), `NetworkPolicy` (egress + whisper-allow), `ServiceMonitor`, `PrometheusRule`, canary Deployment, `ytt-test` Deployment. (ArgoCD ApplicationSet **auto-discovers** this dir → app `ytt-ns-ardenone-cluster`, ns `ytt`, `CreateNamespace=true`.)
 - **No edit to ibkr's manifests.** `ytt`'s `.well-known` interception is **additive**: ytt adds its own higher-`priority`, suffix-specific root rules so Traefik routes only ytt's metadata to ytt, leaving ibkr's broad `/.well-known` rule (and everything else) untouched. See "`.well-known` handling" in Deployment notes. (Narrowing ibkr's route is explicitly *avoided* — it would put ibkr at risk for no benefit.)
-- `k8s/iad-ci/argo-workflows/ytt-build-workflowtemplate.yml` + `k8s/iad-ci/argo-events/ytt-sensor.yml`: Docker build → `ronaldraygun/ytt:<tag>` → auto-bump the tag in `k8s/ardenone-cluster/ytt/` (model on `telegram-claude-bridge-build`). Add a `ytt-build` row to CLAUDE.md's template table.
+- `k8s/iad-ci/argo-workflows/ytt-build-workflowtemplate.yml` + `k8s/iad-ci/argo-events/ytt-sensor.yml`: on push to `jedarden/ytt` → **run `pytest` (unit) → build → push to GHCR `ghcr.io/jedarden/ytt:<tag>`** (public; the image others consume) → auto-bump the tag in `k8s/ardenone-cluster/ytt/` (model on `telegram-claude-bridge-build`, adding a test step + the GHCR destination). Needs a **GHCR push credential** (GitHub token with `write:packages`) as an `ExternalSecret`/SealedSecret in `iad-ci`, in addition to the existing `docker-hub-registry`. Add a `ytt-build` row to CLAUDE.md's template table. **GitHub Actions stay disabled — the build runs on Argo and pushes to GHCR** (don't reach for GH Actions just because the registry is GitHub's).
 
 ## Observability
 
@@ -340,6 +368,7 @@ Each phase's exit = its unit suite green on one commit (real-fetch behavior is v
 - [ ] **Phase 8:** observability + self-test — `/admin/egress`, startup egress log, metrics, `ServiceMonitor`, `PrometheusRule` (`promtool` passes), canary Deployment.
 - [ ] **Phase 9:** in-cluster harness — `ytt test --integration` in ardenone-cluster; wire unit suite into Argo CI; prove scenarios 1–6,8,11,12 + load test (7 is canary-verified).
 - [ ] **Phase 10 (human-gated ops):** deploy via declarative-config (ApplicationSet auto-creates the app). **ibkr regression gate (do-no-harm):** capture ibkr's `.well-known/*` responses + a basic ibkr call **before** apply; ytt's routing is purely additive (no ibkr manifest edit); re-run the ibkr checks **after** apply and confirm byte-for-byte unchanged — if anything differs, roll back the ytt change (`git revert`) before proceeding. First-sync ordering: ExternalSecret before Deployment. **Human runs the credentialed one-time ops** — OpenBao secret writes; the host-level Cloudflare WAF rule only if explicitly chosen (it touches the shared host → re-verify ibkr after). DNS + IngressRoute + cert need no manual step (external-dns → existing tunnel; in-cluster CA). Then add the connector on desktop (URL `https://mcp.ardenone.com/ytt`), verify mobile (13), and verify well-known + audience isolation + ibkr-unchanged (14). The agent produces all manifests; a human supplies OpenBao/Cloudflare credentials.
+- [ ] **Phase 11 (public release):** set the GHCR package public + linked to the repo; finalize `README.md` quick-start and `docs/usage/*`; add `LICENSE`/`CONTRIBUTING`/`SECURITY`/`CHANGELOG`; tag the first semver release. **Release gate:** the README quick-start must actually run against the published `ghcr.io/jedarden/ytt` image (a clean self-host smoke test, no ardenone specifics) before the repo is advertised as usable by others.
 
 ## Deployment notes (ardenone-cluster)
 
@@ -374,7 +403,15 @@ The OAuth metadata documents live at the **host root** (`mcp.ardenone.com/.well-
 - **TLS:** cert-manager `Certificate` for CN `mcp.ardenone.com` via the internal `ardenone-ca-issuer` ClusterIssuer → secret `mcp-ardenone-com-tls` **in the `ytt` namespace** (secrets are namespaced; ytt needs its own copy even though ibkr has one for the same host). This is the origin cert (cloudflared→Traefik); Claude sees Cloudflare's edge cert.
 - **App is path-prefix-aware:** set `YTT_PUBLIC_URL=https://mcp.ardenone.com/ytt` and `YTT_PATH_PREFIX=/ytt/` (mirrors ibkr's `MCP_PUBLIC_URL`/`MCP_PATH_PREFIX`); all transport routes, health (`/ytt/health`), `.well-known`, `resource`, and `aud` derive from it.
 - **Optional host-level WAF:** if the Anthropic-IP allowlist is adopted, it applies to the whole `mcp.ardenone.com` host (shared with ibkr) — coordinate it as a host concern, or skip it and rely on the per-tool OAuth + subject allowlist (the real authz). ibkr currently ships none.
-- **Image tags, not digests** (matches the repo's `sed`-based auto-bump): `ronaldraygun/ytt:<semver-or-sha>`, no `:latest`. Bump SOP: edit deps → CI builds tag → run integration suite in-cluster → `sed`-bump tag in `k8s/ardenone-cluster/ytt/` → commit → Argo syncs. **Rollback = `git revert` the bump commit** (never `kubectl`; selfHeal undoes live edits).
+### Image publishing (public repo → GHCR)
+
+`jedarden/ytt` is **public**, so the image must live where the community can pull it. Decision:
+
+- **Primary registry = GHCR `ghcr.io/jedarden/ytt`** (public). This is the image external users pull and the cluster deploys. The GHCR **package must be set to public** and **linked to the repo** (GHCR packages default to private even for a public repo). Add OCI `org.opencontainers.image.source` labels so the package links back.
+- **Cluster pulls GHCR directly with no imagePullSecret** — a public GHCR image needs no auth. So the ardenone-cluster Deployment references `ghcr.io/jedarden/ytt:<tag>` and drops the `docker-hub-registry` pull secret for this app. (Dual-pushing to `ronaldraygun/ytt` on Docker Hub is **optional** and only if a private fallback is wanted — not required.)
+- **Built by Argo, not GitHub Actions.** Even though GHCR is GitHub's registry, the build stays on Argo Workflows (GH Actions disabled fleet-wide); the `ytt-build` template pushes to GHCR using a `write:packages` token.
+- **Tags:** immutable **semver** tags for public consumers (`ghcr.io/jedarden/ytt:0.1.0`), plus an optional moving `:latest` **for external convenience only** — the cluster manifest always pins a specific version, never `:latest`. Bump SOP: edit deps → CI runs unit tests + builds + pushes the tag → run integration suite in-cluster → `sed`-bump the pinned tag in `k8s/ardenone-cluster/ytt/` → commit → Argo syncs. **Rollback = `git revert` the bump commit** (never `kubectl`; selfHeal undoes live edits).
+- **Image must be generic / portable** (it's for others too): **no ardenone-specifics baked in.** `mcp.ardenone.com`, the `whisper-openai` service DNS, the residential egress, the OAuth subjects, the cache backend — all come from env/manifest (`YTT_PUBLIC_URL`, `YTT_WHISPER_URL`, `YTT_PROXY_URL`, `YTT_ALLOWED_SUBJECTS`, `YTT_CACHE_*`). A self-hoster supplies their own Whisper endpoint (or runs `whisper-openai`), their own residential egress (or proxy), and their own OAuth — documented in `docs/usage/self-hosting.md`. Bundled `ffmpeg`/`yt-dlp` licenses (GPL/Unlicense) are compatible with redistribution (separate binaries, mere aggregation); the repo `LICENSE` covers ytt's own code.
 - **Whisper dep:** `whisper-openai.whisper-stt.svc:8000` (ClusterIP, same cluster). NetworkPolicy allows egress to `whisper-openai` in ns `whisper-stt` (not the `whisper-stt` service).
 - **Storage:** `longhorn` class (confirm name); PVC vs emptyDir per `YTT_CACHE_BACKEND`.
 - **Resources:** set the first-cut requests/limits + ephemeral-storage from the Performance budget; confirm a node has room for the (light) ytt pod.
@@ -397,4 +434,4 @@ The OAuth metadata documents live at the **host root** (`mcp.ardenone.com/.well-
 
 ## Resolved (was open)
 
-- Self-host (yt-dlp), no third-party API. · Python + FastMCP. · Host on `ardenone-cluster` (residential, proven via self-test/canary). · Whisper = cluster `whisper-openai`. · Cache = flat files on PVC/emptyDir, LRU. · Integration tests in-cluster; unit anywhere. · Mobile OAuth path: none to build; register both callbacks. · AuthZ = subject allowlist (fail-closed) + DCR off + rate limits. · `replicas:1`. · `mode:summary` dropped → `start/end/query` slicing. · Inbound IP allowlist = Cloudflare **WAF** (not Access; not the pod). · **Public URL = `https://mcp.ardenone.com/ytt`** (path-based, co-hosted with ibkr-mcp; clone its manifests). · **ADR-001 = FastMCP self-issued, audience-bound to the path-bearing URL, DCR off.** · **ADR-002 = chunk-only v1.** · **Edge = existing shared tunnel + Traefik IngressRoute on `Host(mcp.ardenone.com)/ytt` (no sidecar, no new tunnel); `.well-known` handled by ADDITIVE higher-priority ytt rules — ibkr manifests untouched.** · **Do-no-harm to ibkr = hard constraint (additive routing, ClusterIP-scoped tests, before/after ibkr regression gate).** · **Secrets = ESO/OpenBao.** · **Image = immutable tags (not digests).** · **ffmpeg in image.** · **json3 rolling dedup required.** · **ETA/timeout/duration reconciled.**
+- Self-host (yt-dlp), no third-party API. · Python + FastMCP. · Host on `ardenone-cluster` (residential, proven via self-test/canary). · Whisper = cluster `whisper-openai`. · Cache = flat files on PVC/emptyDir, LRU. · Integration tests in-cluster; unit anywhere. · Mobile OAuth path: none to build; register both callbacks. · AuthZ = subject allowlist (fail-closed) + DCR off + rate limits. · `replicas:1`. · `mode:summary` dropped → `start/end/query` slicing. · Inbound IP allowlist = Cloudflare **WAF** (not Access; not the pod). · **Public URL = `https://mcp.ardenone.com/ytt`** (path-based, co-hosted with ibkr-mcp; clone its manifests). · **ADR-001 = FastMCP self-issued, audience-bound to the path-bearing URL, DCR off.** · **ADR-002 = chunk-only v1.** · **Edge = existing shared tunnel + Traefik IngressRoute on `Host(mcp.ardenone.com)/ytt` (no sidecar, no new tunnel); `.well-known` handled by ADDITIVE higher-priority ytt rules — ibkr manifests untouched.** · **Do-no-harm to ibkr = hard constraint (additive routing, ClusterIP-scoped tests, before/after ibkr regression gate).** · **Secrets = ESO/OpenBao.** · **Image = immutable semver tags (not digests).** · **ffmpeg in image.** · **json3 rolling dedup required.** · **ETA/timeout/duration reconciled.** · **Public repo → image published to GHCR `ghcr.io/jedarden/ytt` (cluster pulls it directly, no secret); built by Argo (GH Actions stay off); Docker Hub dual-push optional.** · **Image is generic/portable — no ardenone specifics baked in.** · **In-repo public docs (README + `docs/usage/*` + LICENSE/CONTRIBUTING/SECURITY/CHANGELOG) are a deliverable.**
