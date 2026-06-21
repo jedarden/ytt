@@ -1,0 +1,62 @@
+[project]
+name = "ytt"
+version = "0.1.0"
+description = "Remote MCP server that downloads YouTube transcripts (captions or Whisper ASR), cached and rate-limited, for use as a Claude custom connector."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = "==3.12.*"
+authors = [{ name = "jedarden", email = "github@jedarden.com" }]
+keywords = ["mcp", "youtube", "transcript", "yt-dlp", "whisper", "claude"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+]
+
+# Runtime deps. Floors are set here; uv.lock pins the exact resolved versions
+# (the committed, reproducible source of truth). FastMCP is floored at the
+# spec-required >= 2.11.1 (audience-bound JWTVerifier / RemoteAuthProvider);
+# yt-dlp is pinned to an exact version because its YouTube extractor drifts
+# (plan: "pin yt-dlp exactly").
+dependencies = [
+    "fastmcp>=2.11.1",
+    "yt-dlp==2025.5.22",
+    "uvicorn>=0.34.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.7.0",
+    "prometheus-client>=0.21.0",
+    "structlog>=24.4.0",
+    "starlette>=0.40.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jedarden/ytt"
+Source = "https://github.com/jedarden/ytt"
+Issues = "https://github.com/jedarden/ytt/issues"
+
+[project.scripts]
+ytt = "ytt.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "hypothesis>=6.122.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ytt"]
+
+[tool.pytest.ini_options]
+# Default + gating run is UNIT-ONLY. Integration tests hit real YouTube /
+# Whisper, which fail from this datacenter IP by design — they are opt-in via
+# `-m integration`. The marathon/CI gate is: `pytest -m "not integration"`.
+addopts = "-m 'not integration' -q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: hits real YouTube / Whisper; only runs in ardenone-cluster (datacenter IPs are blocked elsewhere)",
+]

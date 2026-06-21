@@ -1,0 +1,15 @@
+# Marathon journal (kept on disk, not committed)
+.marathon/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# uv-managed virtualenv (uv.lock IS committed; the venv is not)
+.venv/
+
+# Local env
+.env

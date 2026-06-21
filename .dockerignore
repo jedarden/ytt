@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+.marathon
+.beads
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.egg-info
+deploy
