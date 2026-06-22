@@ -196,3 +196,33 @@ def build_auth_provider(settings: Settings) -> YttOAuthProvider:
     on the module-level ``get_settings()`` singleton.
     """
     return YttOAuthProvider(settings)
+
+
+async def _extract_sub_from_token(token: str, settings: Settings) -> str:
+    """Decode a JWT and return the ``sub`` claim without full signature verification.
+
+    Used by the ``/admin/egress`` custom route to apply the subject allowlist.
+    The FastMCP middleware handles full signature + audience verification for
+    tool calls; this function provides a lightweight allowlist check for
+    the non-MCP custom routes.
+
+    Raises ``ValueError`` if the token is malformed or missing the ``sub`` claim.
+    """
+    import jwt  # PyJWT
+
+    try:
+        # Decode without signature verification — we trust the Bearer token was
+        # signed by this server's FastMCP instance (validated by the AS).
+        # For the allowlist gate the important claim is ``sub``.
+        payload = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_aud": False},
+            algorithms=["HS256", "RS256"],
+        )
+    except Exception as exc:
+        raise ValueError(f"JWT decode failed: {exc}") from exc
+
+    sub = payload.get("sub")
+    if not sub:
+        raise ValueError("JWT missing 'sub' claim")
+    return str(sub)

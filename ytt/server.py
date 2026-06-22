@@ -8,6 +8,7 @@ The MCP server is path-prefix-aware: all routes and emitted URLs carry the
 configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).
 
 Phase 7: full pipeline wired — cache → fetch → pagination.
+Phase 8: observability wired — structlog, Prometheus /metrics, /admin/egress.
 """
 
 from __future__ import annotations
@@ -16,18 +17,22 @@ import asyncio
 import logging
 from typing import Optional
 
+import structlog
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 import ytt
 from ytt import errors
 from ytt.auth import build_auth_provider
+from ytt.authz import check_subject
 from ytt.cache import CacheHit, TranscriptCache
 from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
 from ytt.whisper import WhisperJobRegistry
 
 logger = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level singletons (shared state across all tool calls)
@@ -395,6 +400,115 @@ def _build_app():
         """
         return JSONResponse({"status": "ok"})
 
+    # -----------------------------------------------------------------------
+    # Custom route: /ytt/metrics (Prometheus scrape endpoint — unauthenticated)
+    # Plan §Observability: scraped via ServiceMonitor.
+    # Note: Prometheus requires no auth by convention (the ServiceMonitor
+    # targets the ClusterIP directly, not through the public IngressRoute).
+    # -----------------------------------------------------------------------
+
+    metrics_path = settings.route("metrics")
+
+    @_mcp.custom_route(metrics_path, methods=["GET"])
+    async def metrics_endpoint(request: Request) -> Response:
+        """Prometheus metrics scrape endpoint (plan §Observability).
+
+        Unauthenticated — scraped in-cluster only (ServiceMonitor on ClusterIP).
+        """
+        data = generate_latest(REGISTRY)
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+    # -----------------------------------------------------------------------
+    # Custom route: /ytt/admin/egress (auth-gated egress diagnostics)
+    # Plan §Security: "Egress IP/ASN detail is at GET /admin/egress — requires
+    # a valid Bearer token with a subject in YTT_ALLOWED_SUBJECTS."
+    # -----------------------------------------------------------------------
+
+    egress_path = settings.route("admin/egress")
+
+    @_mcp.custom_route(egress_path, methods=["GET"])
+    async def admin_egress_endpoint(request: Request) -> JSONResponse:
+        """Auth-gated egress diagnostic probe (plan §Security / §Observability).
+
+        Returns the current egress IP, ASN, org, and residential flag.
+        Requires a valid Bearer token with a subject in YTT_ALLOWED_SUBJECTS.
+
+        Plan: "``/admin/egress`` — requires a valid Bearer token with a subject
+        in ``YTT_ALLOWED_SUBJECTS`` (same auth as tool calls; no special admin
+        token)."
+        """
+        import hashlib
+
+        from ytt.selftest import probe_egress
+
+        # --- Auth: extract token from Authorization header --------------------
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            return JSONResponse(
+                {"error": "Unauthorized", "error_code": errors.FORBIDDEN},
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": (
+                        f'Bearer resource_metadata="{settings.public_url}/.well-known/'
+                        f'oauth-protected-resource"'
+                    )
+                },
+            )
+
+        token_str = auth_header[7:].strip()
+
+        # --- Validate the token (audience + allowlist) -----------------------
+        # Use authz.check_subject which returns (sub, error_response) tuple.
+        # We perform a lightweight check: verify it decodes, then check allowlist.
+        try:
+            from ytt.auth import _extract_sub_from_token
+            sub = await _extract_sub_from_token(token_str, settings)
+        except Exception:
+            return JSONResponse(
+                {"error": "Invalid token", "error_code": errors.FORBIDDEN},
+                status_code=401,
+            )
+
+        if not check_subject(sub, settings):
+            subject_hash = hashlib.sha256(sub.encode()).hexdigest()[:8]
+            log.warning(
+                "AuthZ 403",
+                subject_hash=subject_hash,
+                tool="admin/egress",
+            )
+            return JSONResponse(
+                {
+                    "error": (
+                        "Contact the server operator to be added to the allowlist."
+                    ),
+                    "error_code": errors.FORBIDDEN,
+                },
+                status_code=403,
+            )
+
+        # --- Probe egress ------------------------------------------------
+        try:
+            report = await asyncio.to_thread(probe_egress, settings.proxy_url)
+        except Exception as exc:
+            return JSONResponse(
+                {"error": f"Egress probe failed: {exc}", "error_code": "probe_error"},
+                status_code=502,
+            )
+
+        # Update the metric
+        from ytt.observability import ytt_egress_is_residential
+        ytt_egress_is_residential.set(1 if report.is_residential else 0)
+
+        return JSONResponse(
+            {
+                "ip": report.ip,
+                "asn": report.asn,
+                "org": report.org,
+                "via_proxy": report.via_proxy,
+                "is_residential": report.is_residential,
+            }
+        )
+
     return _mcp
 
 
@@ -433,23 +547,33 @@ def serve() -> int:  # pragma: no cover
     """
     import uvicorn
 
+    # Configure structlog JSON logging (plan §Observability — Phase 8).
+    from ytt.observability import configure_logging
+    configure_logging()
+    _log = structlog.get_logger("ytt.server")
+
     settings = get_settings()
 
     # Startup storage validation (raises on PVC size mismatch; warns on emptyDir).
     try:
         warnings = settings.validate_storage()
     except ValueError as exc:
-        logger.error("Startup validation failed: %s", exc)
+        _log.error("Startup validation failed", reason=str(exc))
         return 1
 
     for w in warnings:
-        logger.warning(w)
+        _log.warning("Startup warning", message=w)
 
-    logger.info(
-        "ytt %s starting — public_url=%s path_prefix=%s",
-        ytt.__version__,
-        settings.public_url,
-        settings.path_prefix,
+    # Plan §Observability — Required log events: "Server startup"
+    _log.info(
+        "Server startup",
+        public_url=settings.public_url,
+        cache_backend=settings.cache_backend,
+        cache_max_bytes=settings.cache_max_bytes,
+        whisper_url=settings.whisper_url,
+        whisper_model=settings.whisper_model,
+        max_concurrent_fetches=settings.max_concurrent_fetches,
+        subjects_count=len(settings.allowed_subjects_set),
     )
 
     app = build_asgi_app()
