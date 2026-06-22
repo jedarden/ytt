@@ -1,0 +1,79 @@
+---
+# ytt canary Deployment (plan §Observability / §Canary):
+# "a long-running probe Deployment (no K8s Jobs — plan §Infrastructure constraint)
+# runs canary.py — which calls yt-dlp directly (the same code path as fetch.py,
+# not via the HTTP tool endpoint) using a fixed internal video list."
+# Interval: 10 min (YTT_CANARY_INTERVAL_SEC=600).
+# Exposes /metrics on :8081 scraped by the ytt-canary ServiceMonitor.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: canary
+    app: ytt-canary
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytt-canary
+  template:
+    metadata:
+      labels:
+        app: ytt-canary
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: canary
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: canary
+          image: ghcr.io/jedarden/ytt:0.1.0   # same image as main server
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "ytt.canary"]
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: YTT_CANARY_INTERVAL_SEC
+              value: "600"
+            - name: YTT_PROXY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: proxy_url
+                  optional: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+# ClusterIP Service for ytt-canary metrics (scraped by canary ServiceMonitor).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: canary
+    app: ytt-canary
+spec:
+  type: ClusterIP
+  selector:
+    app: ytt-canary
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: 8081
+      protocol: TCP

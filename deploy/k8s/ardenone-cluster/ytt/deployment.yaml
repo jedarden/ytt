@@ -1,0 +1,171 @@
+---
+# ytt MCP server Deployment (plan: "replicas:1, strategy:Recreate, port 8080,
+# ephemeral-storage limit, scratch+cache volumes").
+# Single replica is a hard constraint (plan §Design constraints):
+#   "All coordination (job registry, single-flight, cache byte-counter)
+#   is in-process; correct only at replicas: 1. Scale-out is a redesign."
+# Image: ghcr.io/jedarden/ytt — public GHCR (plan §Image publishing).
+# The tag is bumped automatically by the ytt-build WorkflowTemplate on each CI run.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: server
+    app: ytt
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    # in-process state; no rolling update (plan §Design constraints)
+  selector:
+    matchLabels:
+      app: ytt
+  template:
+    metadata:
+      labels:
+        app: ytt
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: server
+      annotations:
+        # Trigger pod restart when the Secret changes (checksum-based reload).
+        # Argo/Kustomize can compute this; as a placeholder we set a static marker.
+        # In practice, ESO updates the Secret → ArgoCD detects drift → sync restarts pod.
+        prometheus.io/scrape: "false"   # scraped via ServiceMonitor, not annotation
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: ytt
+          # TODO(marathon): replace with a pinned digest once CI runs:
+          #   ghcr.io/jedarden/ytt@sha256:<digest>
+          image: ghcr.io/jedarden/ytt:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          command: ["ytt", "serve"]
+          env:
+            # --- Required path/URL config ---
+            - name: YTT_PUBLIC_URL
+              value: "https://mcp.ardenone.com/ytt"
+            - name: YTT_PATH_PREFIX
+              value: "/ytt/"
+
+            # --- Cache ---
+            - name: YTT_CACHE_BACKEND
+              value: "pvc"
+            - name: YTT_CACHE_DIR
+              value: "/cache"
+            - name: YTT_CACHE_MAX_BYTES
+              value: "2Gi"
+            - name: YTT_CACHE_RECONCILE_SEC
+              value: "300"
+
+            # --- Scratch (audio temp) ---
+            - name: YTT_SCRATCH_DIR
+              value: "/scratch"
+            - name: YTT_MAX_AUDIO_BYTES
+              value: "500Mi"
+
+            # --- Concurrency ---
+            - name: YTT_MAX_CONCURRENT_FETCHES
+              value: "4"
+            - name: YTT_MAX_CONCURRENT_WHISPER
+              value: "1"
+
+            # --- Whisper ---
+            - name: YTT_WHISPER_URL
+              value: "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
+            - name: YTT_WHISPER_MODEL
+              value: "Systran/faster-whisper-small"
+            - name: YTT_WHISPER_REALTIME_FACTOR
+              value: "1.2"
+            - name: YTT_WHISPER_TIMEOUT_SEC
+              value: "2880"
+            - name: YTT_MAX_ASR_DURATION_SEC
+              value: "1200"
+
+            # --- Rate limiting ---
+            - name: YTT_RATE_LIMIT_PER_MIN
+              value: "20"
+            - name: YTT_WHISPER_JOBS_PER_HOUR
+              value: "10"
+
+            # --- Pagination ---
+            - name: YTT_INLINE_CHAR_LIMIT
+              value: "18000"
+            - name: YTT_CHUNK_CHARS
+              value: "18000"
+
+            # --- Secrets from ExternalSecret ---
+            - name: YTT_ALLOWED_SUBJECTS
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: allowed_subjects
+            - name: YTT_PROXY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: proxy_url
+                  optional: true    # may be empty
+
+            # OAuth client credentials (used by FastMCP AS internally)
+            - name: YTT_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: oauth_client_id
+            - name: YTT_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: oauth_client_secret
+
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: scratch
+              mountPath: /scratch
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "100Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+              ephemeral-storage: "500Mi"   # code + uvicorn; scratch is a separate emptyDir
+
+          livenessProbe:
+            httpGet:
+              path: /ytt/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ytt/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: ytt-cache
+        - name: scratch
+          emptyDir:
+            sizeLimit: "600Mi"   # slightly over YTT_MAX_AUDIO_BYTES for headroom
+
+      # No imagePullSecret needed — ghcr.io/jedarden/ytt is a public package.

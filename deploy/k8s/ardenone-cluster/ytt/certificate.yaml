@@ -1,0 +1,22 @@
+---
+# cert-manager Certificate for mcp.ardenone.com in the ytt namespace.
+# Plan §Deployment: "cert-manager Certificate for CN mcp.ardenone.com via
+# ardenone-ca-issuer ClusterIssuer → secret mcp-ardenone-com-tls in the ytt namespace.
+# Secrets are namespaced; ytt needs its own copy even though ibkr has one
+# for the same host."
+# This is the origin cert (cloudflared→Traefik); Claude sees Cloudflare's edge cert.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mcp-ardenone-com-tls
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: tls
+spec:
+  secretName: mcp-ardenone-com-tls
+  issuerRef:
+    name: ardenone-ca-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - mcp.ardenone.com

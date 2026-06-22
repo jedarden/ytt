@@ -1,0 +1,101 @@
+---
+# PrometheusRule — ytt-specific alerts (plan §Observability).
+# promtool check rules must pass on this file.
+#
+# Alert descriptions:
+#   YttHomeIPBurned        — fetch block rate > 5 errors/min → home IP likely burned
+#   YttWhisperDown         — sustained Whisper errors → whisper-openai service is down
+#   YttCacheUndersized     — sustained evictions → YTT_CACHE_MAX_BYTES too small
+#   YttEgressNotResidential — egress IP classified as datacenter → residential assumption broken
+#   YttCanaryFailed        — canary probe missed 3 consecutive 10-min windows (1800 s)
+#
+# Route: via the cluster's existing Alertmanager receiver (ardenone-cluster norm).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: alerts
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: ytt.rules
+      interval: 60s
+      rules:
+        # --- Home IP burned (block rate spike) ---
+        - alert: YttHomeIPBurned
+          expr: |
+            rate(ytt_fetch_blocks_total{outcome="ip_blocked"}[5m]) * 60 > 5
+          for: 5m
+          labels:
+            severity: critical
+            namespace: ytt
+          annotations:
+            summary: "ytt: home IP may be burned (ip_blocked rate > 5/min)"
+            description: >
+              The ytt server is seeing > 5 ip_blocked errors per minute over a
+              5-minute window.  The ardenone-cluster residential IP may have been
+              detected and temporarily blocked by YouTube.  Consider setting
+              YTT_PROXY_URL to a residential proxy (Webshare) as a temporary
+              fallback.  Check /admin/egress for current IP/ASN.
+
+        # --- Whisper service down ---
+        - alert: YttWhisperDown
+          expr: |
+            rate(ytt_whisper_errors_total[10m]) * 60 > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt: Whisper ASR errors sustained — whisper-openai may be down"
+            description: >
+              ytt is seeing sustained Whisper errors (>0.5 errors/min for 10 min).
+              Check the whisper-openai deployment in ns whisper-stt.
+
+        # --- Cache undersized ---
+        - alert: YttCacheUndersized
+          expr: |
+            rate(ytt_cache_evictions_total[10m]) * 60 > 10
+          for: 15m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt: cache eviction rate sustained — cache may be undersized"
+            description: >
+              The ytt cache is evicting > 10 units/min for 15+ minutes.
+              Consider increasing YTT_CACHE_MAX_BYTES or the PVC size.
+
+        # --- Egress not residential ---
+        - alert: YttEgressNotResidential
+          expr: ytt_egress_is_residential == 0
+          for: 5m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt: egress IP classified as non-residential"
+            description: >
+              The residential-egress assumption has been violated.
+              The egress probe reports is_residential=0.
+              Fetch blocks may spike.  Check /admin/egress for details.
+
+        # --- Canary failed (3 consecutive 10-min probes missed = 1800 s) ---
+        - alert: YttCanaryFailed
+          expr: |
+            time() - ytt_canary_last_success_timestamp_seconds > 1800
+          for: 0m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt canary: 3 consecutive probes missed (>30 min since last success)"
+            description: >
+              The ytt canary Deployment has not successfully fetched a caption
+              from a known-stable video for > 1800 s (3 × 10-min probe intervals).
+              This usually means residential egress is blocked or yt-dlp broke.
+              Check the canary pod logs in ns ytt.

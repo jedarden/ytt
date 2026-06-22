@@ -1,0 +1,78 @@
+---
+# Traefik IngressRoute for ytt (plan §Deployment: "IngressRoute on
+# Host(mcp.ardenone.com) + PathPrefix(/ytt) and PathPrefix(/.well-known/oauth-*/ytt)").
+#
+# .well-known routing strategy (plan §Deployment / .well-known handling):
+#   - ibkr has a broad rule: PathPrefix(`/.well-known`) at default priority (no explicit).
+#   - ytt adds TWO more-specific rules for its own suffixes with priority: 1000
+#     (plan: "ibkr has no explicit priority; Traefik auto-computes from rule string
+#     length ~80 chars → ~80 priority. Use 1000 for a wide, stable margin.")
+#   - Traefik routes only ytt's .well-known/{resource,as}/ytt to ytt.
+#   - ibkr's broad /.well-known rule continues to serve ibkr's suffixes + bare-root.
+#   - ibkr's manifests are NOT edited (additive interception — do-no-harm).
+#
+# Verification (plan §Deployment, step 2):
+#   curl https://mcp.ardenone.com/.well-known/oauth-protected-resource/ytt
+#   → {"resource": "https://mcp.ardenone.com/ytt", ...}
+#   curl https://mcp.ardenone.com/.well-known/oauth-protected-resource/ibkr
+#   → byte-for-byte unchanged from pre-ytt baseline
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: ingress
+  annotations:
+    # external-dns auto-creates the DNS CNAME → existing Cloudflare tunnel.
+    # SAME target as ibkr (the shared tunnel); no new tunnel needed.
+    external-dns.alpha.kubernetes.io/hostname: mcp.ardenone.com
+    external-dns.alpha.kubernetes.io/target: 062c8e8a-8c15-4afb-ad08-9430743550fe.cfargotunnel.com
+spec:
+  entryPoints:
+    - websecure
+    - vpn
+  routes:
+    # --- Main ytt path ---
+    # All tool calls, /health, /metrics, /admin/egress, /mcp, and OIDC-appended
+    # .well-known (/.well-known/openid-configuration under /ytt) land here.
+    - match: Host(`mcp.ardenone.com`) && PathPrefix(`/ytt`)
+      kind: Rule
+      middlewares:
+        - name: ytt-sse
+          namespace: ytt
+        - name: ytt-cors
+          namespace: ytt
+      services:
+        - name: ytt
+          port: 8080
+
+    # --- Path-inserted .well-known/oauth-protected-resource/ytt ---
+    # RFC 9728: PRM at the host root with the resource path appended.
+    # Priority 1000 > ibkr's auto-computed ~80 → ytt handles only /ytt suffix.
+    - match: Host(`mcp.ardenone.com`) && PathPrefix(`/.well-known/oauth-protected-resource/ytt`)
+      kind: Rule
+      priority: 1000
+      middlewares:
+        - name: ytt-cors
+          namespace: ytt
+      services:
+        - name: ytt
+          port: 8080
+
+    # --- Path-inserted .well-known/oauth-authorization-server/ytt ---
+    # RFC 8414: AS metadata at host root + resource path.
+    # Same priority strategy as above.
+    - match: Host(`mcp.ardenone.com`) && PathPrefix(`/.well-known/oauth-authorization-server/ytt`)
+      kind: Rule
+      priority: 1000
+      middlewares:
+        - name: ytt-cors
+          namespace: ytt
+      services:
+        - name: ytt
+          port: 8080
+
+  tls:
+    secretName: mcp-ardenone-com-tls

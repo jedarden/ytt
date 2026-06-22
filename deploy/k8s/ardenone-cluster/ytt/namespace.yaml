@@ -1,0 +1,11 @@
+---
+# ytt namespace (plan: "ApplicationSet auto-discovers k8s/ardenone-cluster/ytt/",
+# CreateNamespace=true in the ApplicationSet policy — this file is belt-and-
+# suspenders for manual applies and lint passes).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/managed-by: argocd

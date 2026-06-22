@@ -1,0 +1,74 @@
+---
+# ytt-test Deployment (plan §Phase 9: "Harness = ytt test --integration via
+# kubectl exec into the pod or the ytt-test Deployment (no Jobs)").
+# This Deployment runs a long-lived sleep loop so that integration tests can be
+# executed via `kubectl exec`:
+#
+#   kubectl exec -n ytt deploy/ytt-test -- ytt test --integration
+#
+# It has in-cluster connectivity to the ytt ClusterIP Service and to
+# whisper-openai, so integration tests run against the real in-cluster stack.
+#
+# Environment variables for the integration suite:
+#   YTT_TEST_BASE_URL    → http://ytt.ytt.svc:8080  (ytt ClusterIP, not Traefik)
+#   YTT_TEST_TOKEN       → set via an ExternalSecret referencing the same
+#                          allowed-subjects secret used by the server; must be a
+#                          valid bearer token. (Alternatively: run `ytt selftest
+#                          --show-sub` after completing OAuth and use that sub.)
+#
+# NOTE: YTT_TEST_TOKEN is a pre-obtained OAuth bearer token. Obtain it by:
+#   1. Completing the OAuth flow from Claude Desktop (adds the connector).
+#   2. Running `ytt selftest --show-sub` in the main ytt pod to get the sub.
+#   3. Generating a token for that sub via the FastMCP AS (use `ytt serve` with
+#      the sub allowlisted, then call the /authorize flow manually).
+#   For CI use, generate a long-lived test token and store in OpenBao.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-test
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: test
+    app: ytt-test
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytt-test
+  template:
+    metadata:
+      labels:
+        app: ytt-test
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: test
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: ytt-test
+          image: ghcr.io/jedarden/ytt:0.1.0   # same image — has pytest + all deps
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]       # wait for kubectl exec
+          env:
+            - name: YTT_TEST_BASE_URL
+              value: "http://ytt.ytt.svc:8080"
+            - name: YTT_TEST_IBKR_BASE_URL
+              value: "http://ibkr-mcp.ibkr-mcp.svc:8080"
+            - name: YTT_TEST_PUBLIC_BASE
+              value: "https://mcp.ardenone.com"
+            # YTT_TEST_TOKEN must be injected; use a Secret or supply manually.
+            # Example (once token is available):
+            #   kubectl exec -n ytt deploy/ytt-test -c ytt-test -- \
+            #     env YTT_TEST_TOKEN=<token> ytt test --integration
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

@@ -1,0 +1,99 @@
+---
+# NetworkPolicy for ytt (plan §Security: "egress NetworkPolicy — restrict pod egress
+# to YouTube/googlevideo, whisper-openai.whisper-stt.svc, Cloudflare, ipinfo.io;
+# deny the rest. Always allow port 53 UDP+TCP to all namespaces (kube-dns) for
+# hostname resolution — without it, all name-based egress rules silently fail.
+# Mirror ibkr-mcp's DNS egress rule.")
+#
+# NOTE: over-tight egress mimics IP-burn in metrics. Start with this permissive
+# baseline (DNS + broad HTTPS + Whisper) and tighten with DNS logs once stable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app: ytt
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Accept traffic from Traefik (IngressRoute) and from in-cluster (Prometheus scrape).
+    - {}   # allow all ingress — Traefik + Prometheus must reach the pod.
+
+  egress:
+    # --- DNS (CRITICAL — must be first; without this ALL name resolution fails) ---
+    # Plan: "Always allow port 53 UDP+TCP to all namespaces (kube-dns)".
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # --- whisper-openai (Whisper ASR) ---
+    # Plan: "NetworkPolicy allows egress to whisper-openai in ns whisper-stt".
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: whisper-stt
+          podSelector:
+            matchLabels:
+              app: whisper-openai
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # --- YouTube + googlevideo (caption/audio downloads via yt-dlp) ---
+    # YouTube uses many IPs; allow all HTTPS egress from the pod.
+    # Tighten to specific CIDRs after observing DNS queries with a log tool.
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
+    # --- ipinfo.io (egress IP detection for /admin/egress) ---
+    # Already covered by the broad HTTPS egress above.
+    # Listed here as documentation of the intended egress target.
+
+    # --- kube-apiserver (internal, if needed) ---
+    # Not required for ytt — no cluster API calls at runtime.
+
+---
+# NetworkPolicy for ytt-canary (same egress needs: yt-dlp + DNS only).
+# Canary runs yt-dlp directly without Whisper — but allow Whisper just in case.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: networkpolicy-canary
+spec:
+  podSelector:
+    matchLabels:
+      app: ytt-canary
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - {}   # Prometheus scrapes canary /metrics on :8081
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80

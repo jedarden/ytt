@@ -1,0 +1,186 @@
+---
+# ytt CI WorkflowTemplate for iad-ci (plan §CI/CD / §Deliverables).
+# Modeled on `telegram-claude-bridge-build` + `forge-ci` patterns in
+# jedarden/declarative-config.
+#
+# Steps:
+#   1. test    — run pytest unit suite (pytest -m "not integration" -q)
+#   2. build   — docker build (multi-stage Dockerfile: pytest gate inside build)
+#   3. push    — push to ghcr.io/jedarden/ytt:<tag> (public GHCR)
+#   4. bump    — auto-bump the image tag in declarative-config k8s/ardenone-cluster/ytt/
+#
+# GHCR credential (plan §Deliverables):
+#   If iad-ci has ESO: use an ExternalSecret from OpenBao.
+#   If iad-ci does NOT have ESO (likely — CI cluster): create a Kubernetes Secret directly:
+#     kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+#       create secret generic ghcr-push-token \
+#       --from-literal=token="<github-token-with-write:packages>" \
+#       -n argo-workflows
+#
+# GitHub Actions stay DISABLED across all repos (fleet-wide constraint).
+# The build runs on Argo and pushes to GHCR using the token above.
+#
+# NOTE: Never use :latest for the cluster manifest — always pin a semver tag.
+# The :latest tag may be pushed for external convenience but is never used in
+# k8s/ardenone-cluster/ytt/deployment.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ytt-build
+  namespace: argo-workflows
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: ci
+spec:
+  arguments:
+    parameters:
+      - name: tag
+        value: "0.1.0"
+      - name: ref
+        value: "refs/heads/main"
+      - name: repo_url
+        value: "https://git.ardenone.com/jedarden/ytt.git"
+
+  entrypoint: ytt-build-pipeline
+
+  templates:
+    - name: ytt-build-pipeline
+      steps:
+        - - name: test
+            template: run-unit-tests
+        - - name: build-and-push
+            template: docker-build-push
+            arguments:
+              parameters:
+                - name: tag
+                  value: "{{workflow.parameters.tag}}"
+                - name: ref
+                  value: "{{workflow.parameters.ref}}"
+        - - name: bump-tag
+            template: bump-declarative-config
+            arguments:
+              parameters:
+                - name: tag
+                  value: "{{workflow.parameters.tag}}"
+
+    # Step 1: Run the unit test suite inside the image being built.
+    # The Dockerfile multi-stage build already runs pytest; this step
+    # provides a fast fail before the expensive Docker build layer cache.
+    - name: run-unit-tests
+      container:
+        image: python:3.12-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            apt-get update -qq && apt-get install -y -qq git ffmpeg
+            pip install --quiet uv
+            git clone --depth=1 "{{workflow.parameters.repo_url}}" /src
+            cd /src
+            git checkout "{{workflow.parameters.ref}}" || true
+            uv sync --frozen
+            uv run pytest -m "not integration" -q
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+
+    # Step 2: Docker build + push to GHCR.
+    - name: docker-build-push
+      inputs:
+        parameters:
+          - name: tag
+          - name: ref
+      container:
+        image: gcr.io/kaniko-project/executor:latest
+        command: ["/kaniko/executor"]
+        args:
+          - "--context=git://git.ardenone.com/jedarden/ytt.git#{{inputs.parameters.ref}}"
+          - "--dockerfile=Dockerfile"
+          - "--destination=ghcr.io/jedarden/ytt:{{inputs.parameters.tag}}"
+          - "--destination=ghcr.io/jedarden/ytt:latest"
+          - "--build-arg=VERSION={{inputs.parameters.tag}}"
+          - "--label=org.opencontainers.image.source=https://github.com/jedarden/ytt"
+          - "--label=org.opencontainers.image.version={{inputs.parameters.tag}}"
+          - "--label=org.opencontainers.image.licenses=MIT"
+        env:
+          - name: DOCKER_CONFIG
+            value: /kaniko/.docker
+        volumeMounts:
+          - name: docker-config
+            mountPath: /kaniko/.docker
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+          limits:
+            cpu: "4"
+            memory: "4Gi"
+      volumes:
+        - name: docker-config
+          secret:
+            secretName: ghcr-push-token
+            items:
+              - key: token
+                path: config.json
+                # config.json format for kaniko GHCR auth:
+                # {"auths": {"ghcr.io": {"auth": "<base64(username:token)>"}}}
+                # The secret must be pre-formatted as a Docker config.json.
+                # Create it:
+                #   TOKEN=<github-token>
+                #   B64=$(echo -n "jedarden:${TOKEN}" | base64 -w0)
+                #   echo '{"auths":{"ghcr.io":{"auth":"'${B64}'"}}}' > /tmp/config.json
+                #   kubectl -n argo-workflows create secret generic ghcr-push-token \
+                #     --from-file=config.json=/tmp/config.json
+
+    # Step 3: Bump the image tag in declarative-config.
+    # Clones jedarden/declarative-config, updates the image line in
+    # k8s/ardenone-cluster/ytt/deployment.yaml, commits, and pushes.
+    # Modeled on the telegram-claude-bridge-build bump step.
+    - name: bump-declarative-config
+      inputs:
+        parameters:
+          - name: tag
+      container:
+        image: alpine/git:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            git config --global user.email "github@jedarden.com"
+            git config --global user.name "jedarden"
+
+            git clone https://git.ardenone.com/jedarden/declarative-config.git /dc
+            cd /dc
+
+            # Update the image tag in the Deployment manifest
+            DEPLOY_FILE="k8s/ardenone-cluster/ytt/deployment.yaml"
+            sed -i "s|image: ghcr.io/jedarden/ytt:.*|image: ghcr.io/jedarden/ytt:{{inputs.parameters.tag}}|g" \
+              "${DEPLOY_FILE}"
+
+            git add "${DEPLOY_FILE}"
+            git diff --cached --quiet && echo "No change (same tag)" && exit 0
+
+            git commit -m "ci: bump ytt image to {{inputs.parameters.tag}}"
+            git push
+        env:
+          - name: GIT_TERMINAL_PROMPT
+            value: "0"
+        volumeMounts:
+          - name: forgejo-creds
+            mountPath: /root/.git-credentials
+            subPath: .git-credentials
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+      volumes:
+        - name: forgejo-creds
+          secret:
+            secretName: forgejo-push-token   # pre-existing in argo-workflows ns
+            items:
+              - key: .git-credentials
+                path: .git-credentials

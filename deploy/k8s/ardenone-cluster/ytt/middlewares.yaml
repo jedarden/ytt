@@ -1,0 +1,39 @@
+---
+# Traefik Middleware: SSE unbuffering (plan §Deployment: "ytt-sse sets
+# X-Accel-Buffering: no + Cache-Control: no-cache to un-buffer Streamable HTTP").
+# Mirrors ibkr-mcp's stock-research SSE middleware.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ytt-sse
+  namespace: ytt
+spec:
+  headers:
+    customResponseHeaders:
+      X-Accel-Buffering: "no"
+      Cache-Control: "no-cache"
+---
+# Traefik Middleware: CORS (plan §Security:
+# "allow origins https://claude.ai + https://desktop.claude.ai + https://claude.com").
+# Includes https://claude.com because OAuth callback URLs originate there.
+# Mirrors ibkr-mcp's stock-research CORS middleware.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ytt-cors
+  namespace: ytt
+spec:
+  headers:
+    accessControlAllowOriginList:
+      - "https://claude.ai"
+      - "https://desktop.claude.ai"
+      - "https://claude.com"
+    accessControlAllowHeaders:
+      - "Authorization"
+      - "Content-Type"
+      - "Accept"
+    accessControlAllowMethods:
+      - "GET"
+      - "POST"
+      - "OPTIONS"
+    accessControlMaxAge: 86400

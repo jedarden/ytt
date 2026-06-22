@@ -1,0 +1,20 @@
+---
+# Persistent volume claim for the transcript cache (plan: "PVC, longhorn, 2Gi").
+# Storage class: longhorn (ardenone-cluster default; plan §Deployment notes).
+# YTT_CACHE_BACKEND=pvc tells the app to use this volume at /cache.
+# Invariant: YTT_CACHE_MAX_BYTES (2Gi) ≤ PVC capacity (2Gi) — validated at startup.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ytt-cache
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi

@@ -1,0 +1,22 @@
+---
+# ClusterIP Service for ytt (plan: "Service (ClusterIP :8080)").
+# The ServiceMonitor scrapes /ytt/metrics directly on this ClusterIP.
+# Traefik's IngressRoute routes /ytt public traffic to this Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: server
+    app: ytt
+spec:
+  type: ClusterIP
+  selector:
+    app: ytt
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

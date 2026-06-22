@@ -1,0 +1,72 @@
+---
+# Argo Events Sensor for ytt CI (plan §Deliverables:
+# "ytt-build Argo WorkflowTemplate + Sensor").
+# Listens for push events on jedarden/ytt from the Forgejo EventSource
+# and triggers the ytt-build WorkflowTemplate.
+#
+# Modeled on the existing sensors in k8s/iad-ci/argo-events/.
+# The Forgejo webhook EventSource (gitea-eventsource or similar) must already
+# be configured for the iad-ci cluster — if not, add it following the
+# telegram-claude-bridge pattern.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: ytt-build
+  namespace: argo-events
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: sensor
+spec:
+  template:
+    serviceAccountName: operate-workflow-sa
+
+  dependencies:
+    - name: ytt-push
+      eventSourceName: forgejo-push    # the existing Forgejo push EventSource
+      eventName: ytt                   # the event name registered in the EventSource
+
+  triggers:
+    - template:
+        name: trigger-ytt-build
+        k8s:
+          operation: create
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: ytt-build-
+                namespace: argo-workflows
+              spec:
+                workflowTemplateRef:
+                  name: ytt-build
+                arguments:
+                  parameters:
+                    - name: tag
+                      # Extract the tag from the push event.
+                      # For a refs/tags/v0.1.0 push, tag = "0.1.0".
+                      # For a refs/heads/main push, tag = "main-<short-sha>".
+                      value: "triggered"   # overridden by parameter substitution below
+                    - name: ref
+                      value: "refs/heads/main"
+                    - name: repo_url
+                      value: "https://git.ardenone.com/jedarden/ytt.git"
+          parameters:
+            - src:
+                dependencyName: ytt-push
+                dataKey: body.ref
+              dest: spec.arguments.parameters.1.value    # ref
+            - src:
+                dependencyName: ytt-push
+                dataTemplate: >
+                  {{- if hasPrefix "refs/tags/v" .Input.body.ref -}}
+                  {{- trimPrefix "refs/tags/v" .Input.body.ref -}}
+                  {{- else -}}
+                  {{- trimPrefix "refs/heads/" .Input.body.ref -}}-{{- .Input.body.head_commit.id | substr 0 7 -}}
+                  {{- end -}}
+              dest: spec.arguments.parameters.0.value    # tag
+
+      retryStrategy:
+        steps: 3
+        duration: 10s
+        factor: 2

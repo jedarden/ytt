@@ -1,0 +1,45 @@
+---
+# ServiceMonitor for the ytt main server (plan §Observability:
+# "scraped via a ServiceMonitor — Prometheus-operator is present on the cluster").
+# Scrapes /ytt/metrics on the ClusterIP, no auth (Prometheus in-cluster only).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: monitoring
+    # Label must match the Prometheus operator's serviceMonitorSelector.
+    # ardenone-cluster convention — mirror ibkr-mcp's label.
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: ytt
+  endpoints:
+    - port: http
+      path: /ytt/metrics
+      interval: 30s
+      scrapeTimeout: 10s
+---
+# ServiceMonitor for the ytt-canary Deployment (plan §Observability / §Canary).
+# Canary exposes /metrics on port 8081 (separate port from the main server).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: monitoring-canary
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: ytt-canary
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 60s
+      scrapeTimeout: 10s
