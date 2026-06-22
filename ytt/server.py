@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import ytt
+from ytt.auth import build_auth_provider
 from ytt.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,13 @@ def _build_app():
     """
     from fastmcp import FastMCP  # deferred so unit tests can mock if needed
 
+    settings = get_settings()
+    _auth = build_auth_provider(settings)
+
     _mcp = FastMCP(
         name="ytt",
         version=ytt.__version__,
+        auth=_auth,
         instructions=(
             "YouTube Transcript MCP server. "
             "Pass any YouTube URL directly — messy URLs with extra parameters, "
@@ -135,7 +140,6 @@ def _build_app():
     # Plan: "Public /ytt/health returns only liveness (matches ibkr's /ibkr/health)"
     # -----------------------------------------------------------------------
 
-    settings = get_settings()
     health_path = settings.route("health")
 
     @_mcp.custom_route(health_path, methods=["GET"])

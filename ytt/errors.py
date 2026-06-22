@@ -38,6 +38,8 @@ ASR_FAILED = "asr_failed"
 # Logical errors emitted by get_transcript_job (not from yt-dlp string parsing):
 NOT_FOUND = "not_found"
 CURSOR_STALE = "cursor_stale"
+# AuthZ errors:
+FORBIDDEN = "forbidden"  # subject not in allowlist (403)
 
 # WhisperJob-internal / metric-only labels (NOT TranscriptResult error_codes):
 NO_CAPTIONS_ASR_STARTED = "no_captions_asr_started"
