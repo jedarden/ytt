@@ -7,22 +7,29 @@ Builds the FastMCP app (Streamable HTTP), registers the two tools
 The MCP server is path-prefix-aware: all routes and emitted URLs carry the
 configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).  OAuth / auth middleware,
 ``.well-known`` path-insertion, and real tool logic are wired in Phases 5–7.
-This is the Phase 1 skeleton.
+Phase 6 wires the WhisperJobRegistry into ``get_transcript_job``.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 import ytt
+from ytt import errors
 from ytt.auth import build_auth_provider
 from ytt.config import get_settings
+from ytt.whisper import WhisperJobRegistry
 
 logger = logging.getLogger(__name__)
+
+# Module-level Whisper job registry — shared between tool calls.
+# Starts empty; jobs are added by get_youtube_transcript when Whisper ASR starts.
+whisper_registry = WhisperJobRegistry()
 
 
 # ---------------------------------------------------------------------------
@@ -122,16 +129,97 @@ def _build_app():
     ) -> dict:
         """Poll the WhisperJob registry for a running/done job.
 
-        Phase 1 stub: returns not_found until Phase 6 wires the real registry.
+        Plan §Whisper fallback — job state machine:
+        - pending/running: return status + ETA.
+        - error: return status=error + error_code + message.
+        - done: Phase 6 stub — return status=ok with text=None and a message
+          instructing the caller to re-call get_youtube_transcript. Phase 7
+          replaces this with actual transcript delivery via the chunking/cursor layer.
+        - not found: return not_found with re-call instruction.
         """
-        # TODO(phase-6): look up the WhisperJob registry; return result when done.
+        job = await whisper_registry.get(video_id)
+        if job is None:
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": errors.NOT_FOUND,
+                "message": (
+                    "Job not found. Re-call get_youtube_transcript with the video URL "
+                    "to start a new request."
+                ),
+            }
+
+        if job.status == "pending":
+            return {
+                "video_id": video_id,
+                "status": "pending",
+                "eta_sec": job.eta_sec,
+                "message": (
+                    "Transcription is queued. "
+                    + (
+                        f"Estimated time: ~{job.eta_sec:.0f}s. "
+                        if job.eta_sec is not None
+                        else ""
+                    )
+                    + "Ask me again shortly."
+                ),
+            }
+
+        if job.status == "running":
+            return {
+                "video_id": video_id,
+                "status": "running",
+                "eta_sec": job.eta_sec,
+                "message": (
+                    "Transcription is in progress. "
+                    + (
+                        f"Estimated time remaining: ~{job.eta_sec:.0f}s. "
+                        if job.eta_sec is not None
+                        else ""
+                    )
+                    + "Ask me again shortly."
+                ),
+            }
+
+        if job.status == "error":
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": job.error_code or errors.ASR_FAILED,
+                "message": job.message or (
+                    "Transcription failed. Re-call get_youtube_transcript "
+                    "with the video URL to retry."
+                ),
+            }
+
+        # status == "done"
+        # Phase 6 stub: evicted-result check + done stub.
+        # TODO(phase-7): replace with actual transcript delivery via chunking/cursor layer.
+        if job.result_ref is not None:
+            # Check if the cache file is still present (evicted between done and poll)
+            # result_ref = "<video_id>.whisper" → cache file is "<video_id>.whisper.txt"
+            settings = get_settings()
+            cache_txt = Path(settings.cache_dir) / f"{job.result_ref}.txt"
+            if not cache_txt.exists():
+                # Evicted between job completion and polling
+                await whisper_registry.remove(video_id)
+                return {
+                    "video_id": video_id,
+                    "status": "error",
+                    "error_code": errors.NOT_FOUND,
+                    "message": (
+                        "Transcript was cached but has been evicted. "
+                        "Re-call get_youtube_transcript to re-fetch."
+                    ),
+                }
+
         return {
             "video_id": video_id,
-            "status": "error",
-            "error_code": "not_found",
+            "status": "ok",
+            "text": None,
+            "segments": None,
             "message": (
-                "Job not found. Re-call get_youtube_transcript with the video URL "
-                "to start a new request."
+                "Transcript ready; call get_youtube_transcript again to retrieve it."
             ),
         }
 
