@@ -1,0 +1,10 @@
+{
+  "_comment": "Manual (human-uploaded) caption track json3 fixture. Events are clean, non-overlapping, non-rolling. No dedup needed — parse_json3 straight-concats, producing one Segment per event.",
+  "_reference_output": ["Welcome to the video.", "In this lesson we will cover three topics.", "Thank you for watching."],
+  "events": [
+    {"tStartMs": 0, "dDurationMs": 3000, "segs": [{"utf8": "Welcome"}, {"utf8": " to"}, {"utf8": " the"}, {"utf8": " video"}, {"utf8": ".", "pAppend": 1}]},
+    {"tStartMs": 0, "dDurationMs": 10000, "segs": [{"utf8": "\n"}]},
+    {"tStartMs": 3500, "dDurationMs": 5000, "segs": [{"utf8": "In"}, {"utf8": " this"}, {"utf8": " lesson"}, {"utf8": " we"}, {"utf8": " will"}, {"utf8": " cover"}, {"utf8": " three"}, {"utf8": " topics"}, {"utf8": ".", "pAppend": 1}]},
+    {"tStartMs": 10000, "dDurationMs": 4000, "segs": [{"utf8": "Thank"}, {"utf8": " you"}, {"utf8": " for"}, {"utf8": " watch"}, {"utf8": "ing", "aAppend": 1}, {"utf8": ".", "pAppend": 1}]}
+  ]
+}

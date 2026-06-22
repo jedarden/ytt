@@ -1,0 +1,19 @@
+{
+  "_comment": "Rolling ASR json3 fixture. Each speech-window group starts with an event at tStartMs=GROUP_START; subsequent events in the same group have increasing tStartMs but still within [GROUP_START, GROUP_START+dDurationMs). Naive concat of all events doubles every word; parse_json3 dedup must emit exactly 3 text segments matching _reference_output.",
+  "_reference_output": ["This is a test", "of the dedup algorithm", "works"],
+  "_reference_joined": "This is a test of the dedup algorithm works",
+  "events": [
+    {"tStartMs": 0, "dDurationMs": 10000, "segs": [{"utf8": "\n"}]},
+    {"tStartMs": 100, "dDurationMs": 3900, "segs": [{"utf8": "This"}, {"utf8": " is"}, {"utf8": " a"}, {"utf8": " test"}]},
+    {"tStartMs": 850,  "dDurationMs": 3150, "segs": [{"utf8": "is"}, {"utf8": " a"}, {"utf8": " test"}]},
+    {"tStartMs": 1600, "dDurationMs": 2400, "segs": [{"utf8": "a"}, {"utf8": " test"}]},
+    {"tStartMs": 2850, "dDurationMs": 1150, "segs": [{"utf8": "test"}]},
+    {"tStartMs": 4000, "dDurationMs": 4500, "segs": [{"utf8": "of"}, {"utf8": " the"}, {"utf8": " dedup"}, {"utf8": " algorithm"}]},
+    {"tStartMs": 5100, "dDurationMs": 3400, "segs": [{"utf8": "the"}, {"utf8": " dedup"}, {"utf8": " algorithm"}]},
+    {"tStartMs": 6200, "dDurationMs": 2300, "segs": [{"utf8": "dedup"}, {"utf8": " algorithm"}]},
+    {"tStartMs": 7400, "dDurationMs": 1100, "segs": [{"utf8": "algorithm"}]},
+    {"tStartMs": 8500, "dDurationMs": 2000, "segs": [{"utf8": "works"}]},
+    {"tStartMs": 9000, "dDurationMs": 1500, "segs": [{"utf8": "works"}]},
+    {}
+  ]
+}
