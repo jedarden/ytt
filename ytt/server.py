@@ -5,15 +5,15 @@ Builds the FastMCP app (Streamable HTTP), registers the two tools
 ``/health`` route (unauthenticated), and runs uvicorn with a single worker.
 
 The MCP server is path-prefix-aware: all routes and emitted URLs carry the
-configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).  OAuth / auth middleware,
-``.well-known`` path-insertion, and real tool logic are wired in Phases 5–7.
-Phase 6 wires the WhisperJobRegistry into ``get_transcript_job``.
+configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).
+
+Phase 7: full pipeline wired — cache → fetch → pagination.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from pathlib import Path
 from typing import Optional
 
 from starlette.requests import Request
@@ -22,14 +22,34 @@ from starlette.responses import JSONResponse
 import ytt
 from ytt import errors
 from ytt.auth import build_auth_provider
+from ytt.cache import CacheHit, TranscriptCache
+from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
 from ytt.whisper import WhisperJobRegistry
 
 logger = logging.getLogger(__name__)
 
-# Module-level Whisper job registry — shared between tool calls.
-# Starts empty; jobs are added by get_youtube_transcript when Whisper ASR starts.
+# ---------------------------------------------------------------------------
+# Module-level singletons (shared state across all tool calls)
+# ---------------------------------------------------------------------------
+
+_settings_singleton = get_settings()
+
+#: Flat-file LRU transcript cache — startup_scan() is called in serve().
+transcript_cache = TranscriptCache(
+    cache_dir=_settings_singleton.cache_dir,
+    max_bytes=_settings_singleton.cache_max_bytes,
+    reconcile_sec=_settings_singleton.cache_reconcile_sec,
+)
+
+#: Bounded fetch pool + single-flight registry + Whisper semaphore.
+_concurrency = ConcurrencyState.from_settings(_settings_singleton)
+
+#: Whisper job registry (Phase 6).
 whisper_registry = WhisperJobRegistry()
+
+#: Active Whisper model name — updated by check_model_guard() at startup.
+_active_whisper_model: str = _settings_singleton.whisper_model
 
 
 # ---------------------------------------------------------------------------
@@ -95,18 +115,161 @@ def _build_app():
         end: Optional[float] = None,
         query: Optional[str] = None,
     ) -> dict:
-        """Canonicalize → cache-first → transcript or pending+ETA.
+        """Canonicalize → cache-first → transcript (inline or chunk-1+cursor) or pending+ETA.
 
-        Phase 1 stub: returns an informative error until Phase 2 wires the
-        real fetch core.
+        Plan §Tools: "get_youtube_transcript(url, lang?, mode?, cursor?, start?, end?, query?)"
+        Plan §Concurrency: single-flight + bounded pool.
+        Plan §Caching: cache-first; whisper fallback.
+        Plan §Response shape: build_page handles chunking, filtering, cursor.
         """
-        # TODO(phase-2): canonicalize URL, check cache, dispatch fetch/whisper.
-        return {
-            "video_id": "",
-            "status": "error",
-            "error_code": "not_implemented",
-            "message": "Transcript fetching is not yet implemented (Phase 2).",
-        }
+        from ytt.canonicalize import canonicalize
+        from ytt.errors import YttError
+        from ytt import pagination
+        from ytt.fetch import fetch_transcript
+        from ytt.whisper import run_whisper_job
+
+        settings = get_settings()
+
+        # --- 1. Canonicalize URL → video_id -----------------------------------
+        try:
+            video_id = canonicalize(url)
+        except YttError as e:
+            return {
+                "video_id": "",
+                "status": "error",
+                "error_code": e.error_code,
+                "message": e.message,
+            }
+
+        # --- 2. Build canonical filter args -----------------------------------
+        filter_args: dict = {}
+        if query is not None:
+            filter_args["query"] = query
+        if start is not None:
+            filter_args["start"] = start
+        if end is not None:
+            filter_args["end"] = end
+
+        # --- 3. Cache-first lookup --------------------------------------------
+        # TranscriptCache.get internally checks whisper fallback too
+        hit = await transcript_cache.get(video_id, lang or "")
+
+        if hit is not None:
+            return pagination.build_page(hit, mode, filter_args, settings, cursor=cursor)
+
+        # --- 4. Cache miss — attempt caption fetch ----------------------------
+        try:
+            fetch_result = await _concurrency.fetch_pool.run(
+                lambda: _concurrency.discovery_flights.run(
+                    video_id,
+                    lambda: fetch_transcript(video_id, lang, settings),
+                ),
+                video_id=video_id,
+            )
+
+        except YttError as exc:
+            if exc.error_code == errors.EMPTY_BODY:
+                # No captions — start or retrieve existing Whisper job.
+                # Plan §Whisper fallback: "get-or-create under a lock keyed by video_id"
+                try:
+                    job, is_new = await whisper_registry.get_or_create(
+                        video_id,
+                        duration_sec=None,  # duration unknown without extract_info
+                        settings=settings,
+                    )
+                except YttError as tla_exc:
+                    # too_long_for_asr (duration check fails if we had duration)
+                    return {
+                        "video_id": video_id,
+                        "status": "error",
+                        "error_code": tla_exc.error_code,
+                        "message": tla_exc.message,
+                    }
+
+                if is_new:
+                    # Start background transcription task
+                    asyncio.create_task(
+                        run_whisper_job(
+                            job,
+                            whisper_registry,
+                            settings,
+                            transcript_cache,
+                            _active_whisper_model,
+                        )
+                    )
+
+                eta_str = (
+                    f" (~{job.eta_sec:.0f}s)" if job.eta_sec is not None else ""
+                )
+                return {
+                    "video_id": video_id,
+                    "status": "pending",
+                    "eta_sec": job.eta_sec,
+                    "message": (
+                        f"No captions found. Transcribing with Whisper ASR{eta_str}. "
+                        "Ask me again shortly."
+                    ),
+                }
+
+            # All other fetch errors (ip_blocked, rate_limited, private, etc.)
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": exc.error_code,
+                "message": exc.message,
+            }
+
+        except Exception as exc:
+            # Unexpected error (not a YttError)
+            logger.exception("Unexpected error in get_youtube_transcript: %s", exc)
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": errors.EMPTY_BODY,
+                "message": f"Unexpected error: {exc}",
+            }
+
+        # --- 5. Cache the fetch result + serve via build_page -----------------
+        segs_dicts = [
+            {"start": s.start, "duration": s.duration, "text": s.text}
+            for s in fetch_result.segments
+        ]
+        text = " ".join(d["text"] for d in segs_dicts)
+
+        metadata: dict = {}
+        if fetch_result.title:
+            metadata["title"] = fetch_result.title
+        if fetch_result.channel:
+            metadata["channel"] = fetch_result.channel
+        if fetch_result.duration_sec is not None:
+            metadata["duration_sec"] = fetch_result.duration_sec
+        if fetch_result.published:
+            metadata["published"] = fetch_result.published
+        if fetch_result.requested_lang:
+            metadata["requested_lang"] = fetch_result.requested_lang
+        if fetch_result.available_langs:
+            metadata["available_langs"] = fetch_result.available_langs
+        if fetch_result.message:
+            metadata["message"] = fetch_result.message
+
+        await transcript_cache.put(
+            video_id,
+            fetch_result.served_lang,
+            text,
+            segs_dicts,
+            fetch_result.source,
+            metadata or None,
+        )
+
+        hit = CacheHit(
+            video_id=video_id,
+            lang=fetch_result.served_lang,
+            source=fetch_result.source,
+            text=text,
+            segments=segs_dicts,
+            metadata=metadata or None,
+        )
+        return pagination.build_page(hit, mode, filter_args, settings, cursor=cursor)
 
     # -----------------------------------------------------------------------
     # Tool 2: get_transcript_job
@@ -132,11 +295,14 @@ def _build_app():
         Plan §Whisper fallback — job state machine:
         - pending/running: return status + ETA.
         - error: return status=error + error_code + message.
-        - done: Phase 6 stub — return status=ok with text=None and a message
-          instructing the caller to re-call get_youtube_transcript. Phase 7
-          replaces this with actual transcript delivery via the chunking/cursor layer.
+        - done: Phase 7 — deliver the transcript via build_page (same shape as
+          get_youtube_transcript, mode=full). Replaces the Phase 6 stub.
         - not found: return not_found with re-call instruction.
         """
+        from ytt import pagination
+
+        settings = get_settings()
+
         job = await whisper_registry.get(video_id)
         if job is None:
             return {
@@ -192,36 +358,26 @@ def _build_app():
                 ),
             }
 
-        # status == "done"
-        # Phase 6 stub: evicted-result check + done stub.
-        # TODO(phase-7): replace with actual transcript delivery via chunking/cursor layer.
-        if job.result_ref is not None:
-            # Check if the cache file is still present (evicted between done and poll)
-            # result_ref = "<video_id>.whisper" → cache file is "<video_id>.whisper.txt"
-            settings = get_settings()
-            cache_txt = Path(settings.cache_dir) / f"{job.result_ref}.txt"
-            if not cache_txt.exists():
-                # Evicted between job completion and polling
-                await whisper_registry.remove(video_id)
-                return {
-                    "video_id": video_id,
-                    "status": "error",
-                    "error_code": errors.NOT_FOUND,
-                    "message": (
-                        "Transcript was cached but has been evicted. "
-                        "Re-call get_youtube_transcript to re-fetch."
-                    ),
-                }
+        # --- status == "done" — Phase 7: deliver transcript via build_page ----
+        # Plan §Whisper fallback: "when done, returns the transcript directly
+        # (same shape/pagination), collapsing 3 calls to 2."
+        # Plan §Tools: "get_transcript_job: when done, returns the transcript
+        # directly". Uses mode=full (inline if short, chunk-1+cursor if long).
+        hit = await transcript_cache.get(video_id, "whisper")
+        if hit is None:
+            # Evicted between job completion and polling
+            await whisper_registry.remove(video_id)
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": errors.NOT_FOUND,
+                "message": (
+                    "Transcript was cached but has been evicted. "
+                    "Re-call get_youtube_transcript to re-fetch."
+                ),
+            }
 
-        return {
-            "video_id": video_id,
-            "status": "ok",
-            "text": None,
-            "segments": None,
-            "message": (
-                "Transcript ready; call get_youtube_transcript again to retrieve it."
-            ),
-        }
+        return pagination.build_page(hit, mode="full", filter_args={}, settings=settings)
 
     # -----------------------------------------------------------------------
     # Custom route: /ytt/health (unauthenticated liveness probe)
@@ -257,8 +413,6 @@ def build_asgi_app():
     path prefix so all Streamable-HTTP routes are prefixed correctly.
     Custom routes (health) are already registered on ``mcp``; the
     returned app includes them.
-
-    TODO(phase-5): mount auth middleware + .well-known Starlette routes here.
     """
     settings = get_settings()
     # Strip trailing slash from prefix for http_app (it takes the mount path
