@@ -1,0 +1,90 @@
+# ytt — marathon complete
+
+All in-scope work is done.  The `ytt` project is fully implemented per
+`docs/plan/plan.md`.
+
+## What was built
+
+### Python package (`ytt/`)
+
+All 19 modules:
+- `__init__.py` (`__version__` = 0.1.0)
+- `__main__.py`, `cli.py` (`ytt serve` / `ytt test` / `ytt selftest`)
+- `config.py` — pydantic-settings, full Configuration table, startup validation
+- `errors.py` — error_code constants + YttError
+- `models.py` — TranscriptRequest/Result, Segment, WhisperJob, EgressReport
+- `canonicalize.py` — URL → 11-char video_id, all forms, idempotence
+- `parse_json3.py` — rolling-caption dedup (the #1 silent bug, fixed)
+- `fetch.py` — yt-dlp json3 extraction, error taxonomy (13 seeds), language selection
+- `concurrency.py` — SingleFlightRegistry + BoundedFetchPool
+- `cache.py` — flat-file LRU, byte-cap Invariant 1, ENOSPC degrade, reconcile
+- `auth.py` — FastMCP OAuth, path-bearing audience, path-inserted .well-known routes
+- `authz.py` — subject allowlist + selftest --show-sub mechanism
+- `ratelimit.py` — per-subject TokenBucket + WhisperQuota
+- `whisper.py` — WhisperJob FSM, startup sweep, model guard, TTL GC
+- `pagination.py` — cursor, chunking, filtering, loud PARTIAL, structuredContent
+- `observability.py` — 9 Prometheus metrics, structlog JSON + redaction
+- `selftest.py` — egress probe, is_residential derivation (23 ASNs + 21 org patterns)
+- `canary.py` — long-running yt-dlp probe, Prometheus metrics :8081
+- `server.py` — FastMCP app, tools, /health, /metrics, /admin/egress
+
+### Tests
+
+Unit suite: **560 passed** (uv run pytest -m "not integration" -q)
+Integration suite: **22 tests** (tests/integration/, marked @pytest.mark.integration,
+not run here — require in-cluster execution on ardenone-cluster)
+
+Coverage:
+- All 7 Invariants (property-based Hypothesis tests for 1–6; startup assertion for 7)
+- Full error taxonomy (all 13 seed strings)
+- json3 rolling-caption dedup fixtures (rolling_asr.json + manual_track.json)
+- cache concurrency (asyncio tasks, byte-cap under concurrent puts)
+- single-flight + failed-Future cleanup
+- WhisperJob FSM transitions, TTL GC, restart re-kick
+- pagination/cursor (content-hash, stale conditions, chunking, filters)
+- OAuth metadata shape, 401+WWW-Auth, wrong-audience rejection
+- authz allow/deny, rate-limit bucket refill + per-subject isolation
+- Acceptance scenarios 1–6, 8, 11, 12, 14 + load/saturation test
+
+### Deploy artifacts (`deploy/`)
+
+- `deploy/README.md` — explains additive .well-known routing, where files go
+- `deploy/DEPLOY-CHECKLIST.md` — 15-step ordered human checklist
+- `deploy/k8s/ardenone-cluster/ytt/` — all K8s manifests:
+  namespace, deployment, service, pvc, external-secret, ingressroute,
+  middlewares, certificate, networkpolicy (port-53 DNS), servicemonitor,
+  prometheusrule, canary-deployment, test-deployment
+- `deploy/argo-workflows/iad-ci/` — ytt-build WorkflowTemplate + Sensor
+
+### Public documentation
+
+- `README.md` (updated) — quick-start, tool list, requirements/caveats, config table
+- `LICENSE` — MIT
+- `NOTICE` — third-party licenses (ffmpeg, yt-dlp, FastMCP)
+- `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`
+- `docs/usage/configuration.md` — full env-var reference
+- `docs/usage/self-hosting.md` — Docker Compose example, no-Whisper mode, proxy setup
+- `docs/usage/connector.md` — OAuth flow, sub discovery, allowlist setup
+- `docs/usage/deploy-ardenone.md` — ardenone-cluster + ibkr co-hosting specifics
+
+## Unit test count / pass status
+
+**560 unit tests passed** (run: `export PATH="$HOME/.local/bin:$PATH" && uv run pytest -m "not integration" -q`)
+
+## Human-gated deploy steps (summary)
+
+See `deploy/DEPLOY-CHECKLIST.md` for the full ordered checklist.  Key steps:
+
+1. Write secrets to OpenBao (`ardenone-cluster/ytt/*`).
+2. Create `ghcr-push-token` Secret in iad-ci (GitHub token with `write:packages`).
+3. Copy manifests into `jedarden/declarative-config`.
+4. Trigger first CI build (`ytt-build` WorkflowTemplate).
+5. Verify ArgoCD app synced + ExternalSecret materialized.
+6. Verify `/ytt/health` returns `{"status": "ok"}`.
+7. Run ibkr regression gate (compare `.well-known/*` hashes before/after).
+8. Complete OAuth flow + run `ytt selftest --show-sub` to discover subject.
+9. Update `YTT_ALLOWED_SUBJECTS` in OpenBao + restart pod.
+10. Verify transcript fetch works from Claude Desktop + mobile.
+11. (Optional) Cloudflare WAF allowlist for `mcp.ardenone.com`.
+12. Set GHCR package public + linked to repo.
+13. Tag `v0.1.0` release.

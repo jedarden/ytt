@@ -1,0 +1,36 @@
+# NOTICE — Third-Party Software
+
+This software includes the following third-party components.
+
+## ffmpeg
+
+The Docker image installs `ffmpeg` via `apt-get install -y ffmpeg` (Debian build).
+The Debian `ffmpeg` package is built with LGPL/GPL components.  ytt does not
+modify ffmpeg; it is a separate binary invoked by yt-dlp for audio remuxing.
+
+- License: LGPL 2.1+ / GPL 2+ (Debian build)
+- Source: https://ffmpeg.org/
+- Debian package: https://packages.debian.org/ffmpeg
+
+This is "mere aggregation" — ytt's code does not link against or incorporate
+ffmpeg source code.  The ffmpeg license terms apply to ffmpeg itself, not to ytt.
+
+## yt-dlp
+
+yt-dlp is used as a Python library (not a subprocess) for caption and audio
+extraction.
+
+- License: Unlicense (public domain)
+- Source: https://github.com/yt-dlp/yt-dlp
+
+## FastMCP
+
+FastMCP provides the MCP server framework.
+
+- License: Apache 2.0
+- Source: https://github.com/jlowin/fastmcp
+
+## Other dependencies
+
+All other Python dependencies are listed in `pyproject.toml` and `uv.lock`.
+Their licenses are available via `pip show <package>` or on PyPI.
