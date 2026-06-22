@@ -2,11 +2,11 @@
 
 Append one short entry per iteration: what you did, what's next. The next iteration reads this first.
 
-## Status: Phase 5 COMPLETE · Next: Phase 6 — whisper.py (WhisperJob FSM, scratch vol, TTL GC, startup sweep, audio lifecycle)
+## Status: Phase 6 COMPLETE · Next: Phase 7 — response shape (chunk pagination, cursor, loud PARTIAL, start/end/query, get_transcript_job full delivery)
 
 - Spec: `docs/plan/plan.md` (authoritative; do not edit).
 - Env: `uv` at `~/.local/bin/uv`; Python 3.12.13 pinned. Always: `export PATH="$HOME/.local/bin:$PATH"` then `uv run pytest -m "not integration" -q`.
-- Suite: **373 unit tests green** (`uv run pytest -m "not integration"` → "373 passed, 1 deselected").
+- Suite: **421 unit tests green** (`uv run pytest -m "not integration"` → "421 passed, 1 deselected").
 - Key deps (uv.lock): **fastmcp 3.4.2** (≥2.11.1 ✓), **yt-dlp 2025.5.22** (pinned), starlette 1.3.1, uvicorn 0.49.0, pydantic 2.x, httpx, prometheus-client, structlog 26.1.0, hypothesis (dev).
 
 ## Phase 5 spike result (FastMCP OAuth):
@@ -57,3 +57,4 @@ Tests: 401 on unauthenticated, 403 on non-allowlisted sub, allowlist allow/deny,
 - Iter 5: concurrency.py (`538cf71`): SingleFlightRegistry (Future dedup by key, Invariant 2+6, shield-based waiter sharing, key removed on success+failure, remove() for forced eviction), BoundedFetchPool (Semaphore + counter-tracked soft queue, 429 when active+qd>=max_concurrent+max_queue, cancellation-safe finally), ConcurrencyState (container with from_settings). 26 new tests (including Hypothesis property-based Invariant 2 + bounded-pool depth invariant). **295 unit tests green**. Next: cache.py.
 - Iter 6: cache.py (`7622b10`): TranscriptCache (startup_scan, get/put/reconcile/evict_lru/shutdown), CacheHit dataclass, flat-file LRU (txt+json unit pairs), byte-cap Invariant 1 (asyncio lock discipline), ENOSPC degrade, whisper fallback, reconcile drift correction, 34 new unit tests (Hypothesis Invariant 1 property test included). **329 unit tests green**. Next: Phase 5 auth.py+authz.py.
 - Iter 7: auth.py + authz.py + ratelimit.py (`93f418c`): YttOAuthProvider (InMemoryOAuthProvider subclass, DCR off, path-bearing audience, static Claude client 2-URI), authz check_subject + write_last_sub + get_last_sub, TokenBucket + SubjectRateLimiter + WhisperQuota, server.py wired, FORBIDDEN error code, 44 new unit tests (HTTP 401/WWW-Auth, PRM/AS route shape, audience validation, bucket refill, isolation). **373 unit tests green**. Next: Phase 6 whisper.py.
+- Iter 8: whisper.py (`844130c`): startup_sweep() (unconditional scratch dir clear, Invariant 4 init), check_model_guard() (GET /v1/models; self-correct to first model if configured absent), WhisperJobRegistry (asyncio.Lock FSM: get_or_create/get/update_status/remove/run_ttl_gc with stale-running GC, start_ttl_gc_task), run_whisper_job() (full audio lifecycle: yt-dlp bestaudio download with projected-size check + progress-hook cap guard, POST /v1/audio/transcriptions, write <id>.whisper.* cache, delete audio in finally). server.py: module-level whisper_registry; get_transcript_job wired (Phase 6 stub for done: status=ok text=None; evicted-result detection via cache file check). 48 new tests. **421 unit tests green**. Next: Phase 7 response shape.
