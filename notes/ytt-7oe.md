@@ -53,11 +53,22 @@ All tests pass: `45 passed in 0.14s`
 
 ## Verification Results
 
-Tested on 2026-06-25:
-
+**First verification (2026-06-21):**
 ```bash
 $ uv run pytest tests/unit/test_parse_json3.py -v
 ============================== 45 passed in 0.14s ==============================
+```
+
+**Re-verification (2026-06-25):**
+```bash
+$ source .venv/bin/activate && python -m pytest tests/unit/test_parse_json3.py -v
+============================== 45 passed in 0.13s ==============================
+```
+
+Full unit test suite (560 tests) also passes:
+```bash
+$ python -m pytest tests/unit/ -v
+======================== 560 passed, 1 warning in 1.71s ========================
 ```
 
 Manual verification of rolling_asr.json fixture:
