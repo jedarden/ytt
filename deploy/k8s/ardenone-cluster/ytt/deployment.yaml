@@ -80,12 +80,15 @@ spec:
               value: "1"
 
             # --- Whisper ---
+            # Model: large-v3-turbo (only model available on whisper-openai service)
+            # RT_FACTOR calibrated for CPU: 2.0 (large-v3-turbo is slower than small)
+            # Phase 9 will re-calibrate based on actual transcription measurements
             - name: YTT_WHISPER_URL
               value: "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
             - name: YTT_WHISPER_MODEL
-              value: "Systran/faster-whisper-small"
+              value: "large-v3-turbo"
             - name: YTT_WHISPER_REALTIME_FACTOR
-              value: "1.2"
+              value: "2.0"
             - name: YTT_WHISPER_TIMEOUT_SEC
               value: "2880"
             - name: YTT_MAX_ASR_DURATION_SEC

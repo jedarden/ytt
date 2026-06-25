@@ -56,8 +56,8 @@ def test_defaults_match_plan():
     assert s.max_concurrent_whisper == 1
     assert s.extract_timeout_sec == 60
     assert s.whisper_url == "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
-    assert s.whisper_model == "Systran/faster-whisper-small"
-    assert s.whisper_realtime_factor == 1.2
+    assert s.whisper_model == "large-v3-turbo"
+    assert s.whisper_realtime_factor == 2.0
     assert s.whisper_timeout_sec == 2880
     assert s.max_asr_duration_sec == 1200
     assert s.job_ttl_sec == 3600

@@ -112,9 +112,12 @@ class Settings(BaseSettings):
     extract_timeout_sec: int = 60
 
     # --- whisper ---
+    # Model: large-v3-turbo (only model available on whisper-openai service)
+    # RT_FACTOR calibrated for CPU: 2.0 (large-v3-turbo is slower than small)
+    # Phase 9 will re-calibrate based on actual transcription measurements
     whisper_url: str = "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
-    whisper_model: str = "Systran/faster-whisper-small"
-    whisper_realtime_factor: float = 1.2
+    whisper_model: str = "large-v3-turbo"
+    whisper_realtime_factor: float = 2.0
     whisper_timeout_sec: int = 2880
     max_asr_duration_sec: int = 1200
     job_ttl_sec: int = 3600
