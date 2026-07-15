@@ -1,228 +1,154 @@
-"""OAuth resource-server / FastMCP auth (plan: Auth, ADR-001).
+"""OAuth resource-server / FastMCP auth (plan: docs/notes/auth.md, ADR-001).
 
-FastMCP self-issued tokens, audience-bound to ``https://mcp.ardenone.com/ytt``
-(the full path-bearing public URL from ``YTT_PUBLIC_URL``). DCR disabled (v1).
-Two static redirect URIs for the Claude connector are pre-registered.
+Federates to Google OAuth via FastMCP's built-in ``GoogleProvider`` — an
+``OAuthProxy`` that presents a DCR-compliant AS to MCP clients (Claude) while
+proxying the actual login to Google and verifying tokens via Google's
+tokeninfo API. This mirrors ibkr-mcp's identity model (see
+``~/ibkr-mcp/src/mcp-oauth/``) and intentionally reuses ibkr-mcp's existing
+GCP OAuth app: ``YTT_OAUTH_CLIENT_ID``/``YTT_OAUTH_CLIENT_SECRET`` point at
+the same GCP client ibkr-mcp uses, with
+``https://mcp.ardenone.com/ytt/auth/callback`` registered as an additional
+Authorized redirect URI on it.
 
-Phase-5 spike result — FastMCP 3.4.2 *does* emit path-bearing identifiers
-natively:
+Do NOT reintroduce FastMCP's ``InMemoryOAuthProvider`` here. It is an
+explicit test/demo provider (its own docstring: "Simulates user
+authorization") that auto-approves any caller with no login step and issues
+opaque tokens with no populated ``subject``/``claims``. A prior version of
+this module used it: every caller sharing the static "claudeai" client_id
+could reach the tools regardless of ``YTT_ALLOWED_SUBJECTS``, because there
+was no real identity to check the allowlist against. See docs/notes/auth.md
+("Authentication != Authorization") for the requirement this violated.
 
-- ``OAuthProvider(base_url=<path-bearing URL>, ...)`` serves the AS at the
-  path-bearing base, and its overridden ``get_well_known_routes()`` emits the
-  AS metadata at ``/.well-known/oauth-authorization-server/ytt`` (RFC 8414
-  §3.1) when the issuer URL has a path component.
-- ``resource_base_url=<origin>`` (scheme+host only) ensures that when
-  ``create_streamable_http_app`` calls ``_get_resource_url(mcp_path="/ytt")``,
-  it appends ``/ytt`` to produce the correct ``https://mcp.ardenone.com/ytt``
-  resource URL. The PRM is then served at
-  ``/.well-known/oauth-protected-resource/ytt`` (RFC 9728 §3.1).
-- ``RequireAuthMiddleware`` automatically adds the
-  ``WWW-Authenticate: Bearer resource_metadata=…`` header on 401.
-
-No custom Starlette routes are needed (FastMCP handles everything natively).
-
-TODO(marathon): verify against live Claude connector — confirm that the
-path-bearing audience and the path-inserted well-known URLs are accepted by
-Claude's hosted connector-add flow. If Claude's OIDC discovery normalises the
-resource to origin (known Claude Code quirk, not confirmed on hosted surfaces),
-a subdomain-per-tool fallback may be needed.
+The resolved, Google-verified email is checked against
+``YTT_ALLOWED_SUBJECTS`` on every tool call by ``ytt.authz.check_subject_auth``,
+wired in as global ``AuthMiddleware`` in ``ytt/server.py`` — not just on a
+side diagnostic route (the previous gap: ``/admin/egress`` was the only
+route that ever called the allowlist check).
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from fastmcp.server.auth.auth import ClientRegistrationOptions, OAuthProvider
-from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
-from mcp.shared.auth import OAuthClientInformationFull
-from pydantic import AnyHttpUrl
+from starlette.routing import Route
+
+from fastmcp.server.auth.providers.google import GoogleProvider
 
 from ytt.config import Settings
 
 # ---------------------------------------------------------------------------
-# Claude connector redirect URIs — register BOTH (plan: "register both callbacks")
+# Claude connector redirect URIs — the only redirect URIs ytt's AS will issue
+# authorization codes for. Defense in depth: the real access boundary is the
+# email allowlist (authz.check_subject_auth), but this keeps DCR from being a
+# fully open relay to arbitrary third-party redirect targets.
 # ---------------------------------------------------------------------------
 CLAUDE_REDIRECT_URIS: list[str] = [
     "https://claude.ai/api/mcp/auth_callback",
     "https://claude.com/api/mcp/auth_callback",
 ]
 
-# Static client_id for the Claude connector (plan: "DCR off, static client")
-# Claude registers under client_name "claudeai" — use the same string as
-# client_id so the pre-registered entry is matched on the first authorize call.
-# NOTE: if FastMCP only accepts one redirect_uri per entry, register two entries
-# sharing this client_id. InMemoryOAuthProvider overwrites on re-registration,
-# which is fine here because we register both URIs in a list.
-CLAUDE_CLIENT_ID = "claudeai"
 
-# ---------------------------------------------------------------------------
-# YttOAuthProvider
-# ---------------------------------------------------------------------------
+class YttGoogleProvider(GoogleProvider):
+    """``GoogleProvider`` plus RFC 8414/9728 path-inserted well-known routes.
 
+    ``create_streamable_http_app`` mounts whatever ``get_routes()`` returns —
+    it never calls ``get_well_known_routes()``. For a path-bearing issuer
+    (``https://mcp.ardenone.com/ytt``), the path-inserted AS-metadata route
+    (``/.well-known/oauth-authorization-server/ytt``) that
+    ``OAuthProvider.get_well_known_routes()`` computes is therefore never
+    mounted unless merged in here.
 
-class YttOAuthProvider(InMemoryOAuthProvider):
-    """FastMCP OAuth AS for ytt, audience-bound to the path-bearing public URL.
+    This matters because ytt's IngressRoute
+    (``declarative-config k8s/ardenone-cluster/ytt/ingressroute.yml``)
+    forwards ONLY the path-inserted well-known suffixes to this service —
+    the bare ``/.well-known/*`` prefix is routed to ibkr-mcp, which shares
+    the ``mcp.ardenone.com`` host. Without this override, Claude's OAuth
+    discovery 404s.
 
-    ADR-001: FastMCP self-issued tokens, DCR off,
-    audience/resource/issuer = ``YTT_PUBLIC_URL`` (e.g.
-    ``https://mcp.ardenone.com/ytt``).
-
-    Constructor arguments derive from ``Settings``; call
-    :func:`build_auth_provider` instead of constructing directly in production.
-
-    See module docstring for the full Phase-5 spike rationale.
-
-    Phase-5 spike note on path-inserted well-known routes:
-    ``create_streamable_http_app`` calls ``auth.get_routes(mcp_path=...)`` which
-    returns routes from ``create_auth_routes()`` — the standard (non-path-inserted)
-    ``/.well-known/oauth-authorization-server`` route. The path-inserted version
-    (``/.well-known/oauth-authorization-server/ytt``) is computed in
-    ``get_well_known_routes()`` but NOT included in ``get_routes()``.
-    We override ``get_routes()`` to merge in the path-inserted well-known routes
-    so they are mounted in the Starlette app. This is the "custom Starlette routes"
-    the plan refers to — implemented here rather than in ``build_asgi_app()`` to
-    keep the provider self-contained.
+    The protected-resource-metadata route
+    (``/.well-known/oauth-protected-resource/ytt``) does not need the same
+    treatment — ``OAuthProvider.get_routes()`` already derives it directly
+    from ``resource_base_url``.
     """
 
-    def __init__(self, settings: Settings) -> None:
-        # Parse the *origin* (scheme+host) from the path-bearing public_url.
-        # resource_base_url = origin so that _get_resource_url("/ytt") appends
-        # "/ytt" → correct resource URL "https://mcp.ardenone.com/ytt".
-        parsed = urlparse(settings.public_url)
-        origin = f"{parsed.scheme}://{parsed.netloc}"
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        base_routes = super().get_routes(mcp_path)
 
-        super().__init__(
-            # base_url is the path-bearing URL where the OAuth AS routes are
-            # advertised (e.g. https://mcp.ardenone.com/ytt). FastMCP mounts
-            # /authorize and /token at the Starlette root (they are accessible
-            # at / in the app's router); base_url tells metadata where they live.
-            base_url=settings.public_url,
-            # resource_base_url = origin so PRM is resource=public_url.
-            resource_base_url=origin,
-            # DCR disabled: plan "No open DCR in v1".
-            # Enabled=False → no /register endpoint; clients must be pre-registered.
-            client_registration_options=ClientRegistrationOptions(enabled=False),
-        )
+        if not self.issuer_url:
+            return base_routes
 
-        # Override issuer_url so get_well_known_routes() emits path-aware AS
-        # metadata at /.well-known/oauth-authorization-server/ytt (RFC 8414).
-        # The base class sets issuer_url = base_url by default, but we set it
-        # explicitly for clarity and to make the code self-documenting.
-        self.issuer_url = AnyHttpUrl(settings.public_url)
+        issuer_path = urlparse(str(self.issuer_url)).path.rstrip("/")
+        if not issuer_path or issuer_path == "/":
+            return base_routes
 
-        # Pre-register the Claude connector client (plan: "static client").
-        # InMemoryOAuthProvider initialises self.clients = {} in super().__init__,
-        # so we can populate it synchronously here.
-        self.clients[CLAUDE_CLIENT_ID] = OAuthClientInformationFull(
-            client_id=CLAUDE_CLIENT_ID,
-            client_name="Claude",
-            redirect_uris=[AnyHttpUrl(u) for u in CLAUDE_REDIRECT_URIS],
-        )
-
-    def get_routes(self, mcp_path: str | None = None) -> list:
-        """Override to include path-inserted well-known routes in the route list.
-
-        ``create_streamable_http_app`` calls ``get_routes()`` (not
-        ``get_well_known_routes()``), so the path-inserted AS metadata routes
-        (``/.well-known/oauth-authorization-server/ytt`` per RFC 8414) would
-        otherwise not be mounted.
-
-        We call ``super().get_routes()`` to get the base routes (which include
-        the standard ``/.well-known/oauth-authorization-server``), then
-        replicate the path-insertion logic from
-        ``OAuthProvider.get_well_known_routes()`` directly — without calling
-        ``get_well_known_routes()`` — to avoid the recursion cycle
-        (``get_well_known_routes`` → ``AuthProvider.get_well_known_routes``
-        → ``self.get_routes`` → recursion).
-        """
-        from urllib.parse import urlparse as _urlparse
-
-        from starlette.routing import Route
-
-        # Base routes from OAuthProvider (standard /.well-known/oauth-authorization-server + PRM)
-        base_routes: list[Route] = super().get_routes(mcp_path)
         existing_paths = {r.path for r in base_routes if hasattr(r, "path")}
+        as_meta_route = next(
+            (
+                r
+                for r in base_routes
+                if hasattr(r, "path")
+                and r.path == "/.well-known/oauth-authorization-server"
+            ),
+            None,
+        )
+        if as_meta_route is None:
+            return base_routes
 
-        # Replicate OAuthProvider.get_well_known_routes path-insertion logic.
-        # Find the standard AS-metadata route endpoint so we can register
-        # the path-inserted variant(s) pointing to the same handler.
-        if self.issuer_url:
-            parsed_issuer = _urlparse(str(self.issuer_url))
-            issuer_path = parsed_issuer.path.rstrip("/")
-
-            if issuer_path and issuer_path != "/":
-                # Find the standard AS-metadata route to clone its endpoint
-                as_meta_route = next(
-                    (r for r in base_routes
-                     if hasattr(r, "path") and r.path == "/.well-known/oauth-authorization-server"),
-                    None,
+        for pi_path in (
+            f"/.well-known/oauth-authorization-server{issuer_path}",
+            f"/.well-known/openid-configuration{issuer_path}",
+        ):
+            if pi_path not in existing_paths:
+                base_routes.append(
+                    Route(
+                        pi_path,
+                        endpoint=as_meta_route.endpoint,
+                        methods=as_meta_route.methods,
+                    )
                 )
-                if as_meta_route is not None:
-                    # RFC 8414 path-inserted AS metadata
-                    pi_path = f"/.well-known/oauth-authorization-server{issuer_path}"
-                    if pi_path not in existing_paths:
-                        base_routes.append(Route(
-                            pi_path,
-                            endpoint=as_meta_route.endpoint,
-                            methods=as_meta_route.methods,
-                        ))
-                        existing_paths.add(pi_path)
+                existing_paths.add(pi_path)
 
-                    # RFC 8414 §5 OIDC alias with path
-                    oidc_pi_path = f"/.well-known/openid-configuration{issuer_path}"
-                    if oidc_pi_path not in existing_paths:
-                        base_routes.append(Route(
-                            oidc_pi_path,
-                            endpoint=as_meta_route.endpoint,
-                            methods=as_meta_route.methods,
-                        ))
-                        existing_paths.add(oidc_pi_path)
-
-                    # Root OIDC alias (always, per OAuthProvider logic)
-                    if "/.well-known/openid-configuration" not in existing_paths:
-                        base_routes.append(Route(
-                            "/.well-known/openid-configuration",
-                            endpoint=as_meta_route.endpoint,
-                            methods=as_meta_route.methods,
-                        ))
+        if "/.well-known/openid-configuration" not in existing_paths:
+            base_routes.append(
+                Route(
+                    "/.well-known/openid-configuration",
+                    endpoint=as_meta_route.endpoint,
+                    methods=as_meta_route.methods,
+                )
+            )
 
         return base_routes
 
 
-def build_auth_provider(settings: Settings) -> YttOAuthProvider:
-    """Create and return the ``YttOAuthProvider`` for the given settings.
+def build_auth_provider(settings: Settings) -> YttGoogleProvider:
+    """Create the Google-federated OAuth provider for the given settings.
 
-    Separated from the class so callers can test the provider without relying
-    on the module-level ``get_settings()`` singleton.
+    Raises ``ValueError`` if Google OAuth credentials are not configured —
+    fail fast at startup rather than silently falling back to an
+    unauthenticated or fake-authenticated server.
     """
-    return YttOAuthProvider(settings)
-
-
-async def _extract_sub_from_token(token: str, settings: Settings) -> str:
-    """Decode a JWT and return the ``sub`` claim without full signature verification.
-
-    Used by the ``/admin/egress`` custom route to apply the subject allowlist.
-    The FastMCP middleware handles full signature + audience verification for
-    tool calls; this function provides a lightweight allowlist check for
-    the non-MCP custom routes.
-
-    Raises ``ValueError`` if the token is malformed or missing the ``sub`` claim.
-    """
-    import jwt  # PyJWT
-
-    try:
-        # Decode without signature verification — we trust the Bearer token was
-        # signed by this server's FastMCP instance (validated by the AS).
-        # For the allowlist gate the important claim is ``sub``.
-        payload = jwt.decode(
-            token,
-            options={"verify_signature": False, "verify_aud": False},
-            algorithms=["HS256", "RS256"],
+    if not settings.oauth_client_id:
+        raise ValueError(
+            "YTT_OAUTH_CLIENT_ID is required (Google OAuth client ID from "
+            "the ibkr-mcp GCP app — see docs/notes/auth.md). ytt must "
+            "federate to a real identity provider; it must never fall back "
+            "to an unauthenticated or self-issued-with-no-login provider."
         )
-    except Exception as exc:
-        raise ValueError(f"JWT decode failed: {exc}") from exc
 
-    sub = payload.get("sub")
-    if not sub:
-        raise ValueError("JWT missing 'sub' claim")
-    return str(sub)
+    # Parse the *origin* (scheme+host) from the path-bearing public_url.
+    # resource_base_url = origin so that _get_resource_url("/ytt") appends
+    # "/ytt" -> correct resource URL "https://mcp.ardenone.com/ytt", instead
+    # of doubling the path if resource_base_url defaulted to base_url (which
+    # is already path-bearing).
+    parsed = urlparse(settings.public_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    return YttGoogleProvider(
+        client_id=settings.oauth_client_id,
+        client_secret=settings.oauth_client_secret,
+        base_url=settings.public_url,
+        resource_base_url=origin,
+        required_scopes=["openid", "email"],
+        allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
+        jwt_signing_key=settings.jwt_signing_secret,
+    )

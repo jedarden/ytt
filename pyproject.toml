@@ -1,6 +1,6 @@
 [project]
 name = "ytt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Remote MCP server that downloads YouTube transcripts (captions or Whisper ASR), cached and rate-limited, for use as a Claude custom connector."
 readme = "README.md"
 license = { text = "MIT" }

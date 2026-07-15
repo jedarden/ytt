@@ -408,14 +408,36 @@ def test_admin_egress_no_token_returns_401():
     assert data.get("error_code") == "forbidden"
 
 
+def _fake_access_token(email: str | None, verified: bool = True):
+    """Build a real FastMCP AccessToken for verify_token mocking.
+
+    ``get_access_token()`` (used by both admin_egress_endpoint and
+    ytt.authz.check_subject_auth) type-checks against the real pydantic
+    AccessToken class — a SimpleNamespace duck-type isn't accepted.
+    """
+    from fastmcp.server.auth.auth import AccessToken
+
+    claims = {}
+    if email is not None:
+        claims = {"email": email, "email_verified": verified}
+    return AccessToken(
+        token="faketoken",
+        client_id="test-client",
+        scopes=[],
+        expires_at=None,
+        claims=claims,
+    )
+
+
 def test_admin_egress_non_allowlisted_sub_returns_403():
     """GET /ytt/admin/egress with valid token but non-listed sub must return 403."""
-    from ytt.server import build_asgi_app
+    from ytt.server import build_asgi_app, mcp
 
     app = build_asgi_app()
 
-    with patch("ytt.server.check_subject", return_value=False), \
-         patch("ytt.auth._extract_sub_from_token", return_value="unknown_sub"):
+    with patch.object(
+        mcp.auth, "verify_token", return_value=_fake_access_token("unknown@example.com")
+    ):
         with TestClient(app, raise_server_exceptions=True) as client:
             resp = client.get(
                 "/ytt/admin/egress",
@@ -427,24 +449,24 @@ def test_admin_egress_non_allowlisted_sub_returns_403():
 
 
 def test_admin_egress_bad_token_returns_401():
-    """GET /ytt/admin/egress with a malformed token must return 401."""
-    from ytt.server import build_asgi_app
+    """GET /ytt/admin/egress with a token Google rejects must return 401."""
+    from ytt.server import build_asgi_app, mcp
 
     app = build_asgi_app()
 
-    with patch("ytt.auth._extract_sub_from_token", side_effect=ValueError("bad token")):
+    with patch.object(mcp.auth, "verify_token", return_value=None):
         with TestClient(app, raise_server_exceptions=True) as client:
             resp = client.get(
                 "/ytt/admin/egress",
-                headers={"Authorization": "Bearer notajwt"},
+                headers={"Authorization": "Bearer notavalidtoken"},
             )
     assert resp.status_code == 401
 
 
-def test_admin_egress_returns_egress_report():
+def test_admin_egress_returns_egress_report(monkeypatch):
     """GET /ytt/admin/egress with a valid allowlisted token must return the egress report."""
     from ytt.models import EgressReport
-    from ytt.server import build_asgi_app
+    from ytt.server import _settings_singleton, build_asgi_app, mcp
 
     fake_report = EgressReport(
         ip="203.0.113.1",
@@ -455,10 +477,11 @@ def test_admin_egress_returns_egress_report():
     )
 
     app = build_asgi_app()
+    monkeypatch.setattr(_settings_singleton, "allowed_subjects", "allowed@example.com")
 
-    with patch("ytt.auth._extract_sub_from_token", return_value="allowed_sub"), \
-         patch("ytt.server.check_subject", return_value=True), \
-         patch("ytt.selftest.probe_egress", return_value=fake_report):
+    with patch.object(
+        mcp.auth, "verify_token", return_value=_fake_access_token("allowed@example.com")
+    ), patch("ytt.selftest.probe_egress", return_value=fake_report):
         with TestClient(app, raise_server_exceptions=True) as client:
             resp = client.get(
                 "/ytt/admin/egress",
@@ -474,15 +497,16 @@ def test_admin_egress_returns_egress_report():
     assert data["via_proxy"] is False
 
 
-def test_admin_egress_probe_failure_returns_502():
+def test_admin_egress_probe_failure_returns_502(monkeypatch):
     """GET /ytt/admin/egress must return 502 when the egress probe itself fails."""
-    from ytt.server import build_asgi_app
+    from ytt.server import _settings_singleton, build_asgi_app, mcp
 
     app = build_asgi_app()
+    monkeypatch.setattr(_settings_singleton, "allowed_subjects", "allowed@example.com")
 
-    with patch("ytt.auth._extract_sub_from_token", return_value="allowed_sub"), \
-         patch("ytt.server.check_subject", return_value=True), \
-         patch("ytt.selftest.probe_egress", side_effect=Exception("network error")):
+    with patch.object(
+        mcp.auth, "verify_token", return_value=_fake_access_token("allowed@example.com")
+    ), patch("ytt.selftest.probe_egress", side_effect=Exception("network error")):
         with TestClient(app, raise_server_exceptions=False) as client:
             resp = client.get(
                 "/ytt/admin/egress",

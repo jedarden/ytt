@@ -92,7 +92,9 @@ class Settings(BaseSettings):
     )
 
     # --- authz / rate limits ---
-    allowed_subjects: str = ""  # comma-separated; empty == deny all (fail-closed)
+    # Comma-separated Google account emails (the "sub" is the Google-verified
+    # email — see ytt.auth); empty == deny all (fail-closed).
+    allowed_subjects: str = ""
     rate_limit_per_min: int = 20
     whisper_jobs_per_hour: int = 10
 
@@ -134,7 +136,10 @@ class Settings(BaseSettings):
     path_prefix: str = "/ytt/"
     public_url: str = "https://mcp.ardenone.com/ytt"
 
-    # --- OAuth (from ESO/OpenBao; optional so unit tests can construct freely) ---
+    # --- OAuth (Google, from ESO/OpenBao) ---
+    # Optional on the Settings model itself so unit tests can construct freely;
+    # ytt.auth.build_auth_provider raises at startup if oauth_client_id is
+    # unset (see docs/notes/auth.md) rather than falling back to no auth.
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     jwt_signing_secret: str | None = None

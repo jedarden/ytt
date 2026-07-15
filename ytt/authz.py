@@ -1,9 +1,22 @@
 """Authorization — subject allowlist (plan: Security & Authorization).
 
-Checks the token ``sub`` claim against ``YTT_ALLOWED_SUBJECTS`` on every tool
-call; empty allowlist = deny all (fail-closed); not listed → ``403`` with a
-human-readable message ("Contact the server operator to be added to the
-allowlist").
+Checks the token's Google-verified ``email`` claim against
+``YTT_ALLOWED_SUBJECTS`` on every tool call; empty allowlist = deny all
+(fail-closed); not listed → ``403`` with a human-readable message ("Contact
+the server operator to be added to the allowlist").
+
+Two entry points:
+
+- ``check_subject_auth`` — the real enforcement point. Wired into
+  ``ytt/server.py`` as global FastMCP ``AuthMiddleware``, so it runs before
+  every tool call, resource read, and prompt render over the actual MCP
+  transport (not just a diagnostic route). This closes the gap in a prior
+  version of this module, where ``check_subject`` was only ever called from
+  the ``/admin/egress`` side route — the transcript tools themselves had no
+  allowlist check at all.
+- ``check_subject`` — the lower-level allow/deny primitive, still used
+  directly by ``/admin/egress`` (which authenticates itself out-of-band from
+  the MCP transport) and by unit tests.
 
 The allowlist is enforced **at tool invocation**, not at token issuance (plan:
 "Token issuance succeeds for any user who completes the OAuth flow — the token
@@ -14,13 +27,14 @@ Sub-discovery mechanism (plan: "selftest --show-sub"):
   ``/tmp/ytt_last_sub`` (mode 0600) so operators can run
   ``ytt selftest --show-sub`` to find the exact string to add to
   ``YTT_ALLOWED_SUBJECTS``. The redaction filter blocks ``sub`` from logs;
-  this temp-file mechanism is intentionally NOT a log.
+  this temp-file mechanism is intentionally NOT a log. (Largely a formality
+  now that ``sub`` = a human-readable Google account email the operator
+  already knows, but kept for parity with the original discovery flow.)
 """
 
 from __future__ import annotations
 
 import os
-import stat
 
 from ytt.errors import FORBIDDEN, YttError
 
@@ -91,3 +105,44 @@ def check_subject(sub: str, allowed: frozenset[str]) -> None:
         )
     # First successful auth: write sub to temp file for selftest --show-sub.
     write_last_sub(sub)
+
+
+# ---------------------------------------------------------------------------
+# AuthMiddleware check — the real per-tool-call enforcement point
+# ---------------------------------------------------------------------------
+
+
+def check_subject_auth(ctx) -> bool:
+    """``fastmcp.server.middleware.AuthMiddleware`` auth check.
+
+    Runs before every tool call, resource read, and prompt render (see
+    ``ytt/server.py`` — ``AuthMiddleware(auth=check_subject_auth)``).
+
+    ``ctx.token`` is the FastMCP ``AccessToken`` FastMCP resolved for this
+    request, already signature/audience-verified by the Google-federated
+    provider (``ytt.auth.build_auth_provider``). Its ``claims`` dict carries
+    the Google-verified identity — see
+    ``fastmcp.server.auth.providers.google.GoogleTokenVerifier``.
+
+    Returns ``False`` (deny) rather than raising, matching
+    ``fastmcp.utilities.authorization.AuthCheck``'s callable contract — a
+    ``False`` return is what ``AuthMiddleware`` turns into an
+    ``AuthorizationError`` for the caller.
+    """
+    if ctx.token is None:
+        return False
+
+    claims = ctx.token.claims or {}
+    email = claims.get("email")
+    email_verified = claims.get("email_verified")
+
+    if not email or not email_verified:
+        return False
+
+    from ytt.config import get_settings
+
+    settings = get_settings()
+    allowed = email in settings.allowed_subjects_set
+    if allowed:
+        write_last_sub(email)
+    return allowed

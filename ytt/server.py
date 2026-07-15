@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse, Response
 import ytt
 from ytt import errors
 from ytt.auth import build_auth_provider
-from ytt.authz import check_subject
+from ytt.authz import check_subject_auth
 from ytt.cache import CacheHit, TranscriptCache
 from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
@@ -69,6 +69,7 @@ def _build_app():
     inside each tool invocation so the config can be overridden in tests.
     """
     from fastmcp import FastMCP  # deferred so unit tests can mock if needed
+    from fastmcp.server.middleware import AuthMiddleware
 
     settings = get_settings()
     _auth = build_auth_provider(settings)
@@ -77,6 +78,12 @@ def _build_app():
         name="ytt",
         version=ytt.__version__,
         auth=_auth,
+        # Enforces YTT_ALLOWED_SUBJECTS on every tool call, resource read, and
+        # prompt render — not just the /admin/egress diagnostic route (see
+        # ytt.authz.check_subject_auth docstring for why this matters: a
+        # prior version of this server only ever checked the allowlist on
+        # that one side route).
+        middleware=[AuthMiddleware(auth=check_subject_auth)],
         instructions=(
             "YouTube Transcript MCP server. "
             "Pass any YouTube URL directly — messy URLs with extra parameters, "
@@ -431,7 +438,9 @@ def _build_app():
         """Auth-gated egress diagnostic probe (plan §Security / §Observability).
 
         Returns the current egress IP, ASN, org, and residential flag.
-        Requires a valid Bearer token with a subject in YTT_ALLOWED_SUBJECTS.
+        Requires a valid Bearer token whose Google-verified email is in
+        YTT_ALLOWED_SUBJECTS — same check as ``check_subject_auth``, the
+        AuthMiddleware gate on the actual MCP tool calls.
 
         Plan: "``/admin/egress`` — requires a valid Bearer token with a subject
         in ``YTT_ALLOWED_SUBJECTS`` (same auth as tool calls; no special admin
@@ -439,11 +448,17 @@ def _build_app():
         """
         import hashlib
 
+        from fastmcp.server.dependencies import get_access_token
+
         from ytt.selftest import probe_egress
 
-        # --- Auth: extract token from Authorization header --------------------
-        auth_header = request.headers.get("authorization", "")
-        if not auth_header.lower().startswith("bearer "):
+        # --- Auth: resolve the FastMCP AccessToken for this request -----------
+        # get_access_token() reads the auth context RequireAuthMiddleware
+        # populates for every request to this ASGI app (custom routes
+        # included), already signature/audience-verified by the
+        # Google-federated provider — no manual token parsing needed.
+        token = get_access_token()
+        if token is None:
             return JSONResponse(
                 {"error": "Unauthorized", "error_code": errors.FORBIDDEN},
                 status_code=401,
@@ -455,22 +470,12 @@ def _build_app():
                 },
             )
 
-        token_str = auth_header[7:].strip()
+        claims = token.claims or {}
+        email = claims.get("email")
+        email_verified = claims.get("email_verified")
 
-        # --- Validate the token (audience + allowlist) -----------------------
-        # Use authz.check_subject which returns (sub, error_response) tuple.
-        # We perform a lightweight check: verify it decodes, then check allowlist.
-        try:
-            from ytt.auth import _extract_sub_from_token
-            sub = await _extract_sub_from_token(token_str, settings)
-        except Exception:
-            return JSONResponse(
-                {"error": "Invalid token", "error_code": errors.FORBIDDEN},
-                status_code=401,
-            )
-
-        if not check_subject(sub, settings):
-            subject_hash = hashlib.sha256(sub.encode()).hexdigest()[:8]
+        if not email or not email_verified or email not in settings.allowed_subjects_set:
+            subject_hash = hashlib.sha256((email or "").encode()).hexdigest()[:8]
             log.warning(
                 "AuthZ 403",
                 subject_hash=subject_hash,
@@ -485,6 +490,10 @@ def _build_app():
                 },
                 status_code=403,
             )
+
+        from ytt.authz import write_last_sub
+
+        write_last_sub(email)
 
         # --- Probe egress ------------------------------------------------
         try:

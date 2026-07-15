@@ -227,52 +227,52 @@ class TestWhisperQuota:
 
 
 # =============================================================================
-# auth.py — YttOAuthProvider route/metadata shape
+# auth.py — YttGoogleProvider route/metadata shape
 # =============================================================================
 
 
-class TestYttOAuthProviderMetadata:
-    """Tests for the OAuth AS / PRM route shape (plan: Auth, ADR-001)."""
+class TestYttGoogleProviderMetadata:
+    """Tests for the OAuth AS / PRM route shape (plan: Auth, ADR-001).
+
+    ytt federates to Google (ytt.auth.YttGoogleProvider, an OAuthProxy
+    subclass) rather than issuing its own unauthenticated tokens — see
+    docs/notes/auth.md and ytt/auth.py's module docstring for why
+    FastMCP's InMemoryOAuthProvider (a test/demo provider that auto-approves
+    every caller) must never be used here.
+    """
 
     @pytest.fixture
     def provider(self):
-        """Build a YttOAuthProvider from default settings."""
-        from ytt.auth import YttOAuthProvider
+        """Build a YttGoogleProvider from default (fake-credential) settings."""
+        from ytt.auth import build_auth_provider
         from ytt.config import Settings
         s = Settings(
             public_url="https://mcp.example.com/ytt",
+            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_secret="test-client-secret",
             jwt_signing_secret=None,
         )
-        return YttOAuthProvider(s)
+        return build_auth_provider(s)
 
-    def test_dcr_disabled(self, provider):
-        """DCR must be disabled (plan: No open DCR in v1)."""
-        opts = provider.client_registration_options
-        assert opts is not None
-        assert opts.enabled is False
-
-    def test_claude_client_preregistered(self, provider):
-        """Claude connector client must be pre-registered."""
-        from ytt.auth import CLAUDE_CLIENT_ID
-        assert CLAUDE_CLIENT_ID in provider.clients
-
-    def test_claude_client_has_both_redirect_uris(self, provider):
-        """Static client must have both Claude redirect URIs."""
-        from ytt.auth import CLAUDE_CLIENT_ID, CLAUDE_REDIRECT_URIS
-        client = provider.clients[CLAUDE_CLIENT_ID]
-        registered = [str(u).rstrip("/") for u in client.redirect_uris]
-        for uri in CLAUDE_REDIRECT_URIS:
-            assert any(r == uri.rstrip("/") for r in registered), \
-                f"Missing redirect URI: {uri}"
+    def test_dcr_restricted_to_claude_redirect_uris(self, provider):
+        """DCR is open (required for OAuthProxy) but scoped to Claude's two
+        redirect URIs — defense in depth against ytt's AS being used as an
+        open relay by arbitrary third-party OAuth clients."""
+        from ytt.auth import CLAUDE_REDIRECT_URIS
+        assert provider._allowed_client_redirect_uris == CLAUDE_REDIRECT_URIS
 
     def test_issuer_url_is_path_bearing(self, provider):
         """issuer_url must match the full path-bearing public_url."""
         assert str(provider.issuer_url).rstrip("/") == "https://mcp.example.com/ytt"
 
     def test_as_metadata_route_is_path_inserted(self, provider):
-        """AS metadata route must be /.well-known/oauth-authorization-server/ytt."""
-        # get_well_known_routes() with no mcp_path
-        routes = provider.get_well_known_routes(mcp_path=None)
+        """AS metadata route must be /.well-known/oauth-authorization-server/ytt.
+
+        GoogleProvider/OAuthProxy's get_routes() never calls
+        get_well_known_routes(), so this only exists because
+        YttGoogleProvider.get_routes() merges it in manually.
+        """
+        routes = provider.get_routes(mcp_path="/ytt")
         paths = [r.path for r in routes]
         assert "/.well-known/oauth-authorization-server/ytt" in paths, \
             f"Expected path-inserted AS metadata route, got: {paths}"
@@ -300,19 +300,114 @@ class TestYttOAuthProviderMetadata:
 class TestBuildAuthProvider:
     """Tests for the build_auth_provider factory function."""
 
-    def test_returns_ytt_oauth_provider(self):
-        from ytt.auth import YttOAuthProvider, build_auth_provider
+    def test_returns_ytt_google_provider(self):
+        from ytt.auth import YttGoogleProvider, build_auth_provider
         from ytt.config import Settings
-        s = Settings(public_url="https://mcp.example.com/ytt")
+        s = Settings(
+            public_url="https://mcp.example.com/ytt",
+            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_secret="test-client-secret",
+        )
         provider = build_auth_provider(s)
-        assert isinstance(provider, YttOAuthProvider)
+        assert isinstance(provider, YttGoogleProvider)
 
     def test_provider_base_url_matches_public_url(self):
         from ytt.auth import build_auth_provider
         from ytt.config import Settings
-        s = Settings(public_url="https://mcp.example.com/ytt")
+        s = Settings(
+            public_url="https://mcp.example.com/ytt",
+            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_secret="test-client-secret",
+        )
         provider = build_auth_provider(s)
         assert str(provider.base_url).rstrip("/") == "https://mcp.example.com/ytt"
+
+    def test_raises_without_client_id(self):
+        """Fail fast at startup rather than silently skipping auth."""
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+        s = Settings(public_url="https://mcp.example.com/ytt", oauth_client_id=None)
+        with pytest.raises(ValueError, match="YTT_OAUTH_CLIENT_ID"):
+            build_auth_provider(s)
+
+
+# =============================================================================
+# authz.py — check_subject_auth (the AuthMiddleware per-tool-call gate)
+# =============================================================================
+
+
+class TestCheckSubjectAuth:
+    """Tests for check_subject_auth — the real enforcement point wired into
+    AuthMiddleware in ytt/server.py, covering every tool call (not just the
+    /admin/egress side route ``check_subject`` alone used to gate)."""
+
+    @staticmethod
+    def _ctx(email=None, verified=True, no_token=False):
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeToken:
+            claims: dict
+
+        @dataclass
+        class FakeCtx:
+            token: object
+
+        if no_token:
+            return FakeCtx(token=None)
+        claims = {}
+        if email is not None:
+            claims = {"email": email, "email_verified": verified}
+        return FakeCtx(token=FakeToken(claims=claims))
+
+    def test_denies_when_no_token(self, monkeypatch):
+        from ytt.authz import check_subject_auth
+        assert check_subject_auth(self._ctx(no_token=True)) is False
+
+    def test_denies_when_no_email_claim(self, monkeypatch):
+        from ytt.authz import check_subject_auth
+        assert check_subject_auth(self._ctx(email=None)) is False
+
+    def test_denies_when_email_unverified(self, monkeypatch):
+        from ytt.authz import check_subject_auth
+        from ytt.config import Settings, get_settings
+        get_settings.cache_clear()
+        monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", "me@example.com")
+        try:
+            assert check_subject_auth(self._ctx(email="me@example.com", verified=False)) is False
+        finally:
+            get_settings.cache_clear()
+
+    def test_denies_when_email_not_in_allowlist(self, monkeypatch):
+        from ytt.authz import check_subject_auth
+        from ytt.config import get_settings
+        get_settings.cache_clear()
+        monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", "allowed@example.com")
+        try:
+            assert check_subject_auth(self._ctx(email="other@example.com")) is False
+        finally:
+            get_settings.cache_clear()
+
+    def test_allows_when_email_in_allowlist(self, monkeypatch):
+        from ytt.authz import check_subject_auth
+        from ytt.config import get_settings
+        get_settings.cache_clear()
+        monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", "me@example.com")
+        try:
+            assert check_subject_auth(self._ctx(email="me@example.com")) is True
+        finally:
+            get_settings.cache_clear()
+
+    def test_denies_when_allowlist_empty(self, monkeypatch):
+        """Empty allowlist = deny all, even for a validly-authenticated caller."""
+        from ytt.authz import check_subject_auth
+        from ytt.config import get_settings
+        get_settings.cache_clear()
+        monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", "")
+        try:
+            assert check_subject_auth(self._ctx(email="me@example.com")) is False
+        finally:
+            get_settings.cache_clear()
 
 
 # =============================================================================

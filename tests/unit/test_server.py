@@ -18,6 +18,21 @@ from starlette.testclient import TestClient
 from ytt.server import build_asgi_app, mcp
 
 
+@pytest.fixture(autouse=True)
+def _bypass_authz(monkeypatch):
+    """This file tests tool/business logic (Phase 7 pipeline wiring), not
+    auth — see test_auth.py for the AuthMiddleware/allowlist tests. Direct
+    ``mcp.call_tool()``/``mcp.list_tools()`` calls run with no HTTP request,
+    so there's no real Google-verified token to resolve; bypass the
+    AuthMiddleware gate rather than fabricate one here.
+    """
+    from fastmcp.server.middleware.authorization import AuthMiddleware
+
+    for mw in mcp.middleware:
+        if isinstance(mw, AuthMiddleware):
+            monkeypatch.setattr(mw, "auth", lambda ctx: True)
+
+
 # ---------------------------------------------------------------------------
 # Tool registration
 # ---------------------------------------------------------------------------
