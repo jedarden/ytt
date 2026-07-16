@@ -82,6 +82,35 @@ def get_last_sub() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def subject_allowed(subject: str, allowed: frozenset[str]) -> bool:
+    """Return True if *subject* is permitted by the *allowed* allowlist.
+
+    Matching is **case-insensitive** and supports two entry kinds:
+
+    - a full subject/email (exact match), e.g. ``me@jedcabanero.com``;
+    - a **domain pattern** beginning with ``@``, e.g. ``@jedcabanero.com``,
+      which matches any subject whose email is in that exact domain. The
+      leading ``@`` anchors the match to the whole domain, so
+      ``@jedcabanero.com`` matches ``anyone@jedcabanero.com`` but NOT
+      ``x@evil-jedcabanero.com`` (different domain) nor
+      ``x@sub.jedcabanero.com`` (subdomain).
+
+    Domain patterns are only safe because callers gate on a Google-**verified**
+    email (``check_subject_auth`` requires ``email_verified``): a client cannot
+    smuggle in a forged ``@jedcabanero.com`` address — Google won't verify it.
+
+    Args:
+        subject: The subject/email to test.
+        allowed: The parsed allowlist (``Settings.allowed_subjects_set``); may
+            mix exact and ``@domain`` entries.
+    """
+    s = subject.strip().lower()
+    allowed_norm = {a.strip().lower() for a in allowed}
+    if s in allowed_norm:
+        return True
+    return any(entry.startswith("@") and s.endswith(entry) for entry in allowed_norm)
+
+
 def check_subject(sub: str, allowed: frozenset[str]) -> None:
     """Raise :class:`~ytt.errors.YttError` (FORBIDDEN) if *sub* is not allowed.
 
@@ -98,7 +127,7 @@ def check_subject(sub: str, allowed: frozenset[str]) -> None:
     Raises:
         YttError: With ``error_code=FORBIDDEN`` if not in the allowlist.
     """
-    if sub not in allowed:
+    if not subject_allowed(sub, allowed):
         raise YttError(
             FORBIDDEN,
             "Access denied. Contact the server operator to be added to the allowlist.",
@@ -142,7 +171,7 @@ def check_subject_auth(ctx) -> bool:
     from ytt.config import get_settings
 
     settings = get_settings()
-    allowed = email in settings.allowed_subjects_set
+    allowed = subject_allowed(email, settings.allowed_subjects_set)
     if allowed:
         write_last_sub(email)
     return allowed

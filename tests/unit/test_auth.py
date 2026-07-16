@@ -21,7 +21,7 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from ytt.authz import check_subject, get_last_sub, write_last_sub
+from ytt.authz import check_subject, get_last_sub, subject_allowed, write_last_sub
 from ytt.errors import FORBIDDEN, YttError
 from ytt.ratelimit import SubjectRateLimiter, TokenBucket, WhisperQuota
 
@@ -63,6 +63,52 @@ class TestCheckSubject:
         with pytest.raises(YttError) as exc_info:
             check_subject(sub, frozenset())
         assert sub not in exc_info.value.message
+
+    def test_exact_match_is_case_insensitive(self):
+        """A different-cased email still matches an exact allowlist entry."""
+        check_subject("Me@jedcabanero.com", frozenset(["me@jedcabanero.com"]))
+
+    def test_domain_pattern_allows_any_address_in_domain(self):
+        """An ``@domain`` entry admits any email in that domain."""
+        allow = frozenset(["@jedcabanero.com"])
+        check_subject("me@jedcabanero.com", allow)
+        check_subject("anthropic@jedcabanero.com", allow)
+        check_subject("ANYONE@JEDCABANERO.COM", allow)  # case-insensitive
+
+    def test_domain_pattern_denies_other_domains(self):
+        """``@domain`` must not admit look-alike or subdomain addresses."""
+        allow = frozenset(["@jedcabanero.com"])
+        for bad in (
+            "user@evil.com",
+            "user@evil-jedcabanero.com",  # different domain, shares suffix
+            "user@sub.jedcabanero.com",  # subdomain, not the domain itself
+            "jedcabanero.com",  # no '@'
+        ):
+            with pytest.raises(YttError) as exc_info:
+                check_subject(bad, allow)
+            assert exc_info.value.error_code == FORBIDDEN
+
+
+class TestSubjectAllowed:
+    """Unit tests for the ``subject_allowed`` matching primitive."""
+
+    def test_exact(self):
+        assert subject_allowed("a@b.com", frozenset(["a@b.com"])) is True
+        assert subject_allowed("x@b.com", frozenset(["a@b.com"])) is False
+
+    def test_case_insensitive_both_sides(self):
+        assert subject_allowed("A@B.CoM", frozenset(["a@b.com"])) is True
+        assert subject_allowed("a@b.com", frozenset(["A@B.COM"])) is True
+
+    def test_domain_anchored_at_at_sign(self):
+        allow = frozenset(["@b.com"])
+        assert subject_allowed("a@b.com", allow) is True
+        assert subject_allowed("a@x.com", allow) is False
+        assert subject_allowed("a@evilb.com", allow) is False
+        assert subject_allowed("a@sub.b.com", allow) is False
+
+    def test_empty_allowlist_denies(self):
+        assert subject_allowed("a@b.com", frozenset()) is False
 
     def test_allow_writes_last_sub(self, tmp_path, monkeypatch):
         """Successful auth writes sub to the temp file for selftest --show-sub."""

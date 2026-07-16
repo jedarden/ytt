@@ -180,8 +180,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     @property
     def allowed_subjects_set(self) -> frozenset[str]:
-        """Parsed allowlist; empty -> deny all (fail-closed)."""
-        return frozenset(s.strip() for s in self.allowed_subjects.split(",") if s.strip())
+        """Parsed allowlist; empty -> deny all (fail-closed).
+
+        Entries are lowercased for case-insensitive matching. Each entry is
+        either a full subject/email (exact match) or a domain pattern beginning
+        with ``@`` (e.g. ``@jedcabanero.com``) that matches any email in that
+        domain — see :func:`ytt.authz.subject_allowed`.
+        """
+        return frozenset(
+            s.strip().lower() for s in self.allowed_subjects.split(",") if s.strip()
+        )
 
     @property
     def audience(self) -> str:
