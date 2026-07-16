@@ -15,11 +15,15 @@ classifiers = [
 # Runtime deps. Floors are set here; uv.lock pins the exact resolved versions
 # (the committed, reproducible source of truth). FastMCP is floored at the
 # spec-required >= 2.11.1 (audience-bound JWTVerifier / RemoteAuthProvider);
-# yt-dlp is pinned to an exact version because its YouTube extractor drifts
-# (plan: "pin yt-dlp exactly").
+# yt-dlp is pinned to an exact version for reproducible builds, BUT its YouTube
+# extractor rots fast — YouTube changes its player constantly and yt-dlp ships
+# fixes every couple weeks. An exact pin left stale WILL stop extracting (the
+# 2025.5.22 pin broke against 2026 YouTube: every fetch returned "video
+# unavailable", faking "no captions" and forcing doomed Whisper fallbacks).
+# Bump this to a current release regularly. Last bumped 2026-07-16 → 2026.7.4.
 dependencies = [
     "fastmcp>=2.11.1",
-    "yt-dlp==2025.5.22",
+    "yt-dlp==2026.7.4",
     "uvicorn>=0.34.0",
     "httpx>=0.28.0",
     "pydantic-settings>=2.7.0",
