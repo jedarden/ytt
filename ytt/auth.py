@@ -49,26 +49,36 @@ CLAUDE_REDIRECT_URIS: list[str] = [
 
 
 class YttGoogleProvider(GoogleProvider):
-    """``GoogleProvider`` plus RFC 8414/9728 path-inserted well-known routes.
+    """``GoogleProvider`` plus path-inserted routes for a path-bearing issuer.
 
     ``create_streamable_http_app`` mounts whatever ``get_routes()`` returns —
     it never calls ``get_well_known_routes()``. For a path-bearing issuer
     (``https://mcp.ardenone.com/ytt``), the path-inserted AS-metadata route
-    (``/.well-known/oauth-authorization-server/ytt``) that
+    (``/.well-known/oauth-authorization-server/ytt``, RFC 8414) that
     ``OAuthProvider.get_well_known_routes()`` computes is therefore never
     mounted unless merged in here.
 
-    This matters because ytt's IngressRoute
+    Separately — and this is the bigger gap — the MCP SDK's operational OAuth
+    routes (``/register``, ``/authorize``, ``/token``, ``/revoke``) and
+    OAuthProxy's upstream-IdP callback (``/auth/callback``) are mounted at
+    hardcoded BARE paths (see ``mcp.server.auth.routes``:
+    ``AUTHORIZATION_PATH = "/authorize"`` etc. — never issuer-path-aware),
+    even though the *metadata these same routes advertise*
+    (``registration_endpoint``, ``authorization_endpoint``, ...) correctly
+    uses the path-bearing issuer URL. ytt's IngressRoute
     (``declarative-config k8s/ardenone-cluster/ytt/ingressroute.yml``)
-    forwards ONLY the path-inserted well-known suffixes to this service —
-    the bare ``/.well-known/*`` prefix is routed to ibkr-mcp, which shares
-    the ``mcp.ardenone.com`` host. Without this override, Claude's OAuth
-    discovery 404s.
+    forwards only ``PathPrefix("/ytt")`` plus the two well-known suffixes to
+    this service — a request to the advertised
+    ``https://mcp.ardenone.com/ytt/register`` arrives here as path
+    ``/ytt/register``, which has no matching route without this override
+    (404 — first hit in production 2026-07-16, "Couldn't register with
+    YouTube Transcript's sign-in service"; DCR was never exercised under the
+    old InMemoryOAuthProvider design, which had it disabled, so this bug
+    predates and is independent of the auth-provider swap).
 
-    The protected-resource-metadata route
-    (``/.well-known/oauth-protected-resource/ytt``) does not need the same
-    treatment — ``OAuthProvider.get_routes()`` already derives it directly
-    from ``resource_base_url``.
+    Fix: mount every non-well-known route a second time under the issuer
+    path, reusing the same endpoint — bare paths keep working too (harmless;
+    nothing routes external traffic to them without the ``/ytt`` prefix).
     """
 
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
@@ -82,6 +92,8 @@ class YttGoogleProvider(GoogleProvider):
             return base_routes
 
         existing_paths = {r.path for r in base_routes if hasattr(r, "path")}
+
+        # --- RFC 8414 path-inserted AS-metadata + OIDC alias -------------
         as_meta_route = next(
             (
                 r
@@ -91,31 +103,49 @@ class YttGoogleProvider(GoogleProvider):
             ),
             None,
         )
-        if as_meta_route is None:
-            return base_routes
+        if as_meta_route is not None:
+            for pi_path in (
+                f"/.well-known/oauth-authorization-server{issuer_path}",
+                f"/.well-known/openid-configuration{issuer_path}",
+            ):
+                if pi_path not in existing_paths:
+                    base_routes.append(
+                        Route(
+                            pi_path,
+                            endpoint=as_meta_route.endpoint,
+                            methods=as_meta_route.methods,
+                        )
+                    )
+                    existing_paths.add(pi_path)
 
-        for pi_path in (
-            f"/.well-known/oauth-authorization-server{issuer_path}",
-            f"/.well-known/openid-configuration{issuer_path}",
-        ):
-            if pi_path not in existing_paths:
+            if "/.well-known/openid-configuration" not in existing_paths:
                 base_routes.append(
                     Route(
-                        pi_path,
+                        "/.well-known/openid-configuration",
                         endpoint=as_meta_route.endpoint,
                         methods=as_meta_route.methods,
                     )
                 )
-                existing_paths.add(pi_path)
+                existing_paths.add("/.well-known/openid-configuration")
 
-        if "/.well-known/openid-configuration" not in existing_paths:
+        # --- Path-insert every other bare operational route --------------
+        # (/register, /authorize, /token, /revoke, /auth/callback, ...) —
+        # see class docstring. Skip well-known paths (already handled with
+        # RFC-specific insertion rules above) and anything already
+        # path-bearing.
+        for route in list(base_routes):
+            if not isinstance(route, Route):
+                continue
+            path = route.path
+            if path.startswith("/.well-known/") or path.startswith(issuer_path):
+                continue
+            pi_path = f"{issuer_path}{path}"
+            if pi_path in existing_paths:
+                continue
             base_routes.append(
-                Route(
-                    "/.well-known/openid-configuration",
-                    endpoint=as_meta_route.endpoint,
-                    methods=as_meta_route.methods,
-                )
+                Route(pi_path, endpoint=route.endpoint, methods=route.methods)
             )
+            existing_paths.add(pi_path)
 
         return base_routes
 

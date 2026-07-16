@@ -291,6 +291,37 @@ class TestYttGoogleProviderMetadata:
         assert resource_url is not None
         assert str(resource_url).rstrip("/") == "https://mcp.example.com/ytt"
 
+    @pytest.mark.parametrize(
+        "path",
+        ["/register", "/authorize", "/token", "/auth/callback"],
+    )
+    def test_operational_route_is_path_inserted(self, provider, path):
+        """Every operational OAuth route the MCP SDK mounts at a bare path
+        (see class docstring: AUTHORIZATION_PATH etc. are hardcoded,
+        issuer-path-unaware constants) must ALSO be reachable under the
+        issuer path — ytt's IngressRoute only forwards PathPrefix("/ytt")
+        (plus the two well-known suffixes) to this service, so a request to
+        the advertised "https://mcp.example.com/ytt/register" arrives here
+        as "/ytt/register". Regression test for the 2026-07-16 "Couldn't
+        register with YouTube Transcript's sign-in service" failure — DCR
+        was never exercised before this (old design had it disabled).
+        """
+        routes = provider.get_routes(mcp_path="/ytt")
+        paths = {r.path for r in routes if hasattr(r, "path")}
+        assert path in paths, f"Expected bare route {path!r} present: {paths}"
+        assert f"/ytt{path}" in paths, \
+            f"Expected path-inserted {'/ytt' + path!r}, got: {paths}"
+
+    def test_path_inserted_route_reuses_same_endpoint(self, provider):
+        """The path-inserted duplicate must dispatch to the identical
+        handler as the bare route, not a stub — otherwise the URLs resolve
+        but silently do the wrong thing."""
+        routes = provider.get_routes(mcp_path="/ytt")
+        by_path = {r.path: r for r in routes if hasattr(r, "path")}
+        assert by_path["/ytt/register"].endpoint is by_path["/register"].endpoint
+        assert by_path["/ytt/authorize"].endpoint is by_path["/authorize"].endpoint
+        assert by_path["/ytt/token"].endpoint is by_path["/token"].endpoint
+
 
 # =============================================================================
 # auth.py — build_auth_provider factory

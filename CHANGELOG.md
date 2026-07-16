@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-16
+
+### Fixed
+
+- **DCR/OAuth operational routes 404'd behind the path prefix.** The MCP
+  SDK mounts `/register`, `/authorize`, `/token`, `/revoke`, and
+  OAuthProxy's upstream-IdP callback (`/auth/callback`) at hardcoded bare
+  paths (`mcp.server.auth.routes.AUTHORIZATION_PATH` etc. are not
+  issuer-path-aware), even though the metadata these routes advertise
+  (`registration_endpoint`, `authorization_endpoint`, ...) correctly uses
+  the path-bearing issuer URL (`https://mcp.ardenone.com/ytt`). ytt's
+  IngressRoute only forwards `PathPrefix("/ytt")` (plus the two well-known
+  suffixes) to this service, so Claude's connector-add flow 404'd on
+  `POST /ytt/register` ("Couldn't register with YouTube Transcript's
+  sign-in service"). DCR was never exercised under the old
+  InMemoryOAuthProvider design (had it disabled), so this predates and is
+  independent of the 0.2.0 auth-provider swap — it just never got hit until
+  now. `YttGoogleProvider.get_routes()` now mounts every non-well-known
+  operational route a second time under the issuer path.
+
 ## [0.2.0] — 2026-07-15
 
 ### Fixed
@@ -74,6 +94,7 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/jedarden/ytt/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jedarden/ytt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jedarden/ytt/releases/tag/v0.1.0

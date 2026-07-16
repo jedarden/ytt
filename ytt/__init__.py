@@ -6,4 +6,4 @@ served over Streamable HTTP for use as a Claude custom connector.
 See ``docs/plan/plan.md`` for the authoritative specification.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
