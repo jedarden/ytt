@@ -155,6 +155,12 @@ class TestNoCookiesEnforcement:
         DRM'd videos falsely report 'no captions' and fall to Whisper."""
         assert YDL_BASE_OPTS["allow_unplayable_formats"] is True
 
+    def test_ignore_no_formats_error_for_caption_only(self):
+        """Format selection must warn-and-continue (not raise 'Requested format
+        is not available') so subtitles are returned even with no playable
+        format — the caption path never wants a media format."""
+        assert YDL_BASE_OPTS["ignore_no_formats_error"] is True
+
 
 # ---------------------------------------------------------------------------
 # Error taxonomy — classify_ydl_error (plan §Error taxonomy)

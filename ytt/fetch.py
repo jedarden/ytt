@@ -71,6 +71,15 @@ YDL_CAPTION_FLAGS: dict = {
     # captions. Without this, EVERY DRM'd video (incl. normal ones like TED
     # talks) falsely reported "no captions" → doomed Whisper job.
     "allow_unplayable_formats": True,
+    # Even past the DRM check, extract_info() still runs format SELECTION (yes,
+    # even with download=False + skip_download=True), and when every format is
+    # DRM/unplayable it raises "Requested format is not available" (raised in
+    # YoutubeDL.py only when ignore_no_formats_error is False). We want subtitle
+    # tracks, never a media format, so tell yt-dlp to warn-and-continue instead
+    # of erroring on format selection — it then returns the info dict with
+    # subtitles/automatic_captions populated. yt-dlp's documented "extract
+    # metadata even if the video isn't downloadable" path.
+    "ignore_no_formats_error": True,
 }
 
 #: Base options merged into every YDL() call in the caption path.
