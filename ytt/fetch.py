@@ -58,6 +58,19 @@ YDL_CAPTION_FLAGS: dict = {
     "writesubtitles": True,
     "writeautomaticsub": True,
     "subtitlesformat": "json3",
+    # YouTube now applies Widevine/PlayReady DRM (via SABR streaming) to many
+    # ordinary uploads. By default yt-dlp ABORTS extraction with "This video is
+    # DRM protected" (see yt_dlp/extractor/youtube/_video.py: it calls
+    # report_drm() unless allow_unplayable_formats is set). That abort also
+    # kills CAPTION retrieval — but caption tracks are NOT DRM-encrypted, only
+    # the audio/video formats are, and the caption path never downloads media
+    # (skip_download=True). Setting this lets extract_info() proceed past the
+    # DRM check and still populate subtitles/automatic_captions, so we can pull
+    # the (unencrypted) caption text. Whisper fallback still can't fetch DRM
+    # audio, but that path is only reached when a video genuinely has no
+    # captions. Without this, EVERY DRM'd video (incl. normal ones like TED
+    # talks) falsely reported "no captions" → doomed Whisper job.
+    "allow_unplayable_formats": True,
 }
 
 #: Base options merged into every YDL() call in the caption path.

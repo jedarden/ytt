@@ -150,6 +150,11 @@ class TestNoCookiesEnforcement:
         ea = YDL_BASE_OPTS["extractor_args"]
         assert ea["youtube"]["player_client"] == ["tv", "web_embedded", "mweb"]
 
+    def test_allow_unplayable_formats_for_drm_captions(self):
+        """Must not abort on DRM — captions are unencrypted; without this,
+        DRM'd videos falsely report 'no captions' and fall to Whisper."""
+        assert YDL_BASE_OPTS["allow_unplayable_formats"] is True
+
 
 # ---------------------------------------------------------------------------
 # Error taxonomy — classify_ydl_error (plan §Error taxonomy)
