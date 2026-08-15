@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 from starlette.routing import Route
 
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 
 from ytt.config import Settings
 
@@ -58,6 +59,9 @@ CLAUDE_REDIRECT_URIS: list[str] = [
 AUTHENTIK_OIDC_CONFIG_URL = (
     "https://sso.ardenone.com/application/o/ytt/.well-known/openid-configuration"
 )
+
+# Same slug, without the discovery-doc suffix -- the ID token's iss claim.
+AUTHENTIK_ISSUER = "https://sso.ardenone.com/application/o/ytt/"
 
 
 class YttOIDCProvider(OIDCProxy):
@@ -186,23 +190,57 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     parsed = urlparse(settings.public_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
-    # verify_id_token=True -- CONFIRMED REQUIRED 2026-08-15, not the
-    # optional email-claim fallback this comment originally described.
-    # Authentik signs access tokens with HS256 (symmetric) --
-    # id_token_signing_alg_values_supported in its own discovery doc says
-    # so -- so its JWKS endpoint correctly has no keys for it (a shared
-    # HS256 secret can never be published there). OIDCProxy's default
-    # (verify_id_token unset) tries to verify the *access* token via JWKS,
-    # assuming an asymmetric alg, and fails with "JWKS key processing
-    # failed: No keys found in JWKS" -> "Upstream token validation
-    # failed" -> every single request 401s invalid_token, even though the
-    # full OAuth dance (login, consent, code exchange, FastMCP's own
-    # self-issued token) completes successfully every time. Confirmed via
-    # FASTMCP_LOG_LEVEL=DEBUG live logs, not guessed. Only the ID token is
-    # meant to be independently verifiable this way; verify_id_token=True
-    # switches OIDCProxy to that. This also settles the original open
-    # question this comment was about: email/email_verified come from the
-    # ID token now, not the access token.
+    # verify_id_token=True + a custom HS256 token_verifier -- BOTH required,
+    # confirmed 2026-08-15 across two rounds of live debugging
+    # (FASTMCP_LOG_LEVEL=DEBUG, not guessed).
+    #
+    # This Authentik instance signs EVERY OAuth2Provider's tokens (access
+    # AND id) with HS256 (symmetric, keyed by the client_secret) -- not a
+    # ytt misconfiguration to fix on Authentik's side. Confirmed by
+    # comparing against OpenBao's own provider (openbao-ardenone-manager),
+    # which authenticates real users daily: identical
+    # id_token_signing_alg_values_supported=["HS256"] and an equally empty
+    # JWKS ({}). HS256 keyed by the client_secret is a fully spec-compliant
+    # OIDC choice for confidential clients (OIDC Core 10.1) -- Authentik
+    # only switches to RS256 if a *usable* asymmetric signing key is
+    # selected, and apparently isn't here even though a certificate shows
+    # as selected in the UI (this instance has exactly one certificate,
+    # "authentik-self-signed-certificate" -- swapping to a different one
+    # isn't an option). OpenBao's OIDC client evidently never tries to
+    # verify the token's signature via JWKS at all (it can get away with
+    # trusting the token because it received it directly from Authentik's
+    # token endpoint over authenticated TLS) -- FastMCP's OIDCProxy has no
+    # such option. Its default `get_token_verifier()` unconditionally
+    # builds a JWKS-based `JWTVerifier`, with **no path for symmetric
+    # verification at all**, so it can never work against this IdP
+    # regardless of verify_id_token: "JWKS key processing failed: No keys
+    # found in JWKS" -> "Upstream token validation failed" -> every
+    # request 401s invalid_token, even though the full OAuth dance (login,
+    # consent, code exchange, FastMCP's own self-issued token) completes
+    # with 200s every time.
+    #
+    # Fix: build our own JWTVerifier -- it explicitly supports symmetric
+    # algorithms via its `public_key` parameter (its own docstring: "PEM
+    # public key OR shared secret") -- and pass it as token_verifier=,
+    # bypassing OIDCProxy's broken auto-construction. verify_id_token=True
+    # is still required alongside this: it's what makes
+    # _get_verification_token() hand the verifier the id_token (whose
+    # `aud` is the client_id, OIDC Core §2 -- matched below) instead of
+    # the access_token, and it's also what settles the original question
+    # this comment used to be about: email/email_verified come from the
+    # ID token, not the access token.
+    #
+    # OIDCProxy.__init__ forbids combining a custom token_verifier with
+    # required_scopes (raises ValueError -- "configure scopes on your
+    # verifier instead"), so that's set after construction below instead,
+    # replicating exactly what OIDCProxy does internally when
+    # verify_id_token strips scopes from an auto-built verifier.
+    token_verifier = JWTVerifier(
+        public_key=settings.oauth_client_secret,
+        algorithm="HS256",
+        issuer=AUTHENTIK_ISSUER,
+        audience=settings.oauth_client_id,
+    )
     #
     # forward_resource=False -- CONFIRMED empirically 2026-08-15, not a
     # theoretical concern (a prior version of this comment claimed the
@@ -219,15 +257,26 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # AS still binds its self-issued token to the right audience
     # independently of this upstream leg, so not forwarding `resource` to
     # Authentik doesn't weaken anything on ytt's side.
-    return YttOIDCProvider(
+    provider = YttOIDCProvider(
         config_url=AUTHENTIK_OIDC_CONFIG_URL,
         client_id=settings.oauth_client_id,
         client_secret=settings.oauth_client_secret,
         base_url=settings.public_url,
         resource_base_url=origin,
-        required_scopes=["openid", "email"],
         allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
         jwt_signing_key=settings.jwt_signing_secret,
         forward_resource=False,
         verify_id_token=True,
+        token_verifier=token_verifier,
     )
+
+    # Replicates OIDCProxy's own "restore scopes" step (oidc_proxy.py,
+    # runs only when required_scopes is passed at construction time, which
+    # we can't do alongside a custom token_verifier -- see the comment
+    # above) so openid/email are still advertised to clients and enforced
+    # at the FastMCP token level, not just implied by what we ask Authentik
+    # for.
+    provider.required_scopes = ["openid", "email"]
+    provider.update_default_scopes(["openid", "email"])
+
+    return provider

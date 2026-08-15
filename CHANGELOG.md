@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-08-15
+
+### Fixed
+
+- **0.2.8's `verify_id_token=True` fix was incomplete -- `invalid_token`
+  persisted, identically, on the ID token this time.** Root cause:
+  Authentik signs *every* OAuth2Provider's tokens on this instance --
+  access token AND id token alike -- with HS256 (symmetric, keyed by the
+  client_secret), confirmed by comparing against OpenBao's own working
+  provider (identical `id_token_signing_alg_values_supported: ["HS256"]`,
+  identically empty JWKS `{}`). This is a normal, spec-compliant OIDC
+  configuration for confidential clients, not a misconfiguration --
+  OpenBao's OIDC client just never tries to verify the signature via
+  JWKS at all. `OIDCProxy.get_token_verifier()` unconditionally builds a
+  JWKS-based `JWTVerifier` with no path for symmetric verification, so
+  it could never work against this IdP regardless of which token
+  (access or id) it pointed at. Fixed by constructing our own
+  `JWTVerifier(public_key=<client_secret>, algorithm="HS256", ...)` --
+  it explicitly supports shared-secret verification -- and passing it as
+  `token_verifier=` to bypass the broken auto-construction.
+
 ## [0.2.8] — 2026-08-15
 
 ### Fixed
