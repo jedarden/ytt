@@ -186,16 +186,23 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     parsed = urlparse(settings.public_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
-    # ADR-003 open verification item, resolve at first live connector re-auth
-    # (don't assume): ytt.authz.check_subject_auth reads email/email_verified
-    # off the *access-token* JWT claims (default OIDCProxy behavior below —
-    # verify_id_token left unset). Google's opaque-token verifier populated
-    # those on the access token; whether Authentik's access-token JWT does
-    # too depends on its scope-mapping config, and its default OpenID scope
-    # mapping is documented to land them on the ID token instead. If a real
-    # login comes back with claims missing email/email_verified, pass
-    # verify_id_token=True here (OIDCProxy verifies the id_token instead of
-    # the access_token) rather than reaching into the ID token by hand.
+    # verify_id_token=True -- CONFIRMED REQUIRED 2026-08-15, not the
+    # optional email-claim fallback this comment originally described.
+    # Authentik signs access tokens with HS256 (symmetric) --
+    # id_token_signing_alg_values_supported in its own discovery doc says
+    # so -- so its JWKS endpoint correctly has no keys for it (a shared
+    # HS256 secret can never be published there). OIDCProxy's default
+    # (verify_id_token unset) tries to verify the *access* token via JWKS,
+    # assuming an asymmetric alg, and fails with "JWKS key processing
+    # failed: No keys found in JWKS" -> "Upstream token validation
+    # failed" -> every single request 401s invalid_token, even though the
+    # full OAuth dance (login, consent, code exchange, FastMCP's own
+    # self-issued token) completes successfully every time. Confirmed via
+    # FASTMCP_LOG_LEVEL=DEBUG live logs, not guessed. Only the ID token is
+    # meant to be independently verifiable this way; verify_id_token=True
+    # switches OIDCProxy to that. This also settles the original open
+    # question this comment was about: email/email_verified come from the
+    # ID token now, not the access token.
     #
     # forward_resource=False -- CONFIRMED empirically 2026-08-15, not a
     # theoretical concern (a prior version of this comment claimed the
@@ -222,4 +229,5 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
         allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
         jwt_signing_key=settings.jwt_signing_secret,
         forward_resource=False,
+        verify_id_token=True,
     )

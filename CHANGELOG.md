@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-08-15
+
+### Fixed
+
+- **Every real connector auth 401'd on the very first tool call, after a
+  fully successful OAuth dance.** Login, consent, Authentik token
+  exchange, and FastMCP's own self-issued token all completed with
+  200s -- then `POST /ytt` rejected the token as `invalid_token`
+  immediately, same pod, no restart in between. Root cause (confirmed
+  via `FASTMCP_LOG_LEVEL=DEBUG` live logs, not guessed): Authentik
+  signs access tokens with HS256 (symmetric) per its own discovery
+  document, so its JWKS endpoint correctly has no keys for it -- a
+  shared HS256 secret can never be published there. `OIDCProxy`'s
+  default behavior verifies the upstream *access* token via JWKS
+  (assuming an asymmetric algorithm), which fails with "No keys found
+  in JWKS" every time. Fixed with `verify_id_token=True` in
+  `ytt/auth.py` -- only the ID token is meant to be independently
+  verifiable this way. This also resolves 0.2.6's open question about
+  where `email`/`email_verified` land (the ID token, not the access
+  token).
+
 ## [0.2.7] — 2026-08-15
 
 ### Fixed
