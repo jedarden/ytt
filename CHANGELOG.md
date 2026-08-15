@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-08-15
+
 ### Changed
 
 - **OAuth federation: Google → self-hosted Authentik (ADR-003).**
@@ -16,9 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.well-known/openid-configuration` document instead of hardcoding
   Google's. ytt now has its own Authentik application/client instead of
   sharing ibkr-mcp's GCP OAuth app. `YTT_OAUTH_CLIENT_ID`/
-  `YTT_OAUTH_CLIENT_SECRET` now hold Authentik-issued values; same env
-  vars, same OpenBao path, no config-shape change. See
-  `docs/plan/plan.md` ADR-003 and `ytt/auth.py`'s module docstring.
+  `YTT_OAUTH_CLIENT_SECRET` now hold Authentik-issued values, sourced from
+  a new consolidated OpenBao path (`ardenone-cluster/ytt/oauth`, keys
+  `client_id`/`client_secret`) instead of the old two-path
+  `oauth-client-id`/`oauth-client-secret` shape. See `docs/plan/plan.md`
+  ADR-003 and `ytt/auth.py`'s module docstring.
+
+### Fixed
+
+- **This release was built by CI but never actually deployed for hours**
+  — `declarative-config`'s `deployment.yml` kept referencing `0.2.5`
+  after this code landed, so the live pod kept running the old
+  Google-federated build. Caught when a real connector re-auth attempt
+  redirected to Google Workspace instead of Authentik; confirmed via
+  Traefik's access log (`/ytt/authorize` carrying
+  `scope=openid+https://www.googleapis.com/auth/userinfo.email`, a
+  Google-specific scope URI only the old provider produces).
 
 ## [0.2.1] — 2026-07-16
 
