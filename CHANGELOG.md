@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-08-15
+
+### Fixed
+
+- **Root cause of "OAuth completes, tools/list handler runs, but the
+  client sees zero tools," found via the 0.2.10 diagnostic logging:**
+  `check_subject_auth` required the token's `email_verified` claim to be
+  truthy, on every single call, unconditionally -- but this Authentik
+  instance's default "scope-email" mapping (`goauthentik default OAuth
+  Mapping: OpenID 'email'`, shared by every OAuth2 provider on
+  sso.ardenone.com) hardcodes `"email_verified": False` in its expression
+  for every account, with no per-user override. It has never once been
+  able to return `True` since the Authentik migration, independent of the
+  YTT_ALLOWED_SUBJECTS domain fix, independent of everything else
+  investigated today. Dropped the `email_verified` requirement --
+  meaningless against this IdP's local, operator-created, non-federated
+  accounts, and access to the ytt application itself is already gated by
+  Authentik's `platform-admins` group policy. See `ytt/authz.py`'s module
+  docstring for the full reasoning.
+
+### Removed
+
+- The 0.2.10 temporary diagnostic logging in `check_subject_auth`, now
+  that its job (finding the above) is done.
+
 ## [0.2.10] — 2026-08-15
 
 ### Added

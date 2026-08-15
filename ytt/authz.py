@@ -1,9 +1,24 @@
 """Authorization — subject allowlist (plan: Security & Authorization).
 
-Checks the token's Google-verified ``email`` claim against
-``YTT_ALLOWED_SUBJECTS`` on every tool call; empty allowlist = deny all
-(fail-closed); not listed → ``403`` with a human-readable message ("Contact
-the server operator to be added to the allowlist").
+Checks the token's ``email`` claim against ``YTT_ALLOWED_SUBJECTS`` on every
+tool call; empty allowlist = deny all (fail-closed); not listed → ``403``
+with a human-readable message ("Contact the server operator to be added to
+the allowlist").
+
+NOTE (2026-08-15, post-ADR-003 Google -> Authentik migration): this used to
+also require the ``email_verified`` claim, which was meaningful under
+Google (a real third-party verification signal). It is NOT meaningful
+against this deployment's Authentik instance -- confirmed live via the
+"authentik default OAuth Mapping: OpenID 'email'" scope mapping, whose
+expression hardcodes ``"email_verified": False`` unconditionally for every
+account, with no path to ever return True short of editing that
+instance-wide managed mapping (shared by every other OAuth2 provider on
+sso.ardenone.com, e.g. ibkr-mcp, OpenBao -- too broad a blast radius to
+change for ytt's sake alone). Dropped the check instead: this Authentik
+instance already gates access to the ytt application itself via a
+platform-admins group policy binding, and accounts are entirely
+operator-created with no external federation, so "verified" was never
+protecting against anything real in this model.
 
 Two entry points:
 
@@ -36,11 +51,7 @@ from __future__ import annotations
 
 import os
 
-import structlog
-
 from ytt.errors import FORBIDDEN, YttError
-
-log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Temp-file path for selftest --show-sub mechanism
@@ -99,9 +110,14 @@ def subject_allowed(subject: str, allowed: frozenset[str]) -> bool:
       ``x@evil-jedcabanero.com`` (different domain) nor
       ``x@sub.jedcabanero.com`` (subdomain).
 
-    Domain patterns are only safe because callers gate on a Google-**verified**
-    email (``check_subject_auth`` requires ``email_verified``): a client cannot
-    smuggle in a forged ``@jedcabanero.com`` address — Google won't verify it.
+    Domain patterns are safe here because the ``email`` claim comes from
+    this deployment's Authentik instance, whose accounts are entirely
+    operator-created with no self-signup or external identity federation —
+    there's no path for a caller to present an arbitrary email address
+    Authentik didn't itself assign to a real, admin-managed account. (This
+    no longer relies on the IdP's ``email_verified`` claim — see
+    ``check_subject_auth`` and the module docstring for why that stopped
+    being a meaningful signal after the Authentik migration.)
 
     Args:
         subject: The subject/email to test.
@@ -152,10 +168,10 @@ def check_subject_auth(ctx) -> bool:
     ``ytt/server.py`` — ``AuthMiddleware(auth=check_subject_auth)``).
 
     ``ctx.token`` is the FastMCP ``AccessToken`` FastMCP resolved for this
-    request, already signature/audience-verified by the Google-federated
+    request, already signature/audience-verified by the Authentik-federated
     provider (``ytt.auth.build_auth_provider``). Its ``claims`` dict carries
-    the Google-verified identity — see
-    ``fastmcp.server.auth.providers.google.GoogleTokenVerifier``.
+    the ID token's decoded payload, including ``email`` (but not a
+    meaningful ``email_verified`` — see module docstring).
 
     Returns ``False`` (deny) rather than raising, matching
     ``fastmcp.utilities.authorization.AuthCheck``'s callable contract — a
@@ -163,37 +179,18 @@ def check_subject_auth(ctx) -> bool:
     ``AuthorizationError`` for the caller.
     """
     if ctx.token is None:
-        log.debug("check_subject_auth", token_present=False)
         return False
 
     claims = ctx.token.claims or {}
     email = claims.get("email")
-    email_verified = claims.get("email_verified")
 
-    # TEMPORARY diagnostic (2026-08-15): "reauthenticated but no tools
-    # visible" investigation post-ADR-003. claim_keys/nested_keys let us see
-    # whether email/email_verified actually landed on ctx.token.claims (vs.
-    # e.g. being nested under an "upstream_claims" key) without logging the
-    # redacted email/sub values themselves. Remove once resolved.
-    log.debug(
-        "check_subject_auth",
-        token_present=True,
-        claim_keys=sorted(claims.keys()),
-        nested_upstream_claim_keys=sorted(claims.get("upstream_claims", {}).keys())
-        if isinstance(claims.get("upstream_claims"), dict)
-        else None,
-        has_email=bool(email),
-        email_verified=bool(email_verified),
-    )
-
-    if not email or not email_verified:
+    if not email:
         return False
 
     from ytt.config import get_settings
 
     settings = get_settings()
     allowed = subject_allowed(email, settings.allowed_subjects_set)
-    log.debug("check_subject_auth_result", allowed=allowed)
     if allowed:
         write_last_sub(email)
     return allowed

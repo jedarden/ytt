@@ -447,13 +447,19 @@ class TestCheckSubjectAuth:
         from ytt.authz import check_subject_auth
         assert check_subject_auth(self._ctx(email=None)) is False
 
-    def test_denies_when_email_unverified(self, monkeypatch):
+    def test_allows_regardless_of_email_verified_claim(self, monkeypatch):
+        """email_verified is intentionally ignored (2026-08-15, post-ADR-003):
+        this deployment's Authentik instance hardcodes email_verified=False
+        on every account via its default scope-email mapping, so requiring
+        it made every login fail regardless of allowlist match. Safety now
+        comes from Authentik-side account control (see authz.py module
+        docstring), not this claim."""
         from ytt.authz import check_subject_auth
-        from ytt.config import Settings, get_settings
+        from ytt.config import get_settings
         get_settings.cache_clear()
         monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", "me@example.com")
         try:
-            assert check_subject_auth(self._ctx(email="me@example.com", verified=False)) is False
+            assert check_subject_auth(self._ctx(email="me@example.com", verified=False)) is True
         finally:
             get_settings.cache_clear()
 
