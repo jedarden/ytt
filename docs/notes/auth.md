@@ -25,3 +25,5 @@ Authorization is therefore a separate, required control:
 - Inbound IP-allowlisting of Anthropic's egress ranges must live at **Cloudflare Access/WAF** (the origin pod can't see the client IP behind the tunnel), and is defense-in-depth — not a substitute for the subject allowlist.
 
 See `docs/research/mcp-oauth-authentication.md` for the spec details and exactly what the server must expose.
+
+**Upstream IdP:** this doc is deliberately IdP-agnostic — the MCP-facing requirements above hold regardless of which upstream identity provider ytt federates to. The actual choice (currently the org's self-hosted Authentik, `sso.ardenone.com`; previously Google) is recorded as a decided ADR in `docs/plan/plan.md` (ADR-003, superseding an undocumented earlier pivot to Google) — check there for the current provider and the implementation in `ytt/auth.py`.

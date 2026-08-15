@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **OAuth federation: Google → self-hosted Authentik (ADR-003).**
+  `ytt.auth.YttGoogleProvider` (FastMCP's `GoogleProvider`) replaced with
+  `YttOIDCProvider` (FastMCP's generic `OIDCProxy`), which discovers its
+  upstream endpoints from Authentik's per-application
+  `.well-known/openid-configuration` document instead of hardcoding
+  Google's. ytt now has its own Authentik application/client instead of
+  sharing ibkr-mcp's GCP OAuth app. `YTT_OAUTH_CLIENT_ID`/
+  `YTT_OAUTH_CLIENT_SECRET` now hold Authentik-issued values; same env
+  vars, same OpenBao path, no config-shape change. See
+  `docs/plan/plan.md` ADR-003 and `ytt/auth.py`'s module docstring.
+
 ## [0.2.1] — 2026-07-16
 
 ### Fixed

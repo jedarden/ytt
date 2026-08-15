@@ -273,28 +273,30 @@ class TestWhisperQuota:
 
 
 # =============================================================================
-# auth.py — YttGoogleProvider route/metadata shape
+# auth.py — YttOIDCProvider route/metadata shape
 # =============================================================================
 
 
-class TestYttGoogleProviderMetadata:
-    """Tests for the OAuth AS / PRM route shape (plan: Auth, ADR-001).
+class TestYttOIDCProviderMetadata:
+    """Tests for the OAuth AS / PRM route shape (plan: Auth, ADR-003).
 
-    ytt federates to Google (ytt.auth.YttGoogleProvider, an OAuthProxy
-    subclass) rather than issuing its own unauthenticated tokens — see
-    docs/notes/auth.md and ytt/auth.py's module docstring for why
-    FastMCP's InMemoryOAuthProvider (a test/demo provider that auto-approves
-    every caller) must never be used here.
+    ytt federates to the org's self-hosted Authentik (ytt.auth.YttOIDCProvider,
+    an OAuthProxy subclass built on FastMCP's generic OIDCProxy) rather than
+    issuing its own unauthenticated tokens — see docs/notes/auth.md and
+    ytt/auth.py's module docstring for why FastMCP's InMemoryOAuthProvider (a
+    test/demo provider that auto-approves every caller) must never be used
+    here. The live OIDC discovery request OIDCProxy makes at construction
+    time is patched in tests/conftest.py (before this module is imported).
     """
 
     @pytest.fixture
     def provider(self):
-        """Build a YttGoogleProvider from default (fake-credential) settings."""
+        """Build a YttOIDCProvider from default (fake-credential) settings."""
         from ytt.auth import build_auth_provider
         from ytt.config import Settings
         s = Settings(
             public_url="https://mcp.example.com/ytt",
-            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_id="test-client-id",
             oauth_client_secret="test-client-secret",
             jwt_signing_secret=None,
         )
@@ -314,9 +316,9 @@ class TestYttGoogleProviderMetadata:
     def test_as_metadata_route_is_path_inserted(self, provider):
         """AS metadata route must be /.well-known/oauth-authorization-server/ytt.
 
-        GoogleProvider/OAuthProxy's get_routes() never calls
-        get_well_known_routes(), so this only exists because
-        YttGoogleProvider.get_routes() merges it in manually.
+        OAuthProxy's get_routes() never calls get_well_known_routes(), so
+        this only exists because YttOIDCProvider.get_routes() merges it in
+        manually.
         """
         routes = provider.get_routes(mcp_path="/ytt")
         paths = [r.path for r in routes]
@@ -377,23 +379,23 @@ class TestYttGoogleProviderMetadata:
 class TestBuildAuthProvider:
     """Tests for the build_auth_provider factory function."""
 
-    def test_returns_ytt_google_provider(self):
-        from ytt.auth import YttGoogleProvider, build_auth_provider
+    def test_returns_ytt_oidc_provider(self):
+        from ytt.auth import YttOIDCProvider, build_auth_provider
         from ytt.config import Settings
         s = Settings(
             public_url="https://mcp.example.com/ytt",
-            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_id="test-client-id",
             oauth_client_secret="test-client-secret",
         )
         provider = build_auth_provider(s)
-        assert isinstance(provider, YttGoogleProvider)
+        assert isinstance(provider, YttOIDCProvider)
 
     def test_provider_base_url_matches_public_url(self):
         from ytt.auth import build_auth_provider
         from ytt.config import Settings
         s = Settings(
             public_url="https://mcp.example.com/ytt",
-            oauth_client_id="test-client-id.apps.googleusercontent.com",
+            oauth_client_id="test-client-id",
             oauth_client_secret="test-client-secret",
         )
         provider = build_auth_provider(s)

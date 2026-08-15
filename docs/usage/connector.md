@@ -21,10 +21,15 @@ verifying it works on mobile.
 At this point, tool calls will return a `403 Forbidden` because
 `YTT_ALLOWED_SUBJECTS` is empty.  That's expected.
 
-## Step 2: Discover your OAuth `sub`
+## Step 2: Discover your allowed-subject value
 
-The `sub` claim identifies your user account in the OAuth token.  Its exact
-value is set by the FastMCP AS and must be discovered empirically.
+The allowlist (`YTT_ALLOWED_SUBJECTS`) is checked against the token's
+**verified email claim**, not an opaque `sub` — see `ytt/authz.py`'s
+`check_subject_auth`. This applied under the earlier Google-federated setup
+and is unchanged by the ADR-003 move to Authentik (`docs/plan/plan.md`):
+Authentik's default OpenID scope mapping populates `email`/`email_verified`
+the same way. (`ytt selftest --show-sub` is a historical name — it reports
+the email value, not a `sub` claim.)
 
 In the ytt pod (or wherever the server is running):
 
@@ -37,23 +42,22 @@ successful OAuth token decode.  The file is mode 0600 and is never logged.
 
 Example output:
 ```
-sub: google-oauth2|123456789012345678901
+sub: me@jedcabanero.com
 ```
-
-**Note:** The `sub` value is not your email address.  It is an opaque identifier
-set by the OAuth AS (in this case, FastMCP's built-in AS).
 
 ## Step 3: Allow your subject
 
-Update the `YTT_ALLOWED_SUBJECTS` environment variable with the `sub` value:
+Update the `YTT_ALLOWED_SUBJECTS` environment variable with the email value
+(exact address, or an `@domain` pattern to allow an entire domain — see
+`ytt/authz.py`'s `subject_allowed`):
 
 ```bash
 # Direct (env var):
-export YTT_ALLOWED_SUBJECTS="google-oauth2|123456789012345678901"
+export YTT_ALLOWED_SUBJECTS="me@jedcabanero.com"
 
 # Kubernetes (via OpenBao/ESO on ardenone-cluster):
-vault kv put ardenone-cluster/ytt/allowed-subjects \
-  value="google-oauth2|123456789012345678901"
+bao kv put secret/ardenone-cluster/ytt/allowed-subjects \
+  value="me@jedcabanero.com"
 # Wait for ExternalSecret to resync, then restart the pod if needed.
 ```
 
