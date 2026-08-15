@@ -36,7 +36,11 @@ from __future__ import annotations
 
 import os
 
+import structlog
+
 from ytt.errors import FORBIDDEN, YttError
+
+log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Temp-file path for selftest --show-sub mechanism
@@ -159,11 +163,28 @@ def check_subject_auth(ctx) -> bool:
     ``AuthorizationError`` for the caller.
     """
     if ctx.token is None:
+        log.debug("check_subject_auth", token_present=False)
         return False
 
     claims = ctx.token.claims or {}
     email = claims.get("email")
     email_verified = claims.get("email_verified")
+
+    # TEMPORARY diagnostic (2026-08-15): "reauthenticated but no tools
+    # visible" investigation post-ADR-003. claim_keys/nested_keys let us see
+    # whether email/email_verified actually landed on ctx.token.claims (vs.
+    # e.g. being nested under an "upstream_claims" key) without logging the
+    # redacted email/sub values themselves. Remove once resolved.
+    log.debug(
+        "check_subject_auth",
+        token_present=True,
+        claim_keys=sorted(claims.keys()),
+        nested_upstream_claim_keys=sorted(claims.get("upstream_claims", {}).keys())
+        if isinstance(claims.get("upstream_claims"), dict)
+        else None,
+        has_email=bool(email),
+        email_verified=bool(email_verified),
+    )
 
     if not email or not email_verified:
         return False
@@ -172,6 +193,7 @@ def check_subject_auth(ctx) -> bool:
 
     settings = get_settings()
     allowed = subject_allowed(email, settings.allowed_subjects_set)
+    log.debug("check_subject_auth_result", allowed=allowed)
     if allowed:
         write_last_sub(email)
     return allowed

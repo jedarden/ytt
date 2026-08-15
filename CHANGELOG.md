@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-08-15
+
+### Added
+
+- **Temporary diagnostic logging in `check_subject_auth`** (`ytt/authz.py`).
+  Investigating "OAuth completes, tools/list handler runs, but no tools are
+  visible client-side" after the `YTT_ALLOWED_SUBJECTS` jedarden.com fix.
+  Domain match looked correct end-to-end from the access logs, but
+  `check_subject_auth` has no logging of its own, so DEBUG-level FastMCP
+  logs can't show whether `email`/`email_verified` actually land on
+  `ctx.token.claims` (vs., e.g., ending up nested under an
+  `upstream_claims` key per `OAuthProxy._validate_upstream_token`'s
+  claim-propagation code, which this instance's OIDC setup exercises via
+  `verify_id_token=True`). Logs claim key names and boolean
+  present/verified/allowed flags only -- never the email value itself
+  (already a redacted field name in `ytt/observability.py`). Remove once
+  resolved.
+
 ## [0.2.9] — 2026-08-15
 
 ### Fixed
