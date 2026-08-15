@@ -1,14 +1,19 @@
-"""OAuth resource-server / FastMCP auth (plan: docs/notes/auth.md, ADR-001).
+"""OAuth resource-server / FastMCP auth (plan: docs/notes/auth.md, ADR-003).
 
-Federates to Google OAuth via FastMCP's built-in ``GoogleProvider`` — an
-``OAuthProxy`` that presents a DCR-compliant AS to MCP clients (Claude) while
-proxying the actual login to Google and verifying tokens via Google's
-tokeninfo API. This mirrors ibkr-mcp's identity model (see
-``~/ibkr-mcp/src/mcp-oauth/``) and intentionally reuses ibkr-mcp's existing
-GCP OAuth app: ``YTT_OAUTH_CLIENT_ID``/``YTT_OAUTH_CLIENT_SECRET`` point at
-the same GCP client ibkr-mcp uses, with
-``https://mcp.ardenone.com/ytt/auth/callback`` registered as an additional
-Authorized redirect URI on it.
+Federates to the org's self-hosted Authentik (``sso.ardenone.com``) via
+FastMCP's generic ``OIDCProxy`` — an ``OAuthProxy`` that presents a
+DCR-compliant AS to MCP clients (Claude) while proxying the actual login to
+Authentik and verifying the resulting JWT against Authentik's JWKS. All
+endpoints are discovered from Authentik's per-application config document
+(``AUTHENTIK_OIDC_CONFIG_URL`` below) rather than hardcoded, unlike the
+Google-specific predecessor this replaces (ADR-003 in ``docs/plan/plan.md``).
+
+ytt has its own Authentik application/client (``ytt``) — it does **not**
+share a client with ibkr-mcp the way the old Google setup did (that was an
+unintentional coupling: two independent servers' authorization depended on
+one shared external credential). ``YTT_OAUTH_CLIENT_ID``/
+``YTT_OAUTH_CLIENT_SECRET`` are Authentik-generated values scoped to this
+application only.
 
 Do NOT reintroduce FastMCP's ``InMemoryOAuthProvider`` here. It is an
 explicit test/demo provider (its own docstring: "Simulates user
@@ -32,7 +37,7 @@ from urllib.parse import urlparse
 
 from starlette.routing import Route
 
-from fastmcp.server.auth.providers.google import GoogleProvider
+from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from ytt.config import Settings
 
@@ -47,9 +52,16 @@ CLAUDE_REDIRECT_URIS: list[str] = [
     "https://claude.com/api/mcp/auth_callback",
 ]
 
+# Authentik's per-application OIDC discovery document. The "ytt" slug must
+# match the application slug set in declarative-config's
+# k8s/ardenone-cluster/authentik/authentik-blueprints-configmap.yml (ADR-003).
+AUTHENTIK_OIDC_CONFIG_URL = (
+    "https://sso.ardenone.com/application/o/ytt/.well-known/openid-configuration"
+)
 
-class YttGoogleProvider(GoogleProvider):
-    """``GoogleProvider`` plus path-inserted routes for a path-bearing issuer.
+
+class YttOIDCProvider(OIDCProxy):
+    """``OIDCProxy`` plus path-inserted routes for a path-bearing issuer.
 
     ``create_streamable_http_app`` mounts whatever ``get_routes()`` returns —
     it never calls ``get_well_known_routes()``. For a path-bearing issuer
@@ -150,19 +162,20 @@ class YttGoogleProvider(GoogleProvider):
         return base_routes
 
 
-def build_auth_provider(settings: Settings) -> YttGoogleProvider:
-    """Create the Google-federated OAuth provider for the given settings.
+def build_auth_provider(settings: Settings) -> YttOIDCProvider:
+    """Create the Authentik-federated OAuth provider for the given settings.
 
-    Raises ``ValueError`` if Google OAuth credentials are not configured —
-    fail fast at startup rather than silently falling back to an
-    unauthenticated or fake-authenticated server.
+    Raises ``ValueError`` if OIDC credentials are not configured — fail fast
+    at startup rather than silently falling back to an unauthenticated or
+    fake-authenticated server.
     """
     if not settings.oauth_client_id:
         raise ValueError(
-            "YTT_OAUTH_CLIENT_ID is required (Google OAuth client ID from "
-            "the ibkr-mcp GCP app — see docs/notes/auth.md). ytt must "
-            "federate to a real identity provider; it must never fall back "
-            "to an unauthenticated or self-issued-with-no-login provider."
+            "YTT_OAUTH_CLIENT_ID is required (Authentik OAuth2 client ID for "
+            "the 'ytt' application on sso.ardenone.com — see "
+            "docs/notes/auth.md, ADR-003). ytt must federate to a real "
+            "identity provider; it must never fall back to an "
+            "unauthenticated or self-issued-with-no-login provider."
         )
 
     # Parse the *origin* (scheme+host) from the path-bearing public_url.
@@ -173,7 +186,18 @@ def build_auth_provider(settings: Settings) -> YttGoogleProvider:
     parsed = urlparse(settings.public_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
 
-    return YttGoogleProvider(
+    # ADR-003 open verification item, resolve at first live connector re-auth
+    # (don't assume): ytt.authz.check_subject_auth reads email/email_verified
+    # off the *access-token* JWT claims (default OIDCProxy behavior below —
+    # verify_id_token left unset). Google's opaque-token verifier populated
+    # those on the access token; whether Authentik's access-token JWT does
+    # too depends on its scope-mapping config, and its default OpenID scope
+    # mapping is documented to land them on the ID token instead. If a real
+    # login comes back with claims missing email/email_verified, pass
+    # verify_id_token=True here (OIDCProxy verifies the id_token instead of
+    # the access_token) rather than reaching into the ID token by hand.
+    return YttOIDCProvider(
+        config_url=AUTHENTIK_OIDC_CONFIG_URL,
         client_id=settings.oauth_client_id,
         client_secret=settings.oauth_client_secret,
         base_url=settings.public_url,
