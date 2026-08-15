@@ -50,6 +50,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scope=openid+https://www.googleapis.com/auth/userinfo.email`, a
   Google-specific scope URI only the old provider produces).
 
+## [0.2.5] — 2026-07-18
+
+### Fixed
+
+- **Caption-only extraction still failed for DRM-protected videos.**
+  `allow_unplayable_formats` (0.2.4) cleared the DRM abort, but
+  `extract_info()` still runs format selection even with
+  `download=False`/`skip_download`, and with all-DRM formats it raised
+  "Requested format is not available" — again bailing before ytt reads
+  the caption tracks. We only ever want subtitles, so set
+  `ignore_no_formats_error` to warn-and-continue; yt-dlp returns the info
+  dict with `subtitles`/`automatic_captions` populated.
+
+## [0.2.4] — 2026-07-17
+
+### Fixed
+
+- **DRM-protected videos falsely reported "no captions."** YouTube now
+  DRM-protects many ordinary uploads (SABR). yt-dlp aborted `extract_info()`
+  with "This video is DRM protected" (unless `allow_unplayable_formats`
+  is set), which also killed caption retrieval even though caption tracks
+  aren't DRM-encrypted and the caption path never downloads media
+  (`skip_download=True`). Set `allow_unplayable_formats` so extraction
+  proceeds past the DRM check.
+
+## [0.2.3] — 2026-07-16
+
+### Fixed
+
+- **YouTube extraction failed systematically: every video returned "unavailable."**
+  The 14-month-stale yt-dlp pin (2025.5.22) could no longer extract from
+  YouTube's current player — every fetch returned error code 152, which ytt
+  mislabeled as "no captions found" and turned into doomed Whisper ASR
+  fallbacks (audio download failed the same way). Bumped to yt-dlp 2026.7.4
+  to match today's YouTube player.
+
+## [0.2.2] — 2026-07-16
+
+### Changed
+
+- **Authorization allowlist now supports case-insensitive matching and @domain
+  wildcards.** `check_subject_auth` did a case-SENSITIVE exact match on the
+  Google-verified email, and only exact emails were allowlistable. Two
+  consequences hit in production: (1) an email returned as
+  Me@jedcabanero.com failed against a lowercase allowlist entry, and (2)
+  each Claude client that granted OAuth with a different Google account
+  needed its exact email enumerated (both surfaced as "This connector has no
+  tools available" — AuthMiddleware silently filters every tool a caller
+  isn't authorized for, so `tools/list` returns empty). New `subject_allowed()`
+  is case-insensitive and supports '@domain' entries (e.g. `@jedcabanero.com`)
+  that admit any address in that exact domain (the leading '@' anchors the
+  match so `evil-jedcabanero.com` and `sub.jedcabanero.com` do NOT match).
+  Safe because callers gate on a Google-verified email.
+
 ## [0.2.1] — 2026-07-16
 
 ### Fixed
@@ -137,7 +191,13 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/jedarden/ytt/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/jedarden/ytt/compare/v0.2.5...v0.2.6
+[0.2.5]: https://github.com/jedarden/ytt/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/jedarden/ytt/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/jedarden/ytt/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/jedarden/ytt/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/jedarden/ytt/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jedarden/ytt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jedarden/ytt/releases/tag/v0.1.0
