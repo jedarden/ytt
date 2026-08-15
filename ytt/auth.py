@@ -257,6 +257,28 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # AS still binds its self-issued token to the right audience
     # independently of this upstream leg, so not forwarding `resource` to
     # Authentik doesn't weaken anything on ytt's side.
+    # Authentik's OAuth2Provider defaults to a 5-minute access_token_validity
+    # (org-wide default, not a ytt override) -- with fastmcp_access_token_*
+    # left unset, OAuthProxy.exchange_authorization_code/exchange_refresh_token
+    # both stamp the FastMCP-issued token Claude actually holds with that same
+    # 5-minute exp (see their `fastmcp_access_expires_in = ... else new_expires_in`
+    # fallback), even though OAuthProxy is explicitly designed to let the
+    # client-facing token outlive the upstream one via server-side
+    # _try_transparent_refresh. Setting it here is what actually opts into
+    # that decoupling -- 1 week means Claude re-hits ytt's own /token endpoint
+    # (silent, no browser/consent) at most weekly instead of every 5 minutes.
+    #
+    # fallback_refresh_token_expiry_seconds only takes effect if Authentik's
+    # token response omits refresh_expires_in (OAuthProxy prefers the
+    # upstream-supplied value when present) -- set regardless as a floor.
+    # The real ceiling is Authentik's own refresh_token_validity on the ytt
+    # OAuth2Provider (declarative-config authentik-blueprints-configmap.yml,
+    # provider-ytt), which must independently be raised to match: a FastMCP
+    # refresh JWT claiming 12 weeks is worthless once the *upstream* refresh
+    # token it wraps has already died at Authentik's 30-day default.
+    ONE_WEEK_SECONDS = 7 * 24 * 3600
+    TWELVE_WEEKS_SECONDS = 12 * 7 * 24 * 3600
+
     provider = YttOIDCProvider(
         config_url=AUTHENTIK_OIDC_CONFIG_URL,
         client_id=settings.oauth_client_id,
@@ -268,6 +290,8 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
         forward_resource=False,
         verify_id_token=True,
         token_verifier=token_verifier,
+        fastmcp_access_token_expiry_seconds=ONE_WEEK_SECONDS,
+        fallback_refresh_token_expiry_seconds=TWELVE_WEEKS_SECONDS,
     )
 
     # Replicates OIDCProxy's own "restore scopes" step (oidc_proxy.py,

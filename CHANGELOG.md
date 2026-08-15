@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-08-15
+
+### Changed
+
+- **Claude-held access token lifetime extended from Authentik's 5-minute
+  default to 1 week, refresh window extended to 12 weeks.** Root cause:
+  `build_auth_provider()` never set `fastmcp_access_token_expiry_seconds`,
+  so the FastMCP-issued token Claude actually holds inherited Authentik's
+  raw `access_token_validity` (5 minutes, org default) on every issuance
+  *and* every refresh, instead of using `OAuthProxy`'s built-in
+  transparent-upstream-refresh design to decouple the two. Whether the
+  resulting frequent silent refreshes were actually invisible to the
+  client, or occasionally surfaced as a full re-auth prompt, wasn't
+  isolated -- fixing the token lifetime directly sidesteps the question.
+  Requires a matching `refresh_token_validity: weeks=12` on the ytt
+  OAuth2Provider in declarative-config (Authentik's own 30-day default
+  refresh-token lifetime would otherwise still cap the chain regardless of
+  what ytt's own refresh JWT claims).
+
 ## [0.2.11] — 2026-08-15
 
 ### Fixed
