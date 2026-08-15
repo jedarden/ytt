@@ -196,6 +196,22 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # login comes back with claims missing email/email_verified, pass
     # verify_id_token=True here (OIDCProxy verifies the id_token instead of
     # the access_token) rather than reaching into the ID token by hand.
+    #
+    # forward_resource=False -- CONFIRMED empirically 2026-08-15, not a
+    # theoretical concern (a prior version of this comment claimed the
+    # opposite based on a FastMCP source comment -- "Claude doesn't send a
+    # resource parameter at all" -- that claim was WRONG for the actual
+    # Claude connector: real traffic includes resource=<public_url> on the
+    # incoming /authorize request). OIDCProxy forwards the client's
+    # `resource` param to the upstream authorize/token calls by default;
+    # Authentik's OAuth2 provider rejects any request carrying `resource`
+    # with error=invalid_request "The request is otherwise malformed" --
+    # confirmed live via Traefik access logs on ardenone-cluster (the
+    # GET .../application/o/authorize/?...&resource=... call 302'd
+    # straight to an error, never reaching Authentik's login). ytt's own
+    # AS still binds its self-issued token to the right audience
+    # independently of this upstream leg, so not forwarding `resource` to
+    # Authentik doesn't weaken anything on ytt's side.
     return YttOIDCProvider(
         config_url=AUTHENTIK_OIDC_CONFIG_URL,
         client_id=settings.oauth_client_id,
@@ -205,4 +221,5 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
         required_scopes=["openid", "email"],
         allowed_client_redirect_uris=CLAUDE_REDIRECT_URIS,
         jwt_signing_key=settings.jwt_signing_secret,
+        forward_resource=False,
     )

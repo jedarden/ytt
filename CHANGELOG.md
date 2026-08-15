@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-08-15
+
+### Fixed
+
+- **Authentik rejected every real connector login.** `OIDCProxy`'s
+  default `forward_resource=True` relayed the RFC 8707 `resource`
+  parameter Claude sends on `/authorize` through to Authentik's
+  `/application/o/authorize/` call, which Authentik rejects outright
+  (`error=invalid_request`, "The request is otherwise malformed") —
+  the login never even reached Authentik's page. 0.2.6's ADR-003 note
+  had ruled this out via static analysis of a FastMCP source comment
+  that turned out not to describe Claude's actual behavior; confirmed
+  live via Traefik access logs and fixed with `forward_resource=False`
+  in `ytt/auth.py`.
+
 ## [0.2.6] — 2026-08-15
 
 ### Changed
