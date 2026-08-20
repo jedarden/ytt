@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,14 +140,73 @@ class TranscriptCache:
     # Startup / shutdown                                                    #
     # ------------------------------------------------------------------ #
 
+    def _validate_volume_capacity(self) -> None:
+        """Validate that the configured max_bytes fits within the volume.
+
+        Plan: "For PVC, read volume size via os.statvfs(YTT_CACHE_DIR)
+        (f_blocks×f_frsize) and fail fast if YTT_CACHE_MAX_BYTES exceeds it.
+        For emptyDir, skip the statvfs check and log a startup warning."
+
+        Raises:
+            ValueError: If max_bytes exceeds available volume space on PVC.
+        """
+        try:
+            stat = shutil.disk_usage(self._dir)
+            # On emptyDir, this returns node disk size (implausibly large)
+            # We detect this by checking if the volume is suspiciously large
+            # (> 100 GiB is unlikely to be a real PVC in this deployment)
+            NODE_DISK_THRESHOLD = 100 * 1024**3  # 100 GiB
+
+            if stat.total > NODE_DISK_THRESHOLD:
+                # Likely emptyDir (returns node disk, not sizeLimit)
+                log.warning(
+                    "cache_emptydir_detected",
+                    cache_dir=str(self._dir),
+                    max_bytes=self._max_bytes,
+                    total_volume_bytes=stat.total,
+                    message=(
+                        f"emptyDir detected (volume size {stat.total} > {NODE_DISK_THRESHOLD} "
+                        f"threshold). Ensure YTT_CACHE_MAX_BYTES ({self._max_bytes}) "
+                        f"≤ manifest sizeLimit; no automatic enforcement possible from the app."
+                    ),
+                )
+            elif self._max_bytes > stat.total:
+                # PVC with insufficient space
+                raise ValueError(
+                    f"Cache max_bytes ({self._max_bytes}) exceeds available volume "
+                    f"space ({stat.total} bytes). Reduce YTT_CACHE_MAX_BYTES or increase "
+                    f"PVC size."
+                )
+            else:
+                # PVC with sufficient space
+                log.info(
+                    "cache_volume_validated",
+                    cache_dir=str(self._dir),
+                    max_bytes=self._max_bytes,
+                    total_volume_bytes=stat.total,
+                    available_bytes=stat.free,
+                )
+        except OSError as exc:
+            # statvfs failed; log but don't fail startup (may be in test environment)
+            log.warning(
+                "cache_statvfs_failed",
+                cache_dir=str(self._dir),
+                error=str(exc),
+                message="Could not validate volume capacity; proceeding anyway",
+            )
+
     async def startup_scan(self) -> None:
         """Scan cache dir, build in-memory inventory, clean stray ``.tmp`` files.
 
         Plan: "startup scan that excludes/cleans stray .tmp"
+        Plan: "For PVC, read volume size via os.statvfs and fail fast if cap exceeds it"
         Log event: ``cache_startup_scan`` — ``units_found``, ``total_bytes``,
         ``stale_tmp_cleaned``.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
+
+        # Validate volume capacity before scanning (PVC vs emptyDir detection)
+        self._validate_volume_capacity()
 
         stale_tmp_cleaned = 0
         # Clean stray .tmp files (orphaned by a crash)

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -640,3 +641,83 @@ async def test_metadata_roundtrip(cache: TranscriptCache) -> None:
     assert hit.metadata is not None
     assert hit.metadata["title"] == "My Video"
     assert hit.metadata["channel"] == "My Channel"
+
+
+# --------------------------------------------------------------------------- #
+# statvfs validation (plan: Phase 4)                                         #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_statvfs_validation_pvc_insufficient_space(tmp_path: Path) -> None:
+    """PVC: statvfs validation raises ValueError when max_bytes exceeds volume."""
+    from collections import namedtuple
+    DiskUsage = namedtuple('DiskUsage', ['total', 'used', 'free'])
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mock a small PVC volume (10 GiB total) to avoid emptyDir detection
+    small_pvc_size = 10 * 1024**3  # 10 GiB
+
+    with patch("ytt.cache.shutil.disk_usage") as mock_du:
+        mock_du.return_value = DiskUsage(
+            total=small_pvc_size, used=0, free=small_pvc_size
+        )
+
+        # Create a cache with max_bytes larger than the mocked PVC
+        too_large = small_pvc_size + 1
+        c = TranscriptCache(cache_dir, max_bytes=too_large, reconcile_sec=0)
+
+        with pytest.raises(ValueError, match="exceeds available volume space"):
+            await c.startup_scan()
+
+
+@pytest.mark.asyncio
+async def test_statvfs_validation_pvc_sufficient_space(tmp_path: Path) -> None:
+    """PVC: statvfs validation passes when max_bytes fits within volume."""
+    cache_dir = tmp_path / "cache"
+    c = TranscriptCache(cache_dir, max_bytes=1024 * 1024, reconcile_sec=0)
+
+    # Should not raise
+    await c.startup_scan()
+    assert c.unit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_statvfs_emptydir_detection(tmp_path: Path) -> None:
+    """emptyDir: statvfs detects suspiciously large volume and logs warning."""
+    from collections import namedtuple
+    DiskUsage = namedtuple('DiskUsage', ['total', 'used', 'free'])
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mock disk_usage to return a very large size (simulating emptyDir returning node disk)
+    large_volume = 200 * 1024**3  # 200 GiB - exceeds the 100 GiB threshold
+
+    with patch("ytt.cache.shutil.disk_usage") as mock_du:
+        # Return a proper object with numeric attributes
+        result = DiskUsage(total=large_volume, used=0, free=large_volume)
+        mock_du.return_value = result
+
+        c = TranscriptCache(cache_dir, max_bytes=2 * 1024**3, reconcile_sec=0)
+        # Should not raise; should log warning and continue
+        await c.startup_scan()
+
+    # Verify startup completed successfully despite emptyDir detection
+    assert c.unit_count == 0
+
+
+@pytest.mark.asyncio
+async def test_statvfs_oserror_fallback(tmp_path: Path) -> None:
+    """statvfs OSError is caught and logged; startup continues."""
+    cache_dir = tmp_path / "cache"
+
+    with patch("ytt.cache.shutil.disk_usage", side_effect=OSError("Permission denied")):
+        c = TranscriptCache(cache_dir, max_bytes=1024, reconcile_sec=0)
+        # Should not raise; should log warning and continue
+        await c.startup_scan()
+
+    # Verify startup completed successfully despite OSError
+    assert c.unit_count == 0  # Startup scan still completed
