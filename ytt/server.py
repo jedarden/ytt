@@ -585,6 +585,32 @@ def serve() -> int:  # pragma: no cover
         subjects_count=len(settings.allowed_subjects_set),
     )
 
+    # Plan §Observability — startup egress log (Phase 8)
+    # Probe egress at startup and log the result; update the residential metric.
+    from ytt.selftest import probe_egress
+    from ytt.observability import ytt_egress_is_residential
+
+    try:
+        egress_report = probe_egress(settings.proxy_url)
+        ytt_egress_is_residential.set(1 if egress_report.is_residential else 0)
+        _log.info(
+            "Startup egress probe",
+            ip=egress_report.ip,
+            asn=egress_report.asn,
+            org=egress_report.org,
+            via_proxy=egress_report.via_proxy,
+            is_residential=egress_report.is_residential,
+        )
+        if not egress_report.is_residential:
+            _log.warning(
+                "Egress IP classified as non-residential",
+                ip=egress_report.ip,
+                asn=egress_report.asn,
+                org=egress_report.org,
+            )
+    except Exception as exc:
+        _log.error("Startup egress probe failed", error=str(exc))
+
     app = build_asgi_app()
     uvicorn.run(app, host="0.0.0.0", port=8080, workers=1)
     return 0
