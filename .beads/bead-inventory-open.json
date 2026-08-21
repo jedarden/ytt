@@ -1,292 +1,106 @@
 {
-  "generated_at": "2026-08-17T03:36:46Z",
+  "generated_at": "2026-08-21T14:43:32Z",
   "workspace": "/home/coding/ytt",
-  "query": "bead list --status open --json --limit 999",
-  "total_open_beads": 22,
+  "query": "bead list --status open --json --limit 1000",
+  "total_open_beads": 13,
   "beads": [
-    {
-      "id": "ytt-26f1995a",
-      "title": "Phase 1: Async MCP skeleton + URL canonicalizer + config",
-      "status": "open",
-      "priority": 1,
-      "labels": ["deferred", "failure-count:1", "verification-failed"],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-36b05e12", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-b812aef8",
-      "title": "Phase 2: Fetch core - yt-dlp json3 + metadata + error taxonomy",
-      "status": "open",
-      "priority": 1,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-26f1995a", "kind": "blocks"}, {"blocker": "ytt-80dd25ec", "kind": "blocks"}]
-    },
     {
       "id": "ytt-75ddd394",
       "title": "Genesis: ytt (YouTube Transcript MCP) Implementation",
-      "status": "open",
-      "priority": 1,
       "labels": [],
-      "assignee": null,
-      "dependencies": [
-        {"blocker": "ytt-11ac57fb", "kind": "blocks"},
-        {"blocker": "ytt-26f1995a", "kind": "blocks"},
-        {"blocker": "ytt-36b05e12", "kind": "blocks"},
-        {"blocker": "ytt-3d847702", "kind": "blocks"},
-        {"blocker": "ytt-55599d89", "kind": "blocks"},
-        {"blocker": "ytt-859f7777", "kind": "blocks"},
-        {"blocker": "ytt-8afc5888", "kind": "blocks"},
-        {"blocker": "ytt-ab22130f", "kind": "blocks"},
-        {"blocker": "ytt-ab87a05a", "kind": "blocks"},
-        {"blocker": "ytt-b812aef8", "kind": "blocks"},
-        {"blocker": "ytt-d9888685", "kind": "blocks"},
-        {"blocker": "ytt-db4e67e3", "kind": "blocks"}
-      ]
+      "status": "open"
     },
     {
       "id": "ytt-a7bb4bb4",
       "title": "ibkr do-no-harm gate (additive routing + before/after regression)",
-      "status": "open",
-      "priority": 1,
       "labels": [],
-      "assignee": null,
-      "dependencies": []
+      "status": "open"
     },
     {
       "id": "ytt-14e20a34",
       "title": "Starvation alert: beads invisible to worker",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-fe155045", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-55599d89",
-      "title": "Phase 8: Observability + self-test",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-3d847702", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-ab87a05a",
-      "title": "Phase 5: AuthN/AuthZ + rate limiting (ADR-001)",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [
-        {"blocker": "ytt-39d1516c", "kind": "blocks"},
-        {"blocker": "ytt-3db410ff", "kind": "blocks"},
-        {"blocker": "ytt-63cd2f04", "kind": "blocks"},
-        {"blocker": "ytt-8afc5888", "kind": "blocks"},
-        {"blocker": "ytt-ac63fafe", "kind": "blocks"},
-        {"blocker": "ytt-c65ab515", "kind": "blocks"},
-        {"blocker": "ytt-f6ec20e3", "kind": "blocks"}
-      ]
-    },
-    {
-      "id": "ytt-8afc5888",
-      "title": "Phase 4: Cache - flat units, LRU, reconcile, ENOSPC",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [
-        {"blocker": "ytt-957187f0", "kind": "blocks"},
-        {"blocker": "ytt-9904cead", "kind": "blocks"},
-        {"blocker": "ytt-ab22130f", "kind": "blocks"}
-      ]
-    },
-    {
-      "id": "ytt-3d847702",
-      "title": "Phase 7: Response shape - pagination/cursor/slicing",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-859f7777", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-b83fc68e",
       "title": "Identify Pluck-bead mismatch",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-088ca289", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-99480385",
       "title": "Create diagnostic report",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-b83fc68e", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-11ac57fb",
       "title": "Phase 10: Deploy to ardenone-cluster (human-gated ops)",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [
-        {"blocker": "ytt-5f7ed408", "kind": "blocks"},
-        {"blocker": "ytt-a7bb4bb4", "kind": "blocks"},
-        {"blocker": "ytt-d9888685", "kind": "blocks"}
-      ]
+      "status": "open"
     },
     {
       "id": "ytt-db4e67e3",
       "title": "Phase 11: Public release - GHCR public + docs + first tag",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-11ac57fb", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-032b59da",
       "title": "Test Pluck bead discovery with corrected configuration",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-135983bb", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-ab22130f",
-      "title": "Phase 3: Concurrency - fetch pool, bounded queue, single-flight",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-135983bb", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-37ad90f7",
-      "title": "Fix Pluck configuration to expose open beads",
-      "status": "open",
-      "priority": 2,
-      "labels": ["deferred", "failure-count:1"],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-cf60e6d6", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-d9888685",
       "title": "Phase 9: In-cluster integration test harness",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-55599d89", "kind": "blocks"}]
-    },
-    {
-      "id": "ytt-859f7777",
-      "title": "Phase 6: Whisper async fallback (whisper-openai)",
-      "status": "open",
-      "priority": 2,
-      "labels": [],
-      "assignee": null,
-      "dependencies": [
-        {"blocker": "ytt-799cdf16", "kind": "blocks"},
-        {"blocker": "ytt-ab87a05a", "kind": "blocks"}
-      ]
+      "labels": ["deferred", "failure-count:1"],
+      "status": "open"
     },
     {
       "id": "ytt-135983bb",
       "title": "Investigate Pluck configuration for bead discovery",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-99480385", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-53928d8a",
       "title": "Verify worker can now discover and claim beads",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-032b59da", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-fe155045",
       "title": "Verify Pluck discovers beads after configuration fix",
-      "status": "open",
-      "priority": 2,
       "labels": [],
-      "assignee": null,
-      "dependencies": [{"blocker": "ytt-37ad90f7", "kind": "blocks"}]
+      "status": "open"
     },
     {
       "id": "ytt-a53c9acc",
       "title": "ytt-build.yaml CI writes version-bump commits to GitHub, not Forgejo (breaks mirror model)",
-      "status": "open",
-      "priority": 2,
       "labels": ["verification-failed"],
-      "assignee": null,
-      "dependencies": []
+      "status": "open"
     }
   ],
   "label_analysis": {
-    "pluck_default_exclude_labels": [
-      "deferred",
-      "human",
-      "blocked"
-    ],
-    "beads_with_deferred_label": [
-      "ytt-26f1995a",
-      "ytt-37ad90f7"
-    ],
-    "beads_with_failure_count_label": [
-      "ytt-26f1995a",
-      "ytt-37ad90f7"
-    ],
-    "beads_with_verification_failed_label": [
-      "ytt-26f1995a",
-      "ytt-a53c9acc"
-    ],
+    "pluck_default_exclude_labels": ["deferred", "human", "blocked"],
     "beads_matching_pluck_default_excludes": [
       {
-        "id": "ytt-26f1995a",
-        "matching_labels": ["deferred"]
-      },
-      {
-        "id": "ytt-37ad90f7",
+        "id": "ytt-d9888685",
         "matching_labels": ["deferred"]
       }
     ],
     "labels_relevant_but_not_excludes": {
       "failure-count:*": {
-        "beads": ["ytt-26f1995a", "ytt-37ad90f7"],
-        "note": "Pluck parses this label for failure-count ordering/split handling; it is not an exclude label."
+        "beads": ["ytt-d9888685"],
+        "note": "Pluck parses this label for failure handling; it is not an exclude label."
       },
       "verification-failed": {
-        "beads": ["ytt-26f1995a", "ytt-a53c9acc"],
+        "beads": ["ytt-a53c9acc"],
         "note": "Not present in Pluck's current default exclude set."
       }
     },
-    "potential_pluck_exclude_patterns": [
-      "deferred",
-      "human",
-      "blocked"
-    ],
-    "beads_without_labels": 19,
-    "beads_with_labels": 3
-  },
-  "summary": {
-    "total_beads": 22,
-    "priority_1": 4,
-    "priority_2": 18,
-    "unassigned": 22,
-    "with_dependencies": 21,
-    "without_dependencies": 1
+    "note": "The current NEEDLE source defaults are deferred, human, and blocked. No open bead has human or blocked. The older workspace Pluck documentation also mentions starvation-alert, but it is not in the current source default set and no open bead has that label."
   }
 }
