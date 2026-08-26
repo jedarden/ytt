@@ -20,13 +20,12 @@ The ytt workspace uses the default Pluck configuration via bead-forge (br CLI).
 - `deferred` - Beads marked for later processing
 - `human` - Beads requiring human intervention
 - `blocked` - Beads blocked by dependencies
-- `starvation-alert` - Beads flagged for starvation monitoring
 
 **How it works**:
 When PluckStrand is initialized with an empty exclude_labels vector, these defaults are automatically applied:
 
 ```rust
-const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "starvation-alert"];
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
 ```
 
 **Current configuration in ytt**: Using defaults (no custom exclude_labels configured in `.beads/config.yaml`)
@@ -101,7 +100,7 @@ claim_ttl_minutes: 30
 
 ### Pluck-Specific Settings
 
-**Exclude labels**: Using defaults (`deferred`, `human`, `blocked`, `starvation-alert`)
+**Exclude labels**: Using defaults (`deferred`, `human`, `blocked`)
 
 **Split threshold**: Using default (3 failures)
 
@@ -166,7 +165,12 @@ Pluck is the **primary strand** in NEEDLE's multi-strrand architecture:
 | `deferred` | Beads intentionally delayed | Manual or automatic deferral |
 | `human` | Requires human intervention | Manual flag by user |
 | `blocked` | Blocked by dependencies | Automatic via dependency DAG |
-| `starvation-alert` | Starvation monitoring beads | NEEDLE auto-detection system |
+
+### Other Labels (Not Excluded by Default)
+
+| Label | Purpose | Notes |
+|-------|---------|-------|
+| `starvation-alert` | Starvation monitoring beads | NOT excluded by default; can be added to custom exclude_labels if needed |
 
 ### Failure Count Labels
 
