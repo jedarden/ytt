@@ -62,6 +62,12 @@ spec:
               parameters:
                 - name: tag
                   value: "{{workflow.parameters.tag}}"
+        - - name: integration-test
+            template: run-integration-tests
+            arguments:
+              parameters:
+                - name: tag
+                  value: "{{workflow.parameters.tag}}"
 
     # Step 1: Run the unit test suite inside the image being built.
     # The Dockerfile multi-stage build already runs pytest; this step
@@ -184,3 +190,63 @@ spec:
             items:
               - key: .git-credentials
                 path: .git-credentials
+
+    # Step 4: Integration tests in ardenone-cluster.
+    # Runs acceptance scenarios (1-6,8,11,12,14) + load test + ibkr smoke.
+    # Executes via kubectl exec into the ytt-test Deployment (ClusterIP-scoped).
+    # Plan §Testing Strategy: "ytt test --integration via kubectl exec into the pod".
+    - name: run-integration-tests
+      inputs:
+        parameters:
+          - name: tag
+      container:
+        image: bitnami/kubectl:1.30.0
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+
+            # Wait for ytt-test deployment to be ready with the new image
+            echo "Waiting for ytt-test deployment to roll out..."
+            kubectl --kubeconfig=/kubeconfig/ardenone-manager.kubeconfig \
+              rollout status deployment/ytt-test -n ytt --timeout=5m
+
+            # Find a ready ytt-test pod
+            POD=$(kubectl --kubeconfig=/kubeconfig/ardenone-manager.kubeconfig \
+              get pods -n ytt -l app=ytt-test -o jsonpath='{.items[0].metadata.name}')
+
+            if [ -z "$POD" ]; then
+              echo "ERROR: No ytt-test pod found"
+              exit 1
+            fi
+
+            echo "Running integration tests in pod $POD..."
+
+            # Run integration tests with test token from secret
+            kubectl --kubeconfig=/kubeconfig/ardenone-manager.kubeconfig \
+              exec -n ytt "$POD" -c ytt-test -- \
+              env YTT_TEST_TOKEN="$(cat /ytt-test-token/token)" \
+              ytt test --integration
+
+            echo "Integration tests passed"
+        volumeMounts:
+          - name: kubeconfig
+            mountPath: /kubeconfig
+            readOnly: true
+          - name: test-token
+            mountPath: /ytt-test-token
+            readOnly: true
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      volumes:
+        - name: kubeconfig
+          configMap:
+            name: ardenone-manager-kubeconfig   # Pre-stored kubeconfig in argo-workflows ns
+        - name: test-token
+          secret:
+            secretName: ytt-test-token   # OAuth bearer token for integration tests
