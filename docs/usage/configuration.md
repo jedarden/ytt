@@ -7,7 +7,7 @@ except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_PUBLIC_URL` | `https://mcp.ardenone.com/ytt` | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Must not have a trailing slash. **Change this to your own domain** before exposing the server. |
+| `YTT_PUBLIC_URL` | *(required)* | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Must not have a trailing slash. **Set this to your own domain** before exposing the server. |
 | `YTT_PATH_PREFIX` | `/ytt/` | The path prefix the server is mounted under. Must end with `/`. Startup exits 1 if the slash is missing. Must match the IngressRoute / reverse-proxy config. |
 
 ## Authorization
@@ -46,7 +46,7 @@ except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_WHISPER_URL` | `http://whisper-openai.whisper-stt.svc.cluster.local:8000` | Base URL of the OpenAI-compatible Whisper endpoint (must serve `/v1/audio/transcriptions` and `/v1/models`). |
+| `YTT_WHISPER_URL` | *(unset)* | Base URL of the OpenAI-compatible Whisper endpoint (must serve `/v1/audio/transcriptions` and `/v1/models`). Required for caption-less videos. |
 | `YTT_WHISPER_MODEL` | `Systran/faster-whisper-small` | Model name to use for ASR. Must be pre-loaded by the Whisper service. Self-corrects via `/v1/models` if the configured model is absent. |
 | `YTT_WHISPER_REALTIME_FACTOR` | `1.2` | ETA multiplier: `ETA_sec = duration_sec × factor`. Calibrate against your Whisper service. |
 | `YTT_WHISPER_TIMEOUT_SEC` | `2880` | HTTP timeout for Whisper requests. Must exceed `YTT_MAX_ASR_DURATION_SEC × YTT_WHISPER_REALTIME_FACTOR` (startup-validated). Default provides a 2× margin: `1200 × 1.2 × 2.0 = 2880`. |

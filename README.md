@@ -18,7 +18,7 @@ docker run --rm \
   -e YTT_ALLOWED_SUBJECTS=your-oauth-subject \
   -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
-  ghcr.io/jedarden/ytt:0.1.0
+  ghcr.io/jedarden/ytt:0.2.12
 ```
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
@@ -52,10 +52,10 @@ baked into the image.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_PUBLIC_URL` | `https://mcp.ardenone.com/ytt` | Public base URL — OAuth audience + emitted metadata derive from this. Change it to your domain. |
+| `YTT_PUBLIC_URL` | *(required)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. |
 | `YTT_PATH_PREFIX` | `/ytt/` | Path the server is mounted under. Must end with `/`. |
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values allowed to call tools. See [connector.md](docs/usage/connector.md) for how to discover your `sub`. |
-| `YTT_WHISPER_URL` | `http://whisper-openai.whisper-stt.svc.cluster.local:8000` | OpenAI-compatible ASR endpoint. |
+| `YTT_WHISPER_URL` | *(unset)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
 | `YTT_WHISPER_MODEL` | `Systran/faster-whisper-small` | Model name served by the Whisper endpoint. Auto-corrects via `/v1/models`. |
 | `YTT_CACHE_DIR` | `/cache` | Transcript cache directory. |
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |
