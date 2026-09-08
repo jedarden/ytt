@@ -297,10 +297,26 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # Replicates OIDCProxy's own "restore scopes" step (oidc_proxy.py,
     # runs only when required_scopes is passed at construction time, which
     # we can't do alongside a custom token_verifier -- see the comment
-    # above) so openid/email are still advertised to clients and enforced
-    # at the FastMCP token level, not just implied by what we ask Authentik
-    # for.
-    provider.required_scopes = ["openid", "email"]
-    provider.update_default_scopes(["openid", "email"])
+    # above) so openid/email/offline_access are still advertised to clients
+    # and enforced at the FastMCP token level, not just implied by what we
+    # ask Authentik for.
+    #
+    # offline_access added 2026-09-08 (0.2.13): without it in ytt's own AS
+    # metadata scopes_supported, Claude never requests it, so
+    # exchange_authorization_code()'s idp_tokens never contains a
+    # refresh_token -- which silently clamps fastmcp_access_expires_in back
+    # down to Authentik's raw ~5min access_token_validity regardless of the
+    # fastmcp_access_token_expiry_seconds=1wk set above (see OAuthProxy
+    # proxy.py: `if not idp_tokens.get("refresh_token"): fastmcp_access_expires_in
+    # = min(...)`), AND no FastMCP refresh token is issued to the client at
+    # all -- so every expiry forces a full re-auth (DCR included) with no
+    # refresh attempt ever appearing in the logs. Confirmed live 2026-09-08:
+    # ytt pod logs showed repeated full /register+/authorize+/token cycles
+    # every 20-90min, scope=openid+email only, no offline_access, no
+    # intervening refresh POST. Per ytt's own docs/research/
+    # mcp-oauth-authentication.md ("offline_access placement"): this belongs
+    # in the AS's scopes_supported (here), not the resource metadata.
+    provider.required_scopes = ["openid", "email", "offline_access"]
+    provider.update_default_scopes(["openid", "email", "offline_access"])
 
     return provider

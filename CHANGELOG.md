@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13] — 2026-09-08
+
+### Fixed
+
+- **Root cause of ytt still cycling through full OAuth+DCR re-auth every
+  20-90min in production despite 0.2.12's 1wk/12wk token-lifetime fix.**
+  ytt's own AS metadata (`scopes_supported`, driven by `required_scopes`/
+  `update_default_scopes` in `build_auth_provider()`) advertised only
+  `["openid", "email"]` -- Claude only appends `offline_access` to its
+  authorize request when the AS advertises it, so ytt never requested it,
+  Authentik's token response therefore never included a `refresh_token`,
+  and `OAuthProxy.exchange_authorization_code()` silently clamps
+  `fastmcp_access_expires_in` back down to Authentik's raw ~5min
+  `access_token_validity` whenever `idp_tokens` lacks a `refresh_token`
+  (see `proxy.py`: `if not idp_tokens.get("refresh_token"): ...= min(...)`)
+  -- regardless of the `fastmcp_access_token_expiry_seconds=1wk` set at
+  construction. No FastMCP refresh token was issued either, so the client
+  had nothing to silently refresh with and fell straight to a full
+  re-auth (fresh DCR client_id every time) on every expiry. Confirmed live
+  via `FASTMCP_LOG_LEVEL=DEBUG`-adjacent log capture 2026-09-08: repeated
+  `/register`+`/authorize`+`/token` cycles, `scope=openid+email` only, zero
+  intervening refresh-grant `POST /token` calls. Fix: add `offline_access`
+  to `required_scopes`/`update_default_scopes` so it's advertised in ytt's
+  own AS metadata (per `docs/research/mcp-oauth-authentication.md`'s
+  "offline_access placement" guidance -- AS metadata, not resource
+  metadata) and requested from Authentik on the upstream authorize call.
+  Requires the matching `scope-offline_access` property mapping on
+  Authentik's `provider-ytt` (declarative-config), or Authentik may not
+  actually grant/return the scope even though it's requested.
+
 ## [0.2.12] — 2026-08-15
 
 ### Changed
