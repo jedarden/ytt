@@ -113,11 +113,21 @@ curl http://ytt.ytt.svc:8080/ytt/metrics | grep ytt_
 
 ## CI/CD pipeline
 
-1. Push to `jedarden/ytt` on Forgejo.
-2. Argo Events `ytt-build` Sensor fires.
-3. `ytt-build` WorkflowTemplate runs: `pytest -m "not integration"` → kaniko build
-   → push to `ghcr.io/jedarden/ytt:<tag>` → bump tag in declarative-config.
-4. ArgoCD syncs the updated Deployment; pod restarts with the new image.
+1. Release commit to `jedarden/ytt` on Forgejo bumps `VERSION`
+   (plus `pyproject.toml`, `ytt/__init__.py`, `CHANGELOG.md`).
+2. Argo Events `ytt-sensor` fires on the push to `master`.
+3. `ytt-build` WorkflowTemplate (iad-ci) validates the `VERSION` bump, then
+   kaniko-builds the image — the Dockerfile's test stage runs
+   `pytest -m "not integration"` and a red suite aborts the build — and
+   pushes `ronaldraygun/ytt:<version>` to Docker Hub.
+4. The pinned tag in `declarative-config/k8s/ardenone-cluster/ytt/deployment.yml`
+   is bumped by a manual commit (CI never auto-bumps); ArgoCD syncs the
+   updated Deployment and the pod restarts with the new image.
+
+The published image is `ronaldraygun/ytt` on Docker Hub (kept public — see
+`deploy/DEPLOY-CHECKLIST.md`).  The originally planned `ghcr.io/jedarden/ytt`
+was dropped; the decision is recorded in `docs/plan/plan.md`
+("Image publishing").
 
 Watch builds: https://argo-ci.ardenone.com
 
@@ -134,18 +144,13 @@ Never `kubectl rollout undo` (ArgoCD selfHeal reverts it immediately).
 
 ## Running integration tests in-cluster
 
-```bash
-# Via the ytt-test Deployment:
-kubectl --server=http://traefik-ardenone-cluster:8001 \
-  exec -n ytt deploy/ytt-test -- \
-  env YTT_TEST_TOKEN=<bearer-token> ytt test --integration
-```
+`ytt test --integration` shells out to pytest, so it needs a checkout (the
+published image ships without `tests/`) and residential egress — run it from
+a pod in `ardenone-cluster` with the repo available, not from a datacenter
+machine:
 
-Or interactively:
 ```bash
 kubectl --server=http://traefik-ardenone-cluster:8001 \
-  exec -it -n ytt deploy/ytt-test -- /bin/bash
-# Inside the pod:
-export YTT_TEST_TOKEN=<token>
-ytt test --integration
+  exec -it -n ytt deploy/<pod-with-checkout> -- \
+  env YTT_TEST_TOKEN=<bearer-token> ytt test --integration
 ```

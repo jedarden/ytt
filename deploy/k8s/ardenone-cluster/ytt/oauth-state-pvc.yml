@@ -1,0 +1,34 @@
+---
+# Persistent volume for FastMCP OAuth state (DCR client registrations + issued
+# access/refresh tokens).
+#
+# Why this exists: FastMCP's OAuthProxy persists OAuth state to
+# `settings.home / oauth-proxy / <key-fingerprint>/` (an encrypted FileTreeStore).
+# `settings.home` defaults to ~/.local/share/fastmcp — on the container's
+# EPHEMERAL rootfs. The deployment otherwise mounts only /cache and /scratch, so
+# every pod restart/redeploy WIPED all client registrations + tokens, forcing
+# every connected Claude client to re-run the full Google OAuth login. This PVC
+# + FASTMCP_HOME=/state (see deployment.yml) relocates that state onto durable
+# storage so it survives restarts.
+#
+# Safe to persist: the storage-dir fingerprint is derived from the (stable)
+# Google client secret via derive_jwt_key(), so the same directory is reused
+# across restarts and the persisted, Fernet-encrypted tokens decrypt correctly.
+# On any decryption/rotation mismatch FastMCP treats it as a cache miss (clients
+# just re-register), so this can never hard-fail the server — worst case is the
+# pre-fix behavior (a re-auth).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ytt-oauth-state
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: oauth-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 256Mi

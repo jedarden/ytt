@@ -2,7 +2,12 @@
 # Persistent volume claim for the transcript cache (plan: "PVC, longhorn, 2Gi").
 # Storage class: longhorn (ardenone-cluster default; plan §Deployment notes).
 # YTT_CACHE_BACKEND=pvc tells the app to use this volume at /cache.
-# Invariant: YTT_CACHE_MAX_BYTES (2Gi) ≤ PVC capacity (2Gi) — validated at startup.
+# Invariant: YTT_CACHE_MAX_BYTES ≤ PVC capacity, validated at startup — but the
+# app measures capacity via statvfs on the mounted fs, which reports less than
+# the nominal request (ext4 reserved blocks knock ~2040373248 bytes usable out
+# of a "2Gi" == 2147483648-byte request). Keep YTT_CACHE_MAX_BYTES comfortably
+# below the requested size (deployment.yml uses 1800Mi) rather than matching it
+# exactly, or the pod CrashLoopBackOffs on startup validation.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

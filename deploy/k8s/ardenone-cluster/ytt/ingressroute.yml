@@ -24,11 +24,9 @@ metadata:
   labels:
     app.kubernetes.io/name: ytt
     app.kubernetes.io/component: ingress
-  annotations:
-    # external-dns auto-creates the DNS CNAME → existing Cloudflare tunnel.
-    # SAME target as ibkr (the shared tunnel); no new tunnel needed.
-    external-dns.alpha.kubernetes.io/hostname: mcp.ardenone.com
-    external-dns.alpha.kubernetes.io/target: 062c8e8a-8c15-4afb-ad08-9430743550fe.cfargotunnel.com
+  # No external-dns annotation: the mcp.ardenone.com record is already owned by
+  # ibkr-mcp's IngressRoute (same Cloudflare tunnel). Declaring it here too would
+  # create dueling external-dns ownership for an identical record.
 spec:
   entryPoints:
     - websecure
@@ -65,6 +63,26 @@ spec:
     # RFC 8414: AS metadata at host root + resource path.
     # Same priority strategy as above.
     - match: Host(`mcp.ardenone.com`) && PathPrefix(`/.well-known/oauth-authorization-server/ytt`)
+      kind: Rule
+      priority: 1000
+      middlewares:
+        - name: ytt-cors
+          namespace: ytt
+      services:
+        - name: ytt
+          port: 8080
+
+    # --- Path-inserted .well-known/openid-configuration/ytt ---
+    # OIDC discovery path-insertion. MCP clients (Claude) probe this variant
+    # in addition to oauth-authorization-server when discovering the AS for a
+    # path-bearing issuer (https://mcp.ardenone.com/ytt). ytt's app registers
+    # this exact route (ytt/auth.py get_routes → openid-configuration{issuer}
+    # aliased to the AS-metadata handler), but WITHOUT this rule the request
+    # falls through to ibkr's broad PathPrefix(`/.well-known`) rule and gets a
+    # 401 whose WWW-Authenticate points at ibkr's resource metadata — derailing
+    # the client onto the wrong authorization server ("no connection succeeded"
+    # despite the ytt OAuth flow completing). Same priority: 1000 margin.
+    - match: Host(`mcp.ardenone.com`) && PathPrefix(`/.well-known/openid-configuration/ytt`)
       kind: Rule
       priority: 1000
       middlewares:

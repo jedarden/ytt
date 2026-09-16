@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-09-16
+
+### Changed
+
+- **Public image publishing restored: the documented image is now
+  `ronaldraygun/ytt` on Docker Hub, replacing the never-published
+  `ghcr.io/jedarden/ytt`.** The README quick-start and self-hosting guide
+  pointed at a GHCR image that does not exist, while CI pushed
+  `ronaldraygun/ytt:<version>` to a *private* Docker Hub repo — so the
+  quick-start `docker run` was denied to every external user (bead
+  `ytt-15205fb4`). All public docs now reference `ronaldraygun/ytt:<version>`;
+  the Docker Hub repo must stay public (Hub-UI visibility flip — the Hub API
+  has no visibility-change endpoint and the stored PAT is read-scoped;
+  procedure in `deploy/DEPLOY-CHECKLIST.md`). The registry decision is
+  recorded as an addendum in `docs/plan/plan.md` ("Image publishing").
+
+### Fixed
+
+- **`deploy/` had drifted a full revision behind the applied state and is
+  now an exact mirror of the applied `declarative-config` manifests** (same
+  layout, same filenames, drift check in `deploy/README.md`). The in-repo
+  `ytt-build` WorkflowTemplate still described the GHCR push + sed
+  auto-bump flow; the in-repo deployment pinned `ghcr.io/jedarden/ytt:0.1.0`;
+  the applied-but-unmirrored `oauth-state-pvc.yml` and `ytt-externalsecret.yml`
+  were missing; and the never-applied Phase-9 scaffolding
+  (`canary-deployment.yaml`, `test-deployment.yaml`, the old Google-era
+  `external-secret.yaml`) is gone. `DEPLOY-CHECKLIST.md` was rewritten to
+  the actual release SOP (`bao`/OpenBao paths, Authentik subject env,
+  Docker Hub visibility, no CI auto-bump).
+
 ## [0.2.13] — 2026-09-08
 
 ### Fixed

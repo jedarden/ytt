@@ -66,7 +66,7 @@ ENV YTT_CACHE_DIR=/cache \
     YTT_SCRATCH_DIR=/scratch
 CMD ["ytt", "serve"]
 
-# OCI labels link the published GHCR package back to the public repo.
+# OCI labels link the published image back to the public repo.
 LABEL org.opencontainers.image.title="ytt" \
       org.opencontainers.image.description="Remote MCP server for YouTube transcripts (captions + Whisper ASR)." \
       org.opencontainers.image.source="https://github.com/jedarden/ytt" \

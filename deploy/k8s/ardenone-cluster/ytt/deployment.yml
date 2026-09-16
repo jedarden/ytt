@@ -1,0 +1,198 @@
+---
+# ytt MCP server Deployment.
+# Single replica is a hard constraint: all coordination (job registry,
+# single-flight, cache byte-counter) is in-process; correct only at replicas: 1.
+#
+# Image: ronaldraygun/ytt (Docker Hub, fleet-standard registry — same as ibkr-mcp).
+# Pinned to a semver tag (k8s/CLAUDE.md Rule #8: never :latest, never bare SHA).
+# Pull via docker-hub-registry (auto-reflected into this namespace by kubernetes-reflector).
+#
+# Egress: ardenone-cluster is hosted on a residential connection, so yt-dlp
+# reaches YouTube natively — NO proxy needed (YTT_PROXY_URL unset → app default).
+#
+# Auth: federates to the org's self-hosted Authentik (ADR-003, see
+# ytt/auth.py, docs/notes/auth.md, docs/plan/plan.md). ytt has its own
+# Authentik application/client — NOT shared with ibkr-mcp the way the old
+# Google setup was. ytt-externalsecret.yml pulls OAUTH_CLIENT_ID/
+# OAUTH_CLIENT_SECRET from OpenBao at ardenone-cluster/ytt/oauth; the same
+# path feeds Authentik's blueprint-declared expectation for this client via
+# ../authentik/authentik-oidc-clients-externalsecret.yml, so both sides
+# always agree. YTT_ALLOWED_SUBJECTS is enforced on every tool call (not
+# just /admin/egress) via AuthMiddleware in ytt/server.py.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: server
+    app: ytt
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    # in-process state; no rolling update
+  selector:
+    matchLabels:
+      app: ytt
+  template:
+    metadata:
+      labels:
+        app: ytt
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: server
+      annotations:
+        prometheus.io/scrape: "false"   # scraped via ServiceMonitor, not annotation
+    spec:
+      imagePullSecrets:
+        - name: docker-hub-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001        # matches the image's ytt user (owns /cache, /scratch)
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: ytt
+          image: ronaldraygun/ytt:0.2.13
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          command: ["ytt", "serve"]
+          env:
+            # --- Required path/URL config ---
+            - name: YTT_PUBLIC_URL
+              value: "https://mcp.ardenone.com/ytt"
+            - name: YTT_PATH_PREFIX
+              value: "/ytt/"
+
+            # --- OAuth state persistence ---
+            # FastMCP's OAuthProxy stores DCR client registrations + issued
+            # tokens under settings.home ( = FASTMCP_HOME). Point it at the
+            # durable ytt-oauth-state PVC (mounted at /state) so OAuth survives
+            # pod restarts/redeploys — otherwise the default (~/.local/share/
+            # fastmcp on ephemeral rootfs) is wiped every rollout and every
+            # connected client must re-run Google login. See oauth-state-pvc.yml.
+            - name: FASTMCP_HOME
+              value: "/state"
+
+            # --- Cache ---
+            - name: YTT_CACHE_BACKEND
+              value: "pvc"
+            - name: YTT_CACHE_DIR
+              value: "/cache"
+            - name: YTT_CACHE_MAX_BYTES
+              value: "1800Mi"
+            - name: YTT_CACHE_RECONCILE_SEC
+              value: "300"
+
+            # --- Scratch (audio temp) ---
+            - name: YTT_SCRATCH_DIR
+              value: "/scratch"
+            - name: YTT_MAX_AUDIO_BYTES
+              value: "500Mi"
+
+            # --- Concurrency ---
+            - name: YTT_MAX_CONCURRENT_FETCHES
+              value: "4"
+            - name: YTT_MAX_CONCURRENT_WHISPER
+              value: "1"
+
+            # --- Whisper (caption-less videos only) ---
+            - name: YTT_WHISPER_URL
+              value: "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
+            - name: YTT_WHISPER_MODEL
+              value: "large-v3-turbo"
+            - name: YTT_WHISPER_REALTIME_FACTOR
+              value: "2.0"
+            - name: YTT_WHISPER_TIMEOUT_SEC
+              value: "2880"
+            - name: YTT_MAX_ASR_DURATION_SEC
+              value: "1200"
+
+            # --- Rate limiting ---
+            - name: YTT_RATE_LIMIT_PER_MIN
+              value: "20"
+            - name: YTT_WHISPER_JOBS_PER_HOUR
+              value: "10"
+
+            # --- Pagination ---
+            - name: YTT_INLINE_CHAR_LIMIT
+              value: "18000"
+            - name: YTT_CHUNK_CHARS
+              value: "18000"
+
+            # --- Auth: allowlist enforced on every tool call ---
+            # As of ytt 0.2.2, subject_allowed() matches case-insensitively and
+            # accepts comma-separated "@domain" entries (any verified email in
+            # that exact domain — the leading "@" anchors it, so
+            # evil-jedcabanero.com and sub.jedcabanero.com do NOT match).
+            # "@jedcabanero.com" is the legacy Google Workspace domain from
+            # before ADR-003 (Google -> Authentik). "@jedarden.com" is what
+            # the self-hosted Authentik instance's own local accounts
+            # actually use (confirmed live 2026-08-15 via Authentik Events:
+            # every ytt authorize_application event resolves to
+            # authentik@jedarden.com) -- omitting it meant every login
+            # completed OAuth successfully but got silently filtered to zero
+            # tools on every call, permanently, not intermittently. Both
+            # domains are kept so accounts on either still work.
+            - name: YTT_ALLOWED_SUBJECTS
+              value: "@jedcabanero.com,@jedarden.com"
+
+            # --- OAuth (Authentik, from OpenBao via ytt-externalsecret.yml) ---
+            - name: YTT_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: OAUTH_CLIENT_ID
+            - name: YTT_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ytt-secrets
+                  key: OAUTH_CLIENT_SECRET
+
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: scratch
+              mountPath: /scratch
+            - name: oauth-state
+              mountPath: /state
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "100Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+              ephemeral-storage: "500Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /ytt/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ytt/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: ytt-cache
+        - name: scratch
+          emptyDir:
+            sizeLimit: "600Mi"
+        - name: oauth-state
+          persistentVolumeClaim:
+            claimName: ytt-oauth-state

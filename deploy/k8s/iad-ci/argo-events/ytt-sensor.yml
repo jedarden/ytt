@@ -1,0 +1,73 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: ytt-sensor
+  namespace: argo-events
+spec:
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restarted-at: '2026-08-07T07:53:59Z'
+    spec:
+      containers:
+      - name: main
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 7777
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 2
+          failureThreshold: 2
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 7777
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+  eventBusName: default
+  fetchTimeout: 3s
+  dependencies:
+  - name: ytt-push
+    eventSourceName: github-webhooks
+    eventName: ytt
+    filters:
+      data:
+      - path: headers.X-Github-Event
+        type: string
+        value:
+        - push
+      - path: body.ref
+        type: string
+        value:
+        - refs/heads/master
+      - path: body.head_commit.message
+        type: string
+        comparator: '!='
+        value:
+        - '^ci: auto-bump'
+  triggers:
+  - template:
+      name: ytt-build
+      argoWorkflow:
+        operation: submit
+        source:
+          resource:
+            apiVersion: argoproj.io/v1alpha1
+            kind: Workflow
+            metadata:
+              generateName: ytt-build-
+              namespace: argo-workflows
+            spec:
+              serviceAccountName: argo-workflow
+              workflowTemplateRef:
+                name: ytt-build
+              arguments:
+                parameters:
+                - name: git-repo
+                  value: jedarden/ytt
+                - name: branch
+                  value: master
+    conditions: ytt-push

@@ -66,34 +66,3 @@ spec:
     # --- kube-apiserver (internal, if needed) ---
     # Not required for ytt — no cluster API calls at runtime.
 
----
-# NetworkPolicy for ytt-canary (same egress needs: yt-dlp + DNS only).
-# Canary runs yt-dlp directly without Whisper — but allow Whisper just in case.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: ytt-canary
-  namespace: ytt
-  labels:
-    app.kubernetes.io/name: ytt
-    app.kubernetes.io/component: networkpolicy-canary
-spec:
-  podSelector:
-    matchLabels:
-      app: ytt-canary
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress:
-    - {}   # Prometheus scrapes canary /metrics on :8081
-  egress:
-    - ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-    - ports:
-        - protocol: TCP
-          port: 443
-        - protocol: TCP
-          port: 80

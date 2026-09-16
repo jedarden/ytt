@@ -1,0 +1,160 @@
+# ytt-build — CI pipeline for ytt container image
+# Sync to: declarative-config/k8s/iad-ci/argo-workflows/ytt-build.yaml
+#
+# WorkflowTemplate that builds the ytt Docker image on git push and pushes
+# to Docker Hub (ronaldraygun/ytt) — matching every other app in this fleet
+# and the image actually referenced by
+# k8s/ardenone-cluster/ytt/deployment.yml. The Dockerfile runs
+# pytest -m "not integration" as a test gate, so a failed test suite aborts
+# the build (no separate test step needed here — see armor-workflowtemplate.yml
+# for the pattern this mirrors: resolve-version + docker-build).
+#
+# Requires VERSION to be bumped by the developer in each release commit;
+# CI validates the version bump and fails if it wasn't changed. CI never
+# auto-bumps, auto-commits, or pushes version changes (matches armor-workflowtemplate.yml
+# and the fleet's Forgejo-primary/GitHub-read-only-mirror model from org CLAUDE.md).
+#
+# All git operations use Forgejo (git.ardenone.com), not GitHub. GitHub is
+# a read-only mirror and receives changes only via Forgejo's server-side
+# push-mirror, never via direct CI writes.
+#
+# Triggered by Argo Events on git push (see ytt-sensor.yml).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: ytt-build
+  namespace: argo-workflows
+  labels:
+    app: ytt-ci
+spec:
+  # Backstop against a run that hangs before its pod ever starts (unbound
+  # PVC, unschedulable, missing secret). Per-step activeDeadlineSeconds does
+  # not cover that case: on 2026-08-07 five needle-ci runs sat Running for
+  # 8h against a 3600s step limit. ttlStrategy only reaps COMPLETED runs, so
+  # without a workflow-level cap they are never terminated and never GCd.
+  # Basis: sum of per-step deadlines x attempts = 5520s, +50% headroom.
+  activeDeadlineSeconds: 8400
+  entrypoint: build
+  serviceAccountName: argo-workflow
+  arguments:
+    parameters:
+      - name: git-repo
+        value: jedarden/ytt
+      - name: branch
+        value: master
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: docker-hub-registry
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+  templates:
+    - name: build
+      steps:
+        - - name: resolve-version
+            template: resolve-version
+        - - name: docker-build
+            template: docker-build
+            arguments:
+              parameters:
+                - name: version
+                  value: "{{steps.resolve-version.outputs.parameters.version}}"
+
+    - name: resolve-version
+      activeDeadlineSeconds: 120
+      script:
+        image: alpine/git
+        command: [sh]
+        source: |
+          set -e
+          git clone --branch {{workflow.parameters.branch}} \
+            "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" \
+            /tmp/repo
+          cd /tmp/repo
+
+          test -f VERSION || {
+            echo "VERSION is required; CI never creates release versions" >&2
+            exit 1
+          }
+          VERSION_CHANGED=$(git diff --name-only HEAD~1 HEAD -- VERSION | grep -c '^VERSION$' || true)
+          if [ "$VERSION_CHANGED" -eq 0 ]; then
+            echo "VERSION must change in the release commit; CI never auto-bumps or pushes" >&2
+            exit 1
+          fi
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "VERSION must be a semantic version, got: $VERSION" >&2; exit 1 ;;
+          esac
+
+          echo "$VERSION" > /tmp/version
+          echo "Building version: ${VERSION}"
+        env:
+          # Forgejo is read-only here: this credential only permits cloning.
+          # The script has no push path (CI validates, never writes).
+          #
+          # secret/key fixed 2026-09-08: forgejo-push-token/.git-credentials
+          # never existed as a real secret in this namespace (no ExternalSecret
+          # for it anywhere in declarative-config) -- every other template
+          # (armor-workflowtemplate.yml, acb-*-build-workflowtemplate.yml, ...)
+          # uses forgejo-webhook-token/token instead. This is what actually
+          # blocked ytt-build from ever running to completion.
+          - name: GIT_CONFIG_COUNT
+            value: "1"
+          - name: GIT_CONFIG_KEY_0
+            value: credential.helper
+          - name: GIT_CONFIG_VALUE_0
+            value: '!f() { test "$1" = get && echo "username=x-token" && echo "password=$FORGEJO_TOKEN"; }; f'
+          - name: FORGEJO_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: forgejo-webhook-token
+                key: token
+      outputs:
+        parameters:
+          - name: version
+            valueFrom:
+              path: /tmp/version
+
+    - name: docker-build
+      inputs:
+        parameters:
+          - name: version
+      activeDeadlineSeconds: 1800
+      retryStrategy:
+        limit: "2"
+        retryPolicy: OnError
+        backoff:
+          duration: 30s
+          factor: "2"
+      container:
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        args:
+          - --context=git://git.ardenone.com/{{workflow.parameters.git-repo}}.git#refs/heads/{{workflow.parameters.branch}}
+          - --dockerfile=Dockerfile
+          - --destination=ronaldraygun/ytt:{{inputs.parameters.version}}
+          - --cache=true
+          - --cache-repo=ronaldraygun/cache
+        env:
+          # Kaniko's native git-context auth (GIT_USERNAME/GIT_PASSWORD),
+          # matching armor-workflowtemplate.yml's docker-build step -- fixed
+          # 2026-09-08, see resolve-version's env block above for why.
+          - name: GIT_USERNAME
+            value: x-token
+          - name: GIT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: forgejo-webhook-token
+                key: token
+        volumeMounts:
+          - name: docker-config
+            mountPath: /kaniko/.docker
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
