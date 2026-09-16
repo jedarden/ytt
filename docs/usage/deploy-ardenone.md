@@ -124,10 +124,12 @@ curl http://ytt.ytt.svc:8080/ytt/metrics | grep ytt_
    is bumped by a manual commit (CI never auto-bumps); ArgoCD syncs the
    updated Deployment and the pod restarts with the new image.
 
-The published image is `ronaldraygun/ytt` on Docker Hub (kept public — see
-`deploy/DEPLOY-CHECKLIST.md`).  The originally planned `ghcr.io/jedarden/ytt`
-was dropped; the decision is recorded in `docs/plan/plan.md`
-("Image publishing").
+The published image is `ronaldraygun/ytt` on Docker Hub.  It is pullable
+without auth only while the Hub repository is public; visibility is an
+operator Hub-UI flip with a one-line anonymous-pull check, in
+`deploy/DEPLOY-CHECKLIST.md` §3 (a 401 there means the flip is pending).
+The originally planned `ghcr.io/jedarden/ytt` was dropped; the decision is
+recorded in `docs/plan/plan.md` ("Image publishing").
 
 Watch builds: https://argo-ci.ardenone.com
 

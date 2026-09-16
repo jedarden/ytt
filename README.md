@@ -23,6 +23,9 @@ docker run --rm \
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
 at `https://your-domain.example.com/ytt` (HTTPS required for Anthropic's backend).
+If the image pull 401s, the Docker Hub repo's visibility flip is pending —
+see `deploy/DEPLOY-CHECKLIST.md` §3 for the operator step and the one-line
+anonymous-pull check.
 
 See [docs/usage/self-hosting.md](docs/usage/self-hosting.md) for the full
 self-hosting guide (BYO Whisper, BYO residential egress/proxy, BYO OAuth subjects).

@@ -449,8 +449,10 @@ The OAuth metadata documents live at the **host root** (`mcp.ardenone.com/.well-
 > `write:packages` scope, so the plan's "GHCR primary" was never executable
 > end-to-end). Meanwhile the repo sat private on Docker Hub, so the README
 > quick-start was unpullable — bead `ytt-15205fb4` repointed all public docs
-> at `ronaldraygun/ytt` and made the Hub repo public (Hub-UI action; the Hub
-> API has no visibility-change endpoint and the stored PAT is read-scoped).
+> at `ronaldraygun/ytt`; making the Hub repo public is a one-click
+> **operator** step (Hub-UI only — the Hub API has no visibility-change
+> endpoint and the stored PAT is read-scoped), documented as §3 of
+> `deploy/DEPLOY-CHECKLIST.md`.  Until that flip lands, anonymous pulls 401.
 > Everything else in this section (Argo not GH Actions, immutable semver
 > tags, generic/portable image) still holds.
 
