@@ -29,6 +29,11 @@ from ytt.authz import check_subject_auth
 from ytt.cache import CacheHit, TranscriptCache
 from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
+from ytt.singleton import (
+    SingletonLockHeld,
+    SingletonLockUnavailable,
+    acquire_singleton_lock,
+)
 from ytt.whisper import WhisperJobRegistry
 
 logger = logging.getLogger(__name__)
@@ -572,6 +577,17 @@ def serve() -> int:  # pragma: no cover
 
     for w in warnings:
         _log.warning("Startup warning", message=w)
+
+    # Single-replica invariant (plan §Design constraints): refuse to start if
+    # another live ytt process already holds the cache-volume lock.  Two live
+    # instances would each be half-correct — split cache byte-counter,
+    # single-flight map, and Whisper job registry — so this fails closed
+    # (exit 1 → CrashLoopBackOff) instead of serving split state.
+    try:
+        acquire_singleton_lock(settings.cache_dir)
+    except (SingletonLockHeld, SingletonLockUnavailable) as exc:
+        _log.error("Single-replica invariant violated", reason=str(exc))
+        return 1
 
     # Plan §Observability — Required log events: "Server startup"
     _log.info(

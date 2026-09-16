@@ -94,14 +94,22 @@ Never log or expose `YTT_PROXY_URL`.
 ## Scaling
 
 ytt is designed for **single replica** — in-process state (LRU cache counter,
-single-flight registry, Whisper job FSM) is not distributed.  Running multiple
-replicas will cause:
+single-flight registry, Whisper job FSM) is not distributed.  The Kubernetes
+Deployment therefore pins `replicas: 1` and `strategy: Recreate`; running
+multiple replicas will cause:
 - Duplicate yt-dlp fetches for the same video.
 - Cache byte-counter drift (each replica has its own counter).
 - Multiple Whisper jobs for the same video.
 
-Scale-out requires a distributed cache + single-flight store.  This is a known
-future redesign, not a v1 feature.
+Scale-out is a redesign, not a replica-count change. It requires a shared cache
+index with atomic quota accounting, distributed per-video single-flight leases,
+a persistent Whisper job store that any replica can poll, shared rate-limit
+counters, and queue-owned scratch files instead of the unconditional startup
+sweep. It also needs enough residential egress and Whisper capacity to justify
+the added concurrency. Once all process-local state is externalized, the
+deployment strategy can return to `RollingUpdate`. See the internal
+[single-replica design note](../notes/single-replica.md) for the complete
+checklist.
 
 ## OAuth discovery
 

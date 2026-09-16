@@ -25,7 +25,7 @@ A remote MCP server that reliably downloads transcripts from pasted YouTube link
 - **No third-party APIs.** Extraction happens in-server (yt-dlp), not via a managed transcript service. Rejected even as a v1 default.
 - **Authenticated AND authorized.** OAuth proves *who*; a required **subject allowlist** decides *whether*. Without it a public OAuth connector is an open YouTube-download proxy on the home internet.
 - **Concurrency.** Parallel requests from multiple clients never block each other.
-- **Single replica (v1).** All coordination (job registry, single-flight, cache byte-counter) is in-process; correct **only at `replicas: 1`**. Scale-out is a redesign.
+- **Single replica (v1).** All coordination (job registry, single-flight, cache byte-counter) is in-process; correct **only at `replicas: 1`**. The Deployment must pin `replicas: 1` and `strategy: Recreate` (the default `RollingUpdate` can overlap old and new pods); the Phase 8 startup tripwire refuses a second owner of the shared cache volume. Scale-out is a redesign.
 - **Caching.** Flat files named by video ID on a PVC or emptyDir, each with a configured size; LRU eviction under a configured cap.
 - **Residential egress assumed, but proven.** Don't gate the build on it; assume it, ship a self-test + canary, and track it as a Proof Obligation.
 - **Whisper via the cluster's universal `whisper-openai` deployment.** Don't bundle a model.
