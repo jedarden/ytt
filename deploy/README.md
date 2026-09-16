@@ -7,22 +7,32 @@ applied, living in [`jedarden/declarative-config`](https://git.ardenone.com/jeda
 change anything, edit the manifest there, commit, push, and let ArgoCD sync
 (ArgoCD's `selfHeal` reverts any live `kubectl apply`, so the GitOps path is
 the only way to make changes stick).  Then refresh the mirror here so the
-in-repo copies don't drift:
+in-repo copies don't drift — canonical regeneration, run from the ytt
+checkout root with the declarative-config checkout as a sibling (the same
+place the parity test looks; override with `YTT_DECLARATIVE_CONFIG_DIR`),
+from the same commit ArgoCD synced:
 
 ```bash
-# declarative-config checkout, from the same commit ArgoCD synced:
-rsync -a --delete /path/to/declarative-config/k8s/ardenone-cluster/ytt/ deploy/k8s/ardenone-cluster/ytt/
+rsync -a --delete ../declarative-config/k8s/ardenone-cluster/ytt/ deploy/k8s/ardenone-cluster/ytt/
 mkdir -p deploy/k8s/iad-ci/argo-workflows deploy/k8s/iad-ci/argo-events
-cp /path/to/declarative-config/k8s/iad-ci/argo-workflows/ytt-build.yaml deploy/k8s/iad-ci/argo-workflows/
-cp /path/to/declarative-config/k8s/iad-ci/argo-events/ytt-sensor.yml  deploy/k8s/iad-ci/argo-events/
+cp ../declarative-config/k8s/iad-ci/argo-workflows/ytt-build.yaml deploy/k8s/iad-ci/argo-workflows/
+cp ../declarative-config/k8s/iad-ci/argo-events/ytt-sensor.yml  deploy/k8s/iad-ci/argo-events/
 ```
 
-Drift check (must be silent):
+Drift is checked automatically by `tests/unit/test_deploy_parity.py`: it
+byte-compares every file under `deploy/k8s/` against its declarative-config
+counterpart and requires the `ardenone-cluster/ytt` trees to match as sets
+too (an applied-but-unmirrored file is drift, not just a differing one).
+`scripts/definition-of-done.sh` runs it first, separately; it skips (exit 0)
+where no declarative-config checkout exists — CI image builds exclude
+`deploy/` and have no sibling checkout.  The manual equivalent (must be
+silent):
 
 ```bash
-diff -r deploy/k8s/ardenone-cluster/ytt <declarative-config>/k8s/ardenone-cluster/ytt
-diff deploy/k8s/iad-ci/argo-workflows/ytt-build.yaml <declarative-config>/k8s/iad-ci/argo-workflows/ytt-build.yaml
-diff deploy/k8s/iad-ci/argo-events/ytt-sensor.yml  <declarative-config>/k8s/iad-ci/argo-events/ytt-sensor.yml
+uv run pytest tests/unit/test_deploy_parity.py -q
+diff -r deploy/k8s/ardenone-cluster/ytt ../declarative-config/k8s/ardenone-cluster/ytt
+diff deploy/k8s/iad-ci/argo-workflows/ytt-build.yaml ../declarative-config/k8s/iad-ci/argo-workflows/ytt-build.yaml
+diff deploy/k8s/iad-ci/argo-events/ytt-sensor.yml  ../declarative-config/k8s/iad-ci/argo-events/ytt-sensor.yml
 ```
 
 ## Layout

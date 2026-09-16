@@ -19,7 +19,7 @@
 2. **Startup flock tripwire** (`ytt/singleton.py`): `serve()` takes an exclusive `flock` on `<cache_dir>/.ytt-singleton.lock` (the cache PVC — the one path every replica of the Deployment shares) and holds it for the process lifetime.  A second instance that scales in — or any stray process aimed at the same cache dir — fails to win the lock, logs `Single-replica invariant violated` with the recorded holder (pid/hostname/started_at), and exits 1 → CrashLoopBackOff: loud, not silently wrong.  The kernel releases the lock on process death, so restarts need no cleanup and there is no staleness to reap.  The lockfile is a dotfile, invisible to the cache LRU scan (`*.txt`/`*.tmp` globs).  If the filesystem cannot create or `flock` the file, startup also exits 1: an unverifiable guard must not permit split in-process state.
 3. **One worker per pod**: `serve()` hardcodes `uvicorn workers=1`.
 
-The deployed manifest lives in `declarative-config` (`k8s/ardenone-cluster/ytt/`, synced by ArgoCD from the copy documented in `deploy/README.md`) — keep the two copies identical.
+The deployed manifest lives in `declarative-config` (`k8s/ardenone-cluster/ytt/`, synced by ArgoCD from the copy documented in `deploy/README.md`) — keep the two copies identical, enforced byte-for-byte by `tests/unit/test_deploy_parity.py` (part of `scripts/definition-of-done.sh`; regenerate the mirror with the canonical commands in `deploy/README.md`).
 
 ## Why scale-out is a redesign, not a flag flip
 
