@@ -18,7 +18,7 @@ deployment — no ardenone-cluster specifics.
 ```yaml
 services:
   ytt:
-    image: ronaldraygun/ytt:0.2.14
+    image: ronaldraygun/ytt:0.2.15
     restart: unless-stopped
     ports:
       - "8080:8080"

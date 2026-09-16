@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15] — 2026-09-16
+
+### Added
+
+- **Single-replica invariant enforcement** (`ytt/singleton.py`,
+  `tests/unit/test_single_replica.py`, `tests/unit/test_singleton.py`).
+  `serve()` now takes an exclusive `flock` on
+  `<cache_dir>/.ytt-singleton.lock` — held for the process lifetime — so a
+  second instance aimed at the same cache dir (scale-out, or a stray
+  process) fails loudly (`Single-replica invariant violated`, exit 1 →
+  CrashLoopBackOff) instead of silently splitting the in-process state
+  (cache byte-counter, single-flight map, Whisper job registry, rate-limit
+  buckets) that is only correct at `replicas: 1`. Every Deployment under
+  `deploy/k8s/` is asserted to pin `replicas: 1` explicitly plus
+  `strategy: Recreate` (load-bearing: the default `RollingUpdate` has
+  `maxSurge >= 1`, which briefly runs two live servers on split state
+  during every deploy). Rationale table in `docs/notes/single-replica.md`.
+- **deploy/ ↔ declarative-config mirror-parity test**
+  (`tests/unit/test_deploy_parity.py`). Byte-compares every file under
+  `deploy/k8s/` against its `declarative-config` counterpart (and requires
+  the mirrored tree to match as a set), so the full-revision drift 0.2.14
+  fixed (bead `ytt-15205fb4`) fails CI instead of being rediscovered by
+  hand. Skips where no declarative-config checkout exists (CI image
+  builds).
+
+### Fixed
+
+- **Release-history reconciliation for 0.2.13–0.2.14** (bead
+  `ytt-8efb9b9d`, continuing `ytt-a28cf823` past 0.2.12). The 0.2.13 and
+  0.2.14 CHANGELOG entries were audited against their release commits
+  (`c0d0d8e`, `2b8f5f6`) and are accurate apart from the Docker Hub clause
+  corrected below, but three pieces of release metadata were missing:
+  the `v0.2.14` annotated tag did not exist (the README-advertised release
+  was unresolvable by tag) — backfilled at its VERSION-bump commit
+  `2b8f5f6`; the CHANGELOG compare-link refs stopped at 0.2.13 (`[0.2.14]`
+  had no definition, `[Unreleased]` still compared against `v0.2.13`);
+  and `uv.lock` was left at 0.2.13 by the 0.2.14 commit (which bumped
+  `pyproject.toml` without a lock regen — `uv lock --check` failed on a
+  clean checkout). Also note `ronaldraygun/ytt:0.2.14` was never built:
+  the 0.2.14 push produced no CI workflow run and every subsequent master
+  push failed the `resolve-version` VERSION-bump gate, so 0.2.15 is the
+  first ronaldraygun/ytt tag CI actually builds and pushes.
+- The 0.2.14 entry's Docker Hub wording ("the Docker Hub repo must stay
+  public") wrongly implied the visibility flip had already happened; it is
+  a pending operator step (anonymous pulls 401 until flipped — the same
+  correction commit `5632ca7` made to `plan.md`,
+  `docs/usage/deploy-ardenone.md`, and the README's 401 pointer, which had
+  not reached this file). The 0.2.14 entry now states the flip is pending.
+
 ## [0.2.14] — 2026-09-16
 
 ### Changed
@@ -18,9 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ronaldraygun/ytt:<version>` to a *private* Docker Hub repo — so the
   quick-start `docker run` was denied to every external user (bead
   `ytt-15205fb4`). All public docs now reference `ronaldraygun/ytt:<version>`;
-  the Docker Hub repo must stay public (Hub-UI visibility flip — the Hub API
-  has no visibility-change endpoint and the stored PAT is read-scoped;
-  procedure in `deploy/DEPLOY-CHECKLIST.md`). The registry decision is
+  the Docker Hub repo must be **public** for those pulls to work (Hub-UI
+  visibility flip — the Hub API has no visibility-change endpoint and the
+  stored PAT is read-scoped; procedure in `deploy/DEPLOY-CHECKLIST.md`;
+  **the flip is a pending operator step — anonymous pulls still 401 until
+  it is done**, see the 0.2.15 correction). The registry decision is
   recorded as an addendum in `docs/plan/plan.md` ("Image publishing").
 
 ### Fixed
@@ -355,7 +406,9 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.13...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.15...HEAD
+[0.2.15]: https://github.com/jedarden/ytt/compare/v0.2.14...v0.2.15
+[0.2.14]: https://github.com/jedarden/ytt/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/jedarden/ytt/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/jedarden/ytt/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/jedarden/ytt/compare/v0.2.10...v0.2.11
