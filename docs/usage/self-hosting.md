@@ -18,7 +18,7 @@ deployment — no ardenone-cluster specifics.
 ```yaml
 services:
   ytt:
-    image: ghcr.io/jedarden/ytt:0.2.12
+    image: ghcr.io/jedarden/ytt:0.2.13
     restart: unless-stopped
     ports:
       - "8080:8080"

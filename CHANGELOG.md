@@ -291,7 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   app's own startup validation on every boot — `CrashLoopBackOff` for
   5d20h/1636 restarts before this fix.
 
-## [0.1.0] — 2025-xx-xx
+## [0.1.0] — 2026-07-06
 
 Initial release.
 
@@ -325,7 +325,13 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.13...HEAD
+[0.2.13]: https://github.com/jedarden/ytt/compare/v0.2.12...v0.2.13
+[0.2.12]: https://github.com/jedarden/ytt/compare/v0.2.11...v0.2.12
+[0.2.11]: https://github.com/jedarden/ytt/compare/v0.2.10...v0.2.11
+[0.2.10]: https://github.com/jedarden/ytt/compare/v0.2.9...v0.2.10
+[0.2.9]: https://github.com/jedarden/ytt/compare/v0.2.8...v0.2.9
+[0.2.8]: https://github.com/jedarden/ytt/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/jedarden/ytt/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/jedarden/ytt/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/jedarden/ytt/compare/v0.2.4...v0.2.5

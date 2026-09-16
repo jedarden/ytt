@@ -18,7 +18,7 @@ docker run --rm \
   -e YTT_ALLOWED_SUBJECTS=your-oauth-subject \
   -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
-  ghcr.io/jedarden/ytt:0.2.12
+  ghcr.io/jedarden/ytt:0.2.13
 ```
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
