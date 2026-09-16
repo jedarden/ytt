@@ -22,7 +22,7 @@ Authorization is therefore a separate, required control:
 - Implement the OAuth 2.1 + PKCE flow the MCP spec mandates (authorization + protected-resource metadata discovery, token issuance, **audience-bound** bearer-token validation on every MCP request).
 - Use the **manual Client ID / Secret** (or FastMCP self-issued tokens) registration path for personal use; **do not** enable open DCR. If DCR is ever needed for sharing, gate it behind a pre-shared registration token.
 - Every tool call must pass **both** a valid validated access token (AuthN) **and** the subject allowlist (AuthZ).
-- Inbound IP-allowlisting of Anthropic's egress ranges must live at **Cloudflare Access/WAF** (the origin pod can't see the client IP behind the tunnel), and is defense-in-depth — not a substitute for the subject allowlist.
+- Inbound IP-allowlisting of Anthropic's egress ranges (`160.79.104.0/21`, `2607:6bc0::/48`) can only live at the **Cloudflare edge** (the origin pod can't see the client IP behind the tunnel) — as a **WAF custom rule**, never Access (an identity gate that would challenge Anthropic's unattended backend). It is **optional defense-in-depth, not a substitute for the subject allowlist**, and is **deliberately not adopted for now** — declined with the full rationale and adoption recipe on bead `ytt-761fb151` (no agent-editable WAF credential; zone-wide `http_request_firewall_custom` phase ownership risks unverifiable clobber on the shared host; the egress range drifts). Adopt only if the operator explicitly opts in, per `docs/plan/plan.md` ("only if explicitly chosen").
 
 See `docs/research/mcp-oauth-authentication.md` for the spec details and exactly what the server must expose.
 
