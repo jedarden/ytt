@@ -29,10 +29,12 @@ services:
       YTT_PUBLIC_URL: "https://mcp.example.com/ytt"
       YTT_PATH_PREFIX: "/ytt/"
       YTT_ALLOWED_SUBJECTS: ""      # set after discovering your sub (see connector.md)
+      YTT_OAUTH_CLIENT_ID: "your-oauth-client-id"       # required — server exits 1 without it
+      YTT_OAUTH_CLIENT_SECRET: "your-oauth-client-secret"
       YTT_WHISPER_URL: "http://whisper:8000"
       YTT_CACHE_DIR: "/cache"
       YTT_CACHE_MAX_BYTES: "2Gi"
-      YTT_SCRATCH_DIR: "/scratch"
+      YTT_SCRATCH_DIR: "/scratch"   # swept on every boot — keep it dedicated to ytt
 
   # Optional: Whisper ASR service
   # https://github.com/stpb/whisper-openai
@@ -52,6 +54,11 @@ volumes:
 
 Put a reverse proxy (e.g. Traefik or Caddy) in front of ytt and expose
 `https://mcp.example.com/ytt` publicly.
+
+Note on the OAuth client: the upstream IdP is currently hardcoded to the
+reference Authentik instance (`sso.ardenone.com/application/o/ytt/`, see
+`ytt/auth.py`), so the client must exist there — BYO-IdP is a code change,
+not a config change (see the [configuration reference](configuration.md)).
 
 ## Kubernetes (generic)
 

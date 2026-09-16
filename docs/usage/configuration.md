@@ -1,7 +1,10 @@
 # Configuration Reference
 
-All ytt configuration is via environment variables.  All variables have defaults
-except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
+All ytt configuration is via environment variables.  `YTT_PUBLIC_URL` and the
+OAuth client pair (`YTT_OAUTH_CLIENT_ID`, `YTT_OAUTH_CLIENT_SECRET`) are
+required — the server exits 1 without the client pair, and the baked-in
+`YTT_PUBLIC_URL` default points at the reference deployment.  Every other
+variable has a working default.
 
 ## Required variables
 
@@ -9,6 +12,22 @@ except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
 |----------|---------|-------------|
 | `YTT_PUBLIC_URL` | *(required)* | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Must not have a trailing slash. **Set this to your own domain** before exposing the server. |
 | `YTT_PATH_PREFIX` | `/ytt/` | The path prefix the server is mounted under. Must end with `/`. Startup exits 1 if the slash is missing. Must match the IngressRoute / reverse-proxy config. |
+
+## OAuth provider (upstream IdP)
+
+ytt federates authentication to an upstream OIDC provider (decision and
+threat model: [../notes/auth.md](../notes/auth.md)); it never falls back to
+an unauthenticated mode.  **The upstream issuer is currently hardcoded** to
+the reference Authentik instance — `https://sso.ardenone.com/application/o/ytt/`
+(`AUTHENTIK_ISSUER` / `AUTHENTIK_OIDC_CONFIG_URL` in `ytt/auth.py`) — so the
+OAuth2 client must exist there; pointing ytt at your own IdP is a code
+change, not a config change.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTT_OAUTH_CLIENT_ID` | *(required)* | Client ID of the `ytt` OAuth2 application on the upstream IdP. Startup exits 1 if unset (`ytt/auth.py::build_auth_provider`). |
+| `YTT_OAUTH_CLIENT_SECRET` | *(required)* | Client secret of the same application. Doubles as the HS256 key that verifies upstream `id_token`s and as the HKDF seed for the signing key of ytt's own tokens. A secret — inject by reference (the reference deployment provisions it via ExternalSecret from OpenBao); never commit, log, or inline it. |
+| `YTT_JWT_SIGNING_SECRET` | *(unset)* | Optional explicit signing key for the tokens ytt issues to clients. Unset, it is derived from `YTT_OAUTH_CLIENT_SECRET` (stable across restarts). Set only to rotate ytt's token key independently of the upstream client secret. |
 
 ## Authorization
 
@@ -31,7 +50,7 @@ except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_SCRATCH_DIR` | `/scratch` | Directory for temporary audio files during Whisper transcription. Use a separate volume from the cache (emptyDir recommended). |
+| `YTT_SCRATCH_DIR` | `/scratch` | Directory for temporary audio files during Whisper transcription. Use a separate volume from the cache (emptyDir recommended). **Startup sweep:** every file in this directory is deleted unconditionally on every boot (`ytt/whisper.py::startup_sweep`) — dedicate the directory to ytt alone and never point it at a shared path. |
 | `YTT_MAX_AUDIO_BYTES` | `500Mi` | Maximum audio file size per Whisper job. |
 
 ## Concurrency
@@ -46,10 +65,10 @@ except `YTT_PUBLIC_URL` (which you must set to your public-facing URL).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_WHISPER_URL` | *(unset)* | Base URL of the OpenAI-compatible Whisper endpoint (must serve `/v1/audio/transcriptions` and `/v1/models`). Required for caption-less videos. |
-| `YTT_WHISPER_MODEL` | `Systran/faster-whisper-small` | Model name to use for ASR. Must be pre-loaded by the Whisper service. Self-corrects via `/v1/models` if the configured model is absent. |
-| `YTT_WHISPER_REALTIME_FACTOR` | `1.2` | ETA multiplier: `ETA_sec = duration_sec × factor`. Calibrate against your Whisper service. |
-| `YTT_WHISPER_TIMEOUT_SEC` | `2880` | HTTP timeout for Whisper requests. Must exceed `YTT_MAX_ASR_DURATION_SEC × YTT_WHISPER_REALTIME_FACTOR` (startup-validated). Default provides a 2× margin: `1200 × 1.2 × 2.0 = 2880`. |
+| `YTT_WHISPER_URL` | `http://whisper-openai.whisper-stt.svc.cluster.local:8000` | Base URL of the OpenAI-compatible Whisper endpoint (must serve `/v1/audio/transcriptions` and `/v1/models`). Required for caption-less videos. The baked-in default points at the reference deployment's in-cluster Whisper — set your own endpoint, or an unreachable address to disable ASR entirely. |
+| `YTT_WHISPER_MODEL` | `large-v3-turbo` | Model name to use for ASR (the only model the reference whisper-openai service serves). Must be pre-loaded by the Whisper service. Self-corrects via `/v1/models` if the configured model is absent. |
+| `YTT_WHISPER_REALTIME_FACTOR` | `2.0` | ETA multiplier: `ETA_sec = duration_sec × factor`. CPU-calibrated for `large-v3-turbo`; calibrate against your own Whisper service. |
+| `YTT_WHISPER_TIMEOUT_SEC` | `2880` | HTTP timeout for Whisper requests. Must exceed `YTT_MAX_ASR_DURATION_SEC × YTT_WHISPER_REALTIME_FACTOR` (startup-validated, Invariant 7). Default: `1200 × 2.0 = 2400 < 2880`, a 1.2× margin. |
 | `YTT_MAX_ASR_DURATION_SEC` | `1200` | Maximum video duration for Whisper ASR (20 min). Longer videos return `too_long_for_asr`. |
 | `YTT_JOB_TTL_SEC` | `3600` | Time-to-live for completed/errored Whisper jobs in the in-memory registry. |
 

@@ -16,10 +16,18 @@ docker run --rm \
   -e YTT_PUBLIC_URL=https://your-domain.example.com/ytt \
   -e YTT_PATH_PREFIX=/ytt/ \
   -e YTT_ALLOWED_SUBJECTS=your-oauth-subject \
+  -e YTT_OAUTH_CLIENT_ID=your-oauth-client-id \
+  -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
   -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
   ronaldraygun/ytt:0.2.15
 ```
+
+The OAuth client pair is startup-required — the server exits 1 without it.
+The upstream IdP is currently hardcoded to the reference Authentik instance
+(`sso.ardenone.com/application/o/ytt/`, see `ytt/auth.py`), so the OAuth2
+client must exist there; pointing ytt at your own IdP is a code change, not a
+config change.
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
 at `https://your-domain.example.com/ytt` (HTTPS required for Anthropic's backend).
@@ -50,19 +58,30 @@ Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-
 
 ## Configuration
 
-All config is environment-variable-based — no ardenone-specific values are
-baked into the image.
+All config is environment-variable-based. Nothing ardenone-specific is
+*required*, but a few baked-in defaults (`YTT_WHISPER_URL`, and
+`YTT_PUBLIC_URL`'s fallback) point at the reference deployment — set your own.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YTT_PUBLIC_URL` | *(required)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. |
 | `YTT_PATH_PREFIX` | `/ytt/` | Path the server is mounted under. Must end with `/`. |
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values allowed to call tools. See [connector.md](docs/usage/connector.md) for how to discover your `sub`. |
-| `YTT_WHISPER_URL` | *(unset)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
-| `YTT_WHISPER_MODEL` | `Systran/faster-whisper-small` | Model name served by the Whisper endpoint. Auto-corrects via `/v1/models`. |
+| `YTT_OAUTH_CLIENT_ID` | *(required)* | OAuth2 client ID of the `ytt` application on the upstream IdP. Startup exits 1 if unset. |
+| `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
+| `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
+| `YTT_WHISPER_MODEL` | `large-v3-turbo` | Model name served by the Whisper endpoint. Auto-corrects via `/v1/models`. |
 | `YTT_CACHE_DIR` | `/cache` | Transcript cache directory. |
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |
+| `YTT_SCRATCH_DIR` | `/scratch` | Scratch directory for temporary Whisper audio. Must be a dedicated volume (emptyDir recommended) — see the warning below. |
 | `YTT_PROXY_URL` | *(unset)* | Optional residential proxy URL (e.g. `http://user:pass@proxy.example.com:port`). |
+
+> **⚠️ `YTT_SCRATCH_DIR` is swept on every boot.** At startup ytt deletes
+> **every file** in the scratch directory, unconditionally — safe only because
+> the single replica is guaranteed to be the only runner. Point it at a
+> directory ytt owns alone (a dedicated emptyDir in Kubernetes, or an
+> otherwise-empty directory), never at a shared path like `/tmp`. Rationale:
+> [docs/notes/single-replica.md](docs/notes/single-replica.md).
 
 Full reference: [docs/usage/configuration.md](docs/usage/configuration.md)
 
