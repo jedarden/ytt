@@ -1,0 +1,169 @@
+{
+  "generated_at": "2026-09-16T20:55:32Z",
+  "workspace": "/home/coding/ytt",
+  "command": "bead list --json --limit 1000",
+  "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
+  "summary": {
+    "total_beads": 55,
+    "open": 6,
+    "in_progress": 1,
+    "closed": 48
+  },
+  "beads_not_closed": [
+    {
+      "id": "ytt-58325cdf",
+      "title": "ytt: prove ardenone-cluster residential egress (plan Proof Obligation canary)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "quarantine-until:2026-09-16T18:05:10.056041566+00:00",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-16T15:25:56.758370261Z",
+      "updated_at": "2026-09-16T18:00:10.623890577Z"
+    },
+    {
+      "id": "ytt-5a4e9a6e",
+      "title": "Add an automated deploy/ \u2194 declarative-config manifest parity check (drift already happened once)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "over-budget",
+        "quarantine-until:2026-09-16T20:33:13.474692427+00:00",
+        "verification-failed",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 5,
+      "created_at": "2026-09-16T19:05:01.333206493Z",
+      "updated_at": "2026-09-16T20:28:13.172992547Z"
+    },
+    {
+      "id": "ytt-6c1eef9d",
+      "title": "ytt: define and document per-subject rate-limit + Whisper-quota configuration surface",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "quarantine-until:2026-09-16T18:00:29.512344899+00:00",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-16T15:25:56.621182603Z",
+      "updated_at": "2026-09-16T17:55:29.977084465Z"
+    },
+    {
+      "id": "ytt-8efb9b9d",
+      "title": "Extend CHANGELOG/version metadata coverage to 0.2.13\u20130.2.14",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-09-16T19:05:01.698314121Z",
+      "updated_at": "2026-09-16T19:05:01.698314121Z"
+    },
+    {
+      "id": "ytt-b156b5ba",
+      "title": "Update docs/pluck-configuration.md for the bead-rs migration (it still documents the deprecated bf/br backend)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "over-budget",
+        "quarantine-until:2026-09-16T19:52:26.077342633+00:00",
+        "verification-failed",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 5,
+      "created_at": "2026-09-16T19:05:01.160055553Z",
+      "updated_at": "2026-09-16T19:47:25.782275189Z"
+    },
+    {
+      "id": "ytt-cbbdf5c7",
+      "title": "Regenerate docs/bead-inventory.md and its JSON snapshot (records 13 open beads vs ~45 actually open)",
+      "status": "in_progress",
+      "effective_status": "in_progress",
+      "priority": 2,
+      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 2,
+      "created_at": "2026-09-16T19:05:01.501143713Z",
+      "updated_at": "2026-09-16T20:28:18.951130754Z"
+    },
+    {
+      "id": "ytt-f4064fab",
+      "title": "Document YTT_SCRATCH_DIR in the README configuration table",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-09-16T19:05:01.827375362Z",
+      "updated_at": "2026-09-16T19:05:01.827375362Z"
+    }
+  ],
+  "pluck_label_analysis": {
+    "default_exclude_labels": [
+      "deferred",
+      "human",
+      "blocked",
+      "escalation"
+    ],
+    "beads_matching_default_excludes": [],
+    "quarantine_windows": [
+      {
+        "id": "ytt-58325cdf",
+        "until": "2026-09-16T18:05:10.056041566+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-5a4e9a6e",
+        "until": "2026-09-16T20:33:13.474692427+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-6c1eef9d",
+        "until": "2026-09-16T18:00:29.512344899+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-b156b5ba",
+        "until": "2026-09-16T19:52:26.077342633+00:00",
+        "state": "expired"
+      }
+    ]
+  }
+}
