@@ -79,6 +79,38 @@ def test_env_override(monkeypatch):
     assert s.cache_backend == "emptydir"
 
 
+# --- per-subject rate limit + Whisper quota (Phase 5) ------------------------
+
+def test_rate_limit_burst_defaults_to_one_minute_of_requests():
+    """Unset burst resolves to the per-minute rate — a full minute's worth of
+    requests may arrive at once."""
+    assert Settings().rate_limit_burst == Settings().rate_limit_per_min == 20
+    assert Settings(rate_limit_per_min=7).rate_limit_burst == 7
+
+
+def test_rate_limit_burst_env_override(monkeypatch):
+    monkeypatch.setenv("YTT_RATE_LIMIT_BURST", "3")
+    s = Settings()
+    assert s.rate_limit_burst == 3
+    assert s.rate_limit_per_min == 20  # independent
+
+
+@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour"])
+def test_negative_limits_rejected(field):
+    """Negative limits are config errors (fail fast at startup)."""
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        Settings(**{field: -1})
+
+
+def test_zero_limits_are_valid_and_fail_closed():
+    """0 is meaningful, not an error: it denies everything the limit guards
+    (docs/notes/auth.md fail-closed rule — there is no "unlimited")."""
+    s = Settings(rate_limit_per_min=0, whisper_jobs_per_hour=0)
+    assert s.rate_limit_per_min == 0
+    assert s.rate_limit_burst == 0  # unset burst follows the 0 rate
+    assert s.whisper_jobs_per_hour == 0
+
+
 # --- path prefix + join -----------------------------------------------------
 def test_join_path_collapses_boundary_slash():
     assert join_path("/ytt/", "/health") == "/ytt/health"

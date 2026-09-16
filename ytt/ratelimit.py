@@ -1,11 +1,22 @@
 """Per-subject rate limiting + bounded queue (plan: Concurrency / rate limit).
 
-Hand-rolled in-process token bucket (``YTT_RATE_LIMIT_PER_MIN``) + per-subject
-Whisper quota (``YTT_WHISPER_JOBS_PER_HOUR``); bounded queue in front of the
-fetch semaphore returns 429 + Retry-After when full.
+Hand-rolled in-process token bucket (``YTT_RATE_LIMIT_PER_MIN`` /
+``YTT_RATE_LIMIT_BURST``) + per-subject Whisper quota
+(``YTT_WHISPER_JOBS_PER_HOUR``); bounded queue in front of the fetch semaphore
+returns 429 + Retry-After when full.
 
-Plan: "Cache hits do NOT consume the rate-limit bucket — only fetch and Whisper
-paths trigger the token bucket (cache hits cost nothing server-side)."
+Enforcement point: ``ytt/server.py`` — :class:`SubjectRateLimiter` guards the
+cache-miss fetch path of ``get_youtube_transcript`` and :class:`WhisperQuota`
+guards the start of a *new* Whisper job. Cache hits and
+``get_transcript_job`` polls consume nothing (plan: "Cache hits do NOT consume
+the rate-limit bucket — only fetch and Whisper paths trigger the token bucket
+(cache hits cost nothing server-side)."). Denials surface as
+``error_code=rate_limited`` with a retry hint in the message.
+
+Fail-closed semantics (docs/notes/auth.md): a limit of 0 leaves the bucket
+permanently empty, so ``YTT_RATE_LIMIT_PER_MIN=0`` (whose unset burst also
+resolves to 0) denies every fetch, and ``YTT_WHISPER_JOBS_PER_HOUR=0`` denies
+every new ASR job. There is no "unlimited" setting.
 
 Usage::
 
@@ -24,6 +35,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +79,16 @@ class TokenBucket:
             return True
         return False
 
+    def refund(self, n: int = 1) -> None:
+        """Return *n* tokens to the bucket (capped at capacity).
+
+        Used by the Whisper-quota path: a token is charged before the
+        get-or-create, then refunded if the call turned out to join an
+        existing job rather than start one (joining is free).
+        """
+        self._refill()
+        self._tokens = min(float(self.capacity), self._tokens + n)
+
     @property
     def tokens_remaining(self) -> float:
         """Current token count after a virtual refill (read-only diagnostic)."""
@@ -108,10 +130,28 @@ class SubjectRateLimiter:
 
     @classmethod
     def from_rate_per_min(cls, rate_per_min: int) -> "SubjectRateLimiter":
-        """Construct from requests-per-minute (plan: ``YTT_RATE_LIMIT_PER_MIN``)."""
+        """Construct from requests-per-minute (plan: ``YTT_RATE_LIMIT_PER_MIN``).
+
+        Burst capacity defaults to a full minute's worth of requests.
+        """
         return cls(
             capacity=rate_per_min,
             refill_rate_per_sec=rate_per_min / 60.0,
+        )
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "SubjectRateLimiter":
+        """Construct from :class:`~ytt.config.Settings`.
+
+        Uses ``rate_limit_per_min`` (refill) and ``rate_limit_burst``
+        (capacity, already resolved to the rate by Settings when unset).
+        """
+        burst = settings.rate_limit_burst
+        if burst is None:  # direct construction with an unresolved Settings
+            burst = settings.rate_limit_per_min
+        return cls(
+            capacity=burst,
+            refill_rate_per_sec=settings.rate_limit_per_min / 60.0,
         )
 
     def _get_or_create(self, sub: str) -> TokenBucket:
@@ -125,6 +165,10 @@ class SubjectRateLimiter:
     def consume(self, sub: str, n: int = 1) -> bool:
         """Consume *n* tokens for *sub*. Returns ``True`` on success."""
         return self._get_or_create(sub).consume(n)
+
+    def refund(self, sub: str, n: int = 1) -> None:
+        """Return *n* tokens to *sub*'s bucket (capped at capacity)."""
+        self._get_or_create(sub).refund(n)
 
     def retry_after_sec(self, sub: str) -> float:
         """Seconds until *sub*'s bucket has 1 token (for Retry-After header)."""
@@ -144,10 +188,12 @@ class WhisperQuota:
     """Per-subject Whisper job quota (plan: ``YTT_WHISPER_JOBS_PER_HOUR``).
 
     Implemented as a token bucket with capacity=jobs_per_hour and
-    refill_rate=jobs_per_hour/3600 (one token per second × ratio). Because
-    Whisper jobs are expensive (CPU + network), the hourly window is enforced
-    more strictly: the bucket does NOT start full; it starts at ``capacity``
-    but refills at hourly-rate so sustained usage stays within the budget.
+    refill_rate=jobs_per_hour/3600: a subject may start up to
+    ``jobs_per_hour`` jobs immediately (the bucket starts full), then
+    sustained usage is held to one new job every ``3600/jobs_per_hour``
+    seconds. Whisper jobs are expensive (CPU + network), so a *new* job
+    always costs a whole slot — the server refunds the charge only when the
+    call turned out to join an already-running job (joining/polling is free).
     """
 
     def __init__(self, jobs_per_hour: int) -> None:
@@ -158,9 +204,24 @@ class WhisperQuota:
             refill_rate_per_sec=jobs_per_hour / 3600.0,
         )
 
+    @classmethod
+    def from_settings(cls, settings: Any) -> "WhisperQuota":
+        """Construct from :class:`~ytt.config.Settings`
+        (``YTT_WHISPER_JOBS_PER_HOUR``)."""
+        return cls(jobs_per_hour=settings.whisper_jobs_per_hour)
+
     def consume(self, sub: str) -> bool:
-        """Consume 1 Whisper job slot. Returns ``True`` if quota available."""
+        """Consume 1 Whisper job slot. Returns ``True`` if quota available.
+
+        The server charges this only when a call is about to *start* a new
+        job; :meth:`refund` undoes the charge when the call turned out to
+        join an existing job instead (joining/polling is free).
+        """
         return self._limiter.consume(sub)
+
+    def refund(self, sub: str, n: int = 1) -> None:
+        """Return *n* job slots to *sub*'s quota (capped at capacity)."""
+        self._limiter.refund(sub, n)
 
     def retry_after_sec(self, sub: str) -> float:
         """Seconds until quota refreshes for *sub*."""

@@ -7,6 +7,10 @@ parsing it enforces:
 - **Invariant 7** (ETA-timeout safety): ``MAX_ASR_DURATION_SEC × RT_FACTOR <
   WHISPER_TIMEOUT_SEC`` — validated at construction (raises -> server exits 1).
 - ``YTT_PATH_PREFIX`` must end with ``/`` (raises if missing).
+- Per-subject limits (``RATE_LIMIT_PER_MIN``, ``RATE_LIMIT_BURST``,
+  ``WHISPER_JOBS_PER_HOUR``) must be >= 0: 0 is meaningful (deny-all —
+  fail-closed), negatives are config errors. Unset ``RATE_LIMIT_BURST``
+  resolves to ``RATE_LIMIT_PER_MIN`` (one full minute of requests up front).
 - Storage sizing: for ``pvc`` backend, ``statvfs(cache_dir)`` must be >=
   ``cache_max_bytes`` (fail fast); for ``emptydir`` a warning is emitted instead
   (statvfs reports node disk, not the kubelet ``sizeLimit``). This filesystem
@@ -95,7 +99,17 @@ class Settings(BaseSettings):
     # Comma-separated Google account emails (the "sub" is the Google-verified
     # email — see ytt.auth); empty == deny all (fail-closed).
     allowed_subjects: str = ""
+    # Per-subject request rate (token-bucket refill, docs/notes/auth.md).
+    # Charged only on the fetch path — cache hits and get_transcript_job
+    # polls cost nothing. 0 = deny all fetches for every subject (fail-closed).
     rate_limit_per_min: int = 20
+    # Per-subject burst capacity (bucket size). None resolves to
+    # rate_limit_per_min (burst == one minute's worth of requests), so
+    # YTT_RATE_LIMIT_PER_MIN=0 with no explicit burst denies everything.
+    rate_limit_burst: int | None = None
+    # Per-subject Whisper ASR jobs per rolling hour. Charged only when a NEW
+    # job starts (joining/polling an existing job is free). 0 = deny all ASR
+    # (caption fetches still work) — fail-closed.
     whisper_jobs_per_hour: int = 10
 
     # --- cache ---
@@ -145,6 +159,18 @@ class Settings(BaseSettings):
     jwt_signing_secret: str | None = None
 
     # ------------------------------------------------------------------ #
+    @field_validator("rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour")
+    @classmethod
+    def _rate_limits_non_negative(cls, v: int | None, info) -> int | None:
+        """Negative limits are config errors (fail fast); 0 is meaningful —
+        it denies everything the limit guards (fail-closed)."""
+        if v is not None and v < 0:
+            raise ValueError(
+                f"YTT_{info.field_name.upper()} must be >= 0 (0 = deny all), "
+                f"got {v}"
+            )
+        return v
+
     @field_validator("path_prefix")
     @classmethod
     def _path_prefix_trailing_slash(cls, v: str) -> str:
@@ -163,6 +189,15 @@ class Settings(BaseSettings):
         # The audience/resource/issuer must be byte-identical with NO trailing
         # slash (RFC 8707 confused-deputy guard). Normalize defensively.
         return v.rstrip("/")
+
+    @model_validator(mode="after")
+    def _resolve_rate_limit_burst(self) -> "Settings":
+        """Unset burst defaults to the per-minute rate (one full minute of
+        requests may arrive at once) — so YTT_RATE_LIMIT_PER_MIN=0 with no
+        explicit burst leaves no initial allowance either (fail-closed)."""
+        if self.rate_limit_burst is None:
+            self.rate_limit_burst = self.rate_limit_per_min
+        return self
 
     @model_validator(mode="after")
     def _invariant_7_eta_timeout(self) -> "Settings":

@@ -7,6 +7,9 @@ Builds the FastMCP app (Streamable HTTP), registers the two tools
 The MCP server is path-prefix-aware: all routes and emitted URLs carry the
 configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).
 
+Phase 5: per-subject authorization controls enforced — subject allowlist via
+AuthMiddleware (``ytt.authz``), plus the per-subject rate limit (cache-miss
+fetch path) and Whisper ASR quota (new jobs only) from ``ytt.ratelimit``.
 Phase 7: full pipeline wired — cache → fetch → pagination.
 Phase 8: observability wired — structlog, Prometheus /metrics, /admin/egress.
 """
@@ -29,6 +32,7 @@ from ytt.authz import check_subject_auth
 from ytt.cache import CacheHit, TranscriptCache
 from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
+from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
 from ytt.singleton import (
     SingletonLockHeld,
     SingletonLockUnavailable,
@@ -60,6 +64,62 @@ whisper_registry = WhisperJobRegistry()
 
 #: Active Whisper model name — updated by check_model_guard() at startup.
 _active_whisper_model: str = _settings_singleton.whisper_model
+
+#: Per-subject request rate limiter + per-subject Whisper ASR quota
+#: (docs/notes/auth.md: "even an allowlisted caller can't exhaust the home IP /
+#: shared Whisper service"). In-process state — correct only at replicas:1,
+#: like the single-flight map and job registry. Enforced in
+#: get_youtube_transcript: the bucket on the cache-miss fetch path, the quota
+#: on new Whisper jobs only.
+_rate_limiter = SubjectRateLimiter.from_settings(_settings_singleton)
+_whisper_quota = WhisperQuota.from_settings(_settings_singleton)
+
+
+# ---------------------------------------------------------------------------
+# Per-subject limit helpers (rate limit + ASR quota, docs/notes/auth.md)
+# ---------------------------------------------------------------------------
+
+_ANONYMOUS_SUBJECT = "anonymous"
+
+
+def _request_subject() -> str:
+    """Best-effort subject key for rate-limit / quota accounting.
+
+    The lowercased token ``email`` claim when an auth context is available —
+    in production it always is (``AuthMiddleware`` runs before every tool
+    call). Falls back to one shared ``anonymous`` bucket when no token can be
+    resolved (unit tests invoking tools directly, local runs with auth
+    unconfigured), so the limiter still bounds total volume. The raw subject
+    is never logged or exported — only its sha256 prefix (see
+    :func:`_record_rate_limited`).
+    """
+    try:
+        from fastmcp.server.dependencies import get_access_token
+
+        token = get_access_token()
+    except Exception:  # no request/auth context at all
+        token = None
+    if token is not None:
+        email = (token.claims or {}).get("email")
+        if email:
+            return str(email).strip().lower()
+    return _ANONYMOUS_SUBJECT
+
+
+def _record_rate_limited(subject: str, tool: str) -> None:
+    """Metric + structured log on a per-subject denial.
+
+    ``ytt_rate_limited_total{subject_hash}`` carries only the first 8 hex
+    chars of sha256(subject) — never the subject itself (redaction rule,
+    ``ytt.observability``).
+    """
+    import hashlib
+
+    from ytt.observability import ytt_rate_limited_total
+
+    subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
+    ytt_rate_limited_total.labels(subject_hash=subject_hash).inc()
+    log.warning("Rate limited", subject_hash=subject_hash, tool=tool)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +180,9 @@ def _build_app():
             "Call get_transcript_job(video_id) later to retrieve the result. "
             "On status='partial', call again with cursor=next_cursor before answering. "
             "Use start/end (seconds) or query (case-insensitive substring) to filter "
-            "the transcript; query is mutually exclusive with start/end."
+            "the transcript; query is mutually exclusive with start/end. "
+            "Requests are rate-limited per user: on status='error' with "
+            "error_code='rate_limited', relay the message and wait before retrying."
         )
     )
     async def get_youtube_transcript(
@@ -174,6 +236,29 @@ def _build_app():
         if hit is not None:
             return pagination.build_page(hit, mode, filter_args, settings, cursor=cursor)
 
+        # --- 3.5 Per-subject rate limit (docs/notes/auth.md) ------------------
+        # Charged only here, on the cache-miss fetch path — cache hits and
+        # get_transcript_job polls cost nothing (plan §Caching). Failed
+        # fetches spend a token too: the limit guards yt-dlp/egress effort,
+        # not successful responses.
+        subject = _request_subject()
+        if not _rate_limiter.consume(subject):
+            _record_rate_limited(subject, "get_youtube_transcript")
+            retry_sec = _rate_limiter.retry_after_sec(subject)
+            retry_txt = (
+                f" Try again in ~{retry_sec:.0f}s." if retry_sec != float("inf") else ""
+            )
+            return {
+                "video_id": video_id,
+                "status": "error",
+                "error_code": errors.RATE_LIMITED,
+                "message": (
+                    "Rate limit exceeded "
+                    f"({settings.rate_limit_per_min} requests/min per subject)."
+                    f"{retry_txt}"
+                ),
+            }
+
         # --- 4. Cache miss — attempt caption fetch ----------------------------
         try:
             fetch_result = await _concurrency.fetch_pool.run(
@@ -188,14 +273,49 @@ def _build_app():
             if exc.error_code == errors.EMPTY_BODY:
                 # No captions — start or retrieve existing Whisper job.
                 # Plan §Whisper fallback: "get-or-create under a lock keyed by video_id"
+                # Per-subject ASR quota (docs/notes/auth.md): charged only when
+                # this call would START a new job — joining an in-flight job
+                # (or polling via get_transcript_job) is free, or clients
+                # waiting on one transcription would drain their own budget.
+                # The charge lands before the get-or-create so there is no
+                # fail-open race window, and is refunded when the call turns
+                # out to join an existing job (or no job gets created).
+                quota_charged = _whisper_quota.consume(subject)
+                if not quota_charged and (
+                    await whisper_registry.get(video_id) is None
+                ):
+                    _record_rate_limited(subject, "get_youtube_transcript(asr)")
+                    retry_sec = _whisper_quota.retry_after_sec(subject)
+                    retry_txt = (
+                        f" Try again in ~{retry_sec:.0f}s."
+                        if retry_sec != float("inf")
+                        else ""
+                    )
+                    return {
+                        "video_id": video_id,
+                        "status": "error",
+                        "error_code": errors.RATE_LIMITED,
+                        "message": (
+                            "Whisper ASR quota exhausted "
+                            f"({settings.whisper_jobs_per_hour} jobs/hour per "
+                            f"subject).{retry_txt}"
+                        ),
+                    }
+
                 try:
                     job, is_new = await whisper_registry.get_or_create(
                         video_id,
                         duration_sec=None,  # duration unknown without extract_info
                         settings=settings,
                     )
+                    if quota_charged and not is_new:
+                        # Joined an existing job — put the slot back.
+                        _whisper_quota.refund(subject)
                 except YttError as tla_exc:
                     # too_long_for_asr (duration check fails if we had duration)
+                    # — no job was started, so an ASR charge is refunded.
+                    if quota_charged:
+                        _whisper_quota.refund(subject)
                     return {
                         "video_id": video_id,
                         "status": "error",

@@ -67,6 +67,9 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_PUBLIC_URL` | *(required)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. |
 | `YTT_PATH_PREFIX` | `/ytt/` | Path the server is mounted under. Must end with `/`. |
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values allowed to call tools. See [connector.md](docs/usage/connector.md) for how to discover your `sub`. |
+| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate (token-bucket refill). Only cache-miss fetches consume it — cache hits and `get_transcript_job` polls are free. `0` = deny all fetches (fail-closed). |
+| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject burst capacity (fetches allowed at once before the per-minute refill throttles). |
+| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject *new* Whisper ASR jobs per rolling hour. Joining or polling an in-flight job is free. `0` = deny all ASR, caption fetches still work (fail-closed). |
 | `YTT_OAUTH_CLIENT_ID` | *(required)* | OAuth2 client ID of the `ytt` application on the upstream IdP. Startup exits 1 if unset. |
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
 | `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |

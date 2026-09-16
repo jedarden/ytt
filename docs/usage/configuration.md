@@ -34,8 +34,29 @@ change, not a config change.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values (e.g. `user@example.com,abc123`). Empty list denies all requests. Discover your `sub` via `ytt selftest --show-sub` after the first OAuth flow. |
-| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject request rate limit (token bucket). |
-| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject Whisper ASR job quota per hour. |
+| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate limit — token-bucket **refill rate** in requests/minute. Only cache-miss fetches consume it (see below). `0` = deny every fetch for every subject. |
+| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject token-bucket **capacity** — how many fetches a subject may make at once before the per-minute refill throttles. Unset, it resolves to `YTT_RATE_LIMIT_PER_MIN` (a full minute's worth of requests up front). |
+| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject quota for **new** Whisper ASR jobs per rolling hour (token bucket refilling at `jobs/3600` per second). `0` = deny every new ASR job; caption fetches still work. |
+
+Per-subject limits (rationale: [../notes/auth.md](../notes/auth.md) — "even an
+allowlisted caller can't exhaust the home IP / shared Whisper service"):
+
+- **What costs a token:** only the cache-miss fetch path of
+  `get_youtube_transcript` (failed fetches included — the limit guards
+  yt-dlp/egress effort, not successful responses). **Cache hits and
+  `get_transcript_job` polls cost nothing**, so waiting on one transcription
+  never drains a caller's budget.
+- **What costs a Whisper slot:** only *starting* a new ASR job. Joining an
+  already-running job for the same video, or polling it, is free.
+- **Fail-closed:** `0` is valid and denies everything the limit guards; there
+  is no "unlimited" setting. Negative values fail startup validation.
+- **On denial** the tool returns `status="error"`, `error_code="rate_limited"`
+  with a retry hint in the message, and `ytt_rate_limited_total{subject_hash}`
+  increments on `/metrics` (subjects are exported only as an 8-char sha256
+  prefix, never in clear).
+- Limits are enforced **per OAuth subject** (`email` claim) and held in
+  process memory — correct only under the single-replica invariant
+  (`replicas: 1`), like the cache and job registry.
 
 ## Cache
 
