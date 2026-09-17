@@ -63,6 +63,7 @@ def test_defaults_match_plan():
     assert s.whisper_realtime_factor == 2.0
     assert s.whisper_timeout_sec == 2880
     assert s.max_asr_duration_sec == 1200
+    assert s.max_pending_whisper_jobs == 16
     assert s.job_ttl_sec == 3600
     assert s.canary_interval_sec == 600
     assert s.inline_char_limit == 18000
@@ -98,7 +99,7 @@ def test_rate_limit_burst_env_override(monkeypatch):
     assert s.rate_limit_per_min == 20  # independent
 
 
-@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour"])
+@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour", "max_pending_whisper_jobs"])
 def test_negative_limits_rejected(field):
     """Negative limits are config errors (fail fast at startup)."""
     with pytest.raises(ValidationError, match="must be >= 0"):
@@ -112,9 +113,11 @@ def test_zero_limits_are_valid_and_fail_closed():
     assert s.rate_limit_per_min == 0
     assert s.rate_limit_burst == 0  # unset burst follows the 0 rate
     assert s.whisper_jobs_per_hour == 0
+    # The ASR backlog cap follows the same convention: 0 denies every new job.
+    assert Settings(max_pending_whisper_jobs=0).max_pending_whisper_jobs == 0
 
 
-@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour"])
+@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour", "max_pending_whisper_jobs"])
 @pytest.mark.parametrize("bad", ["abc", "", "2.5", "20 requests"])
 def test_malformed_limit_values_rejected(field, bad):
     """Non-integer limit values are config errors — startup fails instead of

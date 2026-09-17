@@ -22,6 +22,26 @@ class YttError(Exception):
         self.message = message
 
 
+class NoCaptionsError(YttError):
+    """``empty_body`` raised specifically because no caption track exists.
+
+    yt-dlp metadata (``extract_info``) was retrieved successfully — the video
+    is real and fetchable — it simply has no usable captions, so the caller
+    (``ytt.server``) falls back to Whisper ASR. Carries the video's
+    ``duration_sec`` when known so the ``MAX_ASR_DURATION_SEC`` cap can be
+    enforced **at job creation** — before a job is registered, a quota slot
+    charged, or any audio downloaded — rather than only at download time.
+
+    A plain :class:`YttError` with ``error_code=empty_body`` (e.g. "yt-dlp
+    returned no info") has ``duration_sec is None`` via :func:`getattr`, so
+    consumers never need an isinstance check to stay safe.
+    """
+
+    def __init__(self, message: str, duration_sec: float | None = None) -> None:
+        super().__init__(EMPTY_BODY, message)
+        self.duration_sec = duration_sec
+
+
 # --- error_code constants (the stable enum) ---------------------------------
 BAD_URL = "bad_url"
 PRIVATE = "private"

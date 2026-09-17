@@ -160,6 +160,15 @@ class Settings(BaseSettings):
     whisper_realtime_factor: float = 2.0
     whisper_timeout_sec: int = 2880
     max_asr_duration_sec: int = 1200
+    # Global cap on Whisper jobs that are pending (queued behind the
+    # max_concurrent_whisper semaphore) or running. Bounds the total queued
+    # ASR work one misbehaving (but allowlisted) caller — or a fleet of them —
+    # can pile up: the per-subject quota caps each subject's *rate*, this caps
+    # the system's *backlog*. A job already in flight can always be joined;
+    # the cap only denies *new* jobs (stable error: rate_limited, "queue
+    # full"). 0 = deny every new ASR job (fail-closed, same convention as the
+    # per-subject limits above).
+    max_pending_whisper_jobs: int = 16
     job_ttl_sec: int = 3600
 
     # --- canary ---
@@ -183,7 +192,12 @@ class Settings(BaseSettings):
     jwt_signing_secret: str | None = None
 
     # ------------------------------------------------------------------ #
-    @field_validator("rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour")
+    @field_validator(
+        "rate_limit_per_min",
+        "rate_limit_burst",
+        "whisper_jobs_per_hour",
+        "max_pending_whisper_jobs",
+    )
     @classmethod
     def _rate_limits_non_negative(cls, v: int | None, info) -> int | None:
         """Negative limits are config errors (fail fast); 0 is meaningful —

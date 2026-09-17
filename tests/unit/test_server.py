@@ -693,6 +693,164 @@ async def test_get_transcript_job_poll_consumes_nothing(monkeypatch):
         assert sc["status"] == "pending"
 
 
+# ---------------------------------------------------------------------------
+# ASR resource guardrails: queued-work cap + duration cap at job creation
+# (bead ytt-89d1e56d). The per-subject quota caps each subject's rate; these
+# tests pin the system-level bounds that stop an allowlisted caller (or a
+# fleet of them) from piling unbounded queued ASR work onto the shared
+# Whisper service, and from spending quota/download work on videos that are
+# too long to ever transcribe.
+# ---------------------------------------------------------------------------
+
+
+def _fill_asr_queue(monkeypatch, active: int, *, existing_video: str | None = None):
+    """Stub the registry so *active* jobs are pending/running and (optionally)
+    one specific video already has an in-flight job."""
+    from ytt import server
+    from ytt.models import WhisperJob
+
+    existing = None
+    if existing_video is not None:
+        existing = WhisperJob(
+            video_id=existing_video,
+            status="running",
+            created_at=time.time(),
+            eta_sec=30.0,
+        )
+
+    async def mock_get(video_id):
+        return existing if (existing is not None and video_id == existing_video) else None
+
+    async def mock_active_count():
+        return active
+
+    monkeypatch.setattr(server.whisper_registry, "get", mock_get)
+    monkeypatch.setattr(server.whisper_registry, "active_count", mock_active_count)
+
+
+@pytest.mark.asyncio
+async def test_whisper_queue_full_denies_new_job_without_spending_quota(monkeypatch):
+    """Backlog at YTT_MAX_PENDING_WHISPER_JOBS → a NEW caption-less request is
+    denied rate_limited ("queue full") before get_or_create runs and without
+    charging the caller's ASR quota."""
+    from ytt import server
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        WhisperQuota(jobs_per_hour=10),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+    _fill_asr_queue(monkeypatch, active=16)  # backlog at the default cap
+
+    async def must_not_create(*a, **kw):
+        raise AssertionError("get_or_create must not run when the queue is full")
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", must_not_create)
+
+    before = _limited_count("anonymous")
+    sc = (await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})).structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "rate_limited"
+    assert "Whisper queue full" in sc["message"]
+    assert "16/16" in sc["message"]
+    assert _limited_count("anonymous") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_whisper_queue_full_allows_joining_existing_job(monkeypatch):
+    """Joining a job already in flight adds no work, so it is admitted even
+    with the backlog at capacity — and joining is free (quota refunded)."""
+    from ytt import server
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.models import WhisperJob
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    quota = WhisperQuota(jobs_per_hour=1)
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        quota,
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+    _fill_asr_queue(monkeypatch, active=16, existing_video="dQw4w9WgXcQ")
+
+    # The joining call still flows through get_or_create — which resolves to
+    # the in-flight job, is_new=False. Reaching it at all (with active=16 ≥
+    # the cap) proves the queue-full gate admits joiners.
+    existing = WhisperJob(
+        video_id="dQw4w9WgXcQ", status="running", created_at=time.time(), eta_sec=30.0
+    )
+
+    async def mock_get_or_create(video_id, duration_sec, settings):
+        return existing, False
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
+
+    sc = (await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})).structured_content
+    assert sc["status"] == "pending"  # joined the in-flight job
+    assert quota.consume("anonymous") is True  # the pre-charge was refunded
+
+
+@pytest.mark.asyncio
+async def test_whisper_queue_full_check_precedes_quota_charge(monkeypatch):
+    """A queue-full denial never spends a quota slot: with the quota already
+    fail-closed at 0, the caller still sees the *queue* denial (the check
+    runs first) rather than the quota message."""
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        WhisperQuota(jobs_per_hour=0),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+    _fill_asr_queue(monkeypatch, active=16)
+
+    sc = (await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})).structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "rate_limited"
+    assert "Whisper queue full" in sc["message"]
+    assert "quota" not in sc["message"]
+
+
+@pytest.mark.asyncio
+async def test_asr_duration_cap_denies_at_job_creation(monkeypatch):
+    """A video known (from extract_info metadata) to exceed
+    YTT_MAX_ASR_DURATION_SEC is refused too_long_for_asr at job creation —
+    before a job is registered, a quota slot is spent, or any audio is
+    downloaded. The real registry runs the duration check (it lives inside
+    get_or_create), so this pins the full NoCaptionsError.duration_sec flow."""
+    from ytt import server
+    from ytt.errors import NoCaptionsError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    quota = WhisperQuota(jobs_per_hour=10)
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        quota,
+    )
+    _cache_miss(monkeypatch)
+    # No captions AND a 90-minute duration — over the 1200s default cap.
+    _fetch_raises(monkeypatch, NoCaptionsError("No captions available.", duration_sec=5400.0))
+
+    size_before = server.whisper_registry.size
+    sc = (await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})).structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "too_long_for_asr"
+    assert "1200" in sc["message"]  # the cap is named
+    # No registry entry was left behind by the refused job.
+    assert server.whisper_registry.size == size_before
+    assert quota.consume("anonymous") is True  # no slot was spent on the refusal
+
+
 class _ExplodingLimiter:
     """Limiter whose backing state is gone — every operation raises."""
 

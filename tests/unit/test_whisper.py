@@ -27,12 +27,20 @@ Coverage:
 - WhisperJobRegistry.run_ttl_gc: stale running job GC'd (older than timeout+TTL)
 - WhisperJobRegistry.run_ttl_gc: fresh running job NOT GC'd
 - WhisperJobRegistry.size: reflects current count
+- WhisperJobRegistry.active_count: only pending+running jobs count (queue-depth signal)
 - run_whisper_job: happy path → status transitions pending→running→done, cache written
 - run_whisper_job: audio download error → running→error, audio file cleaned up
 - run_whisper_job: Whisper HTTP 500 → running→error, audio file cleaned up
 - run_whisper_job: Whisper timeout → running→error, audio file cleaned up
 - run_whisper_job: audio path set but Whisper fails → audio file still deleted
 - run_whisper_job: Invariant 4 — audio file deleted even on unexpected exception
+- _do_download_audio: duration backstop — over-cap video refused before download
+- _do_download_audio: duration backstop — within-cap video downloads
+- _do_download_audio: duration backstop — unknown duration falls through
+- _sweep_video_scratch: deletes only this video's partial files
+- _sweep_video_scratch: missing scratch dir is not an error
+- run_whisper_job: failed download sweeps the partial {video_id}.* file
+- run_whisper_job: cancelled job sweeps its partial file and releases its slot
 - _projected_audio_size: audio-only format returned
 - _projected_audio_size: falls back to top-level filesize
 - _projected_audio_size: returns None when no size info
@@ -42,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -49,13 +58,16 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import httpx
 import pytest
+import yt_dlp
 
 from ytt import errors
 from ytt.errors import YttError
 from ytt.models import WhisperJob
 from ytt.whisper import (
     WhisperJobRegistry,
+    _do_download_audio,
     _projected_audio_size,
+    _sweep_video_scratch,
     check_model_guard,
     run_whisper_job,
     startup_sweep,
@@ -968,3 +980,294 @@ class TestWhisperJobSingleFlight:
         assert new_count == 1
         # Only one registry entry
         assert reg.size == 1
+
+
+# ---------------------------------------------------------------------------
+# Download duration backstop (bead ytt-89d1e56d)
+#
+# Job creation refuses over-cap videos when the no-captions error carried the
+# duration (server-level tests in test_server.py). The backstop below is what
+# stops the download itself when the duration was unknown then — no bytes hit
+# the scratch disk and no Whisper work is queued for a video that can never
+# be transcribed.
+# ---------------------------------------------------------------------------
+
+
+def _stub_ydl_for_audio(info: dict | None = None, exc: Exception | None = None):
+    """Mock YoutubeDL context manager for the audio path (extract + download)."""
+    mock_ydl = MagicMock()
+    if exc is not None:
+        mock_ydl.extract_info.side_effect = exc
+    else:
+        mock_ydl.extract_info.return_value = info
+        mock_ydl.download.return_value = None
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=mock_ydl)
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+    return mock_ctx
+
+
+class TestDurationBackstop:
+
+    def test_over_duration_refused_before_any_download(self, tmp_path: Path) -> None:
+        """A video whose extract_info duration exceeds the cap is refused
+        too_long_for_asr *before* ydl.download runs — no bytes reach scratch."""
+        scratch = str(tmp_path / "scratch")
+        info = {"duration": 5400, "filesize": 1024}  # 90 min, tiny file
+        with patch(
+            "ytt.whisper.yt_dlp.YoutubeDL",
+            side_effect=lambda opts: _stub_ydl_for_audio(info=info),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, scratch, 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+        assert "1200" in exc_info.value.message  # the cap is named
+        # Nothing was written: the refusal happened pre-download.
+        assert not Path(scratch).exists() or list(Path(scratch).iterdir()) == []
+
+    def test_within_duration_proceeds_to_download(self, tmp_path: Path) -> None:
+        """A within-cap duration passes the backstop and the download runs."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / f"{VIDEO_ID}.m4a").write_bytes(b"audio")
+        info = {"duration": 600, "filesize": 1024}
+        with patch(
+            "ytt.whisper.yt_dlp.YoutubeDL",
+            side_effect=lambda opts: _stub_ydl_for_audio(info=info),
+        ):
+            out = _do_download_audio(
+                VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                max_asr_duration_sec=1200,
+            )
+        assert out == str(scratch / f"{VIDEO_ID}.m4a")
+
+    def test_unknown_duration_falls_through_to_size_guard(self, tmp_path: Path) -> None:
+        """No duration in metadata → the backstop is silent (the size cap and
+        the progress hook remain the guards); the download proceeds."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / f"{VIDEO_ID}.webm").write_bytes(b"audio")
+        info = {"id": VIDEO_ID}  # real metadata shape, no duration key
+        with patch(
+            "ytt.whisper.yt_dlp.YoutubeDL",
+            side_effect=lambda opts: _stub_ydl_for_audio(info=info),
+        ):
+            out = _do_download_audio(
+                VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                max_asr_duration_sec=1200,
+            )
+        assert out == str(scratch / f"{VIDEO_ID}.webm")
+
+    def test_duration_refusal_takes_precedence_over_size_check(
+        self, tmp_path: Path
+    ) -> None:
+        """Both caps exceeded → the duration error is what surfaces (it is
+        checked first, before the projected-size comparison)."""
+        info = {"duration": 9999, "filesize": 900 * 1024 * 1024}
+        with patch(
+            "ytt.whisper.yt_dlp.YoutubeDL",
+            side_effect=lambda opts: _stub_ydl_for_audio(info=info),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(tmp_path / "scratch"), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert "duration" in exc_info.value.message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Per-job scratch sweep (_sweep_video_scratch, bead ytt-89d1e56d)
+# ---------------------------------------------------------------------------
+
+
+class TestSweepVideoScratch:
+
+    def test_deletes_only_this_videos_files(self, tmp_path: Path) -> None:
+        """Every ``{video_id}.*`` file goes; other videos' files and
+        non-matching entries stay."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        partial = scratch / f"{VIDEO_ID}.webm.part"
+        partial.write_bytes(b"partial")
+        done = scratch / f"{VIDEO_ID}.m4a"
+        done.write_bytes(b"complete")
+        other = scratch / "abcdefghijk.m4a"
+        other.write_bytes(b"another video")
+        subdir = scratch / "notes"
+        subdir.mkdir()
+
+        deleted = _sweep_video_scratch(VIDEO_ID, str(scratch))
+
+        assert deleted == 2
+        assert not partial.exists()
+        assert not done.exists()
+        assert other.exists()
+        assert subdir.is_dir()
+
+    def test_missing_scratch_dir_is_not_an_error(self, tmp_path: Path) -> None:
+        """A vanished scratch dir sweeps nothing and raises nothing."""
+        assert _sweep_video_scratch(VIDEO_ID, str(tmp_path / "nope")) == 0
+
+    def test_empty_scratch_returns_zero(self, tmp_path: Path) -> None:
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        assert _sweep_video_scratch(VIDEO_ID, str(scratch)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Queue-depth signal for the MAX_PENDING_WHISPER_JOBS cap (bead ytt-89d1e56d)
+# ---------------------------------------------------------------------------
+
+
+class TestWhisperJobRegistryActiveCount:
+
+    async def test_counts_pending_and_running_only(self) -> None:
+        """done/error jobs await TTL GC but hold no queue slot — the server's
+        backlog cap reads pending+running only."""
+        reg = WhisperJobRegistry()
+        settings = _make_settings()
+        await reg.get_or_create("aaaaaaaaaaa", None, settings)  # pending
+        await reg.get_or_create("bbbbbbbbbbb", None, settings)
+        await reg.update_status("bbbbbbbbbbb", "running")  # running
+        await reg.get_or_create("ccccccccccc", None, settings)
+        await reg.update_status("ccccccccccc", "done", result_ref="c.whisper")
+        await reg.get_or_create("ddddddddddd", None, settings)
+        await reg.update_status(
+            "ddddddddddd", "error", error_code="asr_failed", message="boom"
+        )
+
+        assert await reg.active_count() == 2
+        assert reg.size == 4  # done/error still occupy the registry until GC
+
+    async def test_empty_registry_counts_zero(self) -> None:
+        assert await WhisperJobRegistry().active_count() == 0
+
+    async def test_count_tracks_terminal_transitions(self) -> None:
+        """A finishing job frees its queue slot the moment it lands done."""
+        reg = WhisperJobRegistry()
+        settings = _make_settings()
+        await reg.get_or_create("aaaaaaaaaaa", None, settings)
+        await reg.get_or_create("bbbbbbbbbbb", None, settings)
+        await reg.update_status("bbbbbbbbbbb", "running")
+        assert await reg.active_count() == 2
+
+        await reg.update_status("bbbbbbbbbbb", "done", result_ref="b.whisper")
+        assert await reg.active_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Scratch hygiene + cancellation of the job task itself (bead ytt-89d1e56d)
+# ---------------------------------------------------------------------------
+
+
+class TestRunWhisperJobScratchHygiene:
+
+    async def test_failed_download_sweeps_partial_file(self, tmp_path: Path) -> None:
+        """The disk-exhaustion scenario: the downloader aborts mid-stream and
+        leaves a partial ``{video_id}.*`` file. The job's ``audio_path`` was
+        never assigned, so only the sweep deletes it — a caller re-requesting
+        a video that always fails must not fill scratch one chunk at a time."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        partial = scratch / f"{VIDEO_ID}.webm.part"
+        partial.write_bytes(b"partial download aborted mid-stream")
+
+        settings = _make_settings(scratch_dir=str(scratch))
+        registry = WhisperJobRegistry()
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+
+        bot_check = yt_dlp.utils.DownloadError(
+            "ERROR: Sign in to confirm you're not a bot"
+        )
+        with patch(
+            "ytt.whisper.yt_dlp.YoutubeDL",
+            side_effect=lambda opts: _stub_ydl_for_audio(exc=bot_check),
+        ):
+            await run_whisper_job(
+                job, registry, settings, _make_cache_mock(),
+                "Systran/faster-whisper-small",
+            )
+
+        final = await registry.get(VIDEO_ID)
+        assert final is not None and final.status == "error"
+        assert final.error_code == errors.IP_BLOCKED  # classified bot check
+        assert not partial.exists(), "partial file must not survive a failed job"
+
+    async def test_cancelled_job_sweeps_partial_file(self, tmp_path: Path) -> None:
+        """Cancelling a mid-download job task (client went away / shutdown)
+        still runs the finally-block sweep: the partial file is gone even
+        though ``audio_path`` was never assigned."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        partial = scratch / f"{VIDEO_ID}.webm.part"
+        partial.write_bytes(b"partial, downloader still writing")
+
+        settings = _make_settings(scratch_dir=str(scratch))
+        registry = WhisperJobRegistry()
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+
+        # The download blocks on an event we release after cancellation —
+        # to_thread cannot be interrupted, so the zombie thread must be let
+        # out promptly or it stalls the interpreter at pytest exit.
+        release = threading.Event()
+
+        def blocked_extract(url, download=False):
+            release.wait(timeout=10)
+            raise yt_dlp.utils.DownloadError("aborted")
+
+        stub = _stub_ydl_for_audio()
+        stub.__enter__.return_value.extract_info.side_effect = blocked_extract
+
+        with patch("ytt.whisper.yt_dlp.YoutubeDL", return_value=stub):
+            task = asyncio.create_task(
+                run_whisper_job(
+                    job, registry, settings, _make_cache_mock(),
+                    "Systran/faster-whisper-small",
+                )
+            )
+            await asyncio.sleep(0.2)  # let it enter the blocked extract_info
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert not partial.exists(), "cancelled job must still sweep its partial"
+        # The job never reached a terminal state (CancelledError is not an
+        # Exception) — the stale-running GC is its recovery path.
+        final = await registry.get(VIDEO_ID)
+        assert final is not None and final.status == "running"
+
+        release.set()  # let the zombie downloader thread exit
+
+    async def test_cancelled_bounded_job_releases_its_slot(self) -> None:
+        """The semaphore slot is the job's concurrency reservation: cancelling
+        the bounded wrapper releases it, so a cancelled transcription can
+        never wedge YTT_MAX_CONCURRENT_WHISPER."""
+        from ytt import server
+        from ytt import whisper as ytt_whisper
+
+        settings = _make_settings()
+        registry = WhisperJobRegistry()
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+
+        async def slow_job(*a, **kw):
+            await asyncio.sleep(30)
+
+        with patch.object(ytt_whisper, "run_whisper_job", slow_job):
+            task = asyncio.create_task(
+                server._run_whisper_job_bounded(
+                    job, registry, settings, _make_cache_mock(), "model"
+                )
+            )
+            await asyncio.sleep(0.1)  # let it acquire the slot
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # The slot is back: an acquire must succeed promptly, not hang on a
+        # slot the dead job still holds.
+        await asyncio.wait_for(server._concurrency.whisper_sem.acquire(), timeout=1.0)
+        server._concurrency.whisper_sem.release()

@@ -214,14 +214,21 @@ def _do_download_audio(
     scratch_dir: str,
     max_audio_bytes: int,
     proxy: str | None = None,
+    *,
+    max_asr_duration_sec: int | None = None,
 ) -> str:
     """Synchronous: download bestaudio for *video_id* to *scratch_dir*.
 
     Returns the absolute path of the downloaded file.
 
-    - Pre-download: queries ``extract_info`` to check projected size against
-      ``min(max_audio_bytes, statvfs_free)``.  Raises
-      ``YttError(too_long_for_asr)`` if over cap.
+    - Pre-download: queries ``extract_info`` to enforce the
+      ``max_asr_duration_sec`` duration cap (backstop — the primary
+      enforcement is at job creation via ``NoCaptionsError.duration_sec``;
+      this one fires when the duration was unknown then) and to check
+      projected size against ``min(max_audio_bytes, statvfs_free)``.  Raises
+      ``YttError(too_long_for_asr)`` if either cap is exceeded — before any
+      bytes are downloaded, so neither scratch disk nor the shared Whisper
+      service can be engaged for an out-of-bounds video.
     - During download: a ``progress_hooks`` callback aborts with
       ``DownloadError('audio_too_large')`` if live bytes exceed the cap.
 
@@ -269,6 +276,21 @@ def _do_download_audio(
             if not info:
                 raise YttError(errors.EMPTY_BODY, "yt-dlp returned no info for audio.")
 
+            # Duration backstop (max_asr_duration_sec): reject before any
+            # download work. Job creation enforces this too when the duration
+            # was known then; this catches the duration=None-then path, and
+            # videos whose metadata changed since.
+            raw_dur = info.get("duration")
+            if max_asr_duration_sec is not None and raw_dur is not None:
+                duration = float(raw_dur)
+                if duration > max_asr_duration_sec:
+                    raise YttError(
+                        errors.TOO_LONG_FOR_ASR,
+                        f"Video duration {duration:.0f}s exceeds "
+                        f"YTT_MAX_ASR_DURATION_SEC ({max_asr_duration_sec}s). "
+                        "Too long for ASR.",
+                    )
+
             projected = _projected_audio_size(info)
             if projected is not None and projected > cap:
                 raise YttError(
@@ -304,6 +326,55 @@ def _do_download_audio(
             return str(candidate)
 
     raise YttError(errors.EMPTY_BODY, "Audio download produced no output file.")
+
+
+def _sweep_video_scratch(video_id: str, scratch_dir: str) -> int:
+    """Delete every ``{video_id}.*`` file left in *scratch_dir*; return the count.
+
+    Failure-path scratch hygiene (Invariant 4, extended to *partial* files):
+    when an audio download times out or aborts mid-stream, the job's
+    ``audio_path`` was never assigned, so a ``finally`` that only deletes
+    ``audio_path`` leaks the partial ``{video_id}.{ext}`` file — up to
+    ``YTT_MAX_AUDIO_BYTES`` per failure, until the next restart's
+    :func:`startup_sweep`. Repeated failures (e.g. a caller re-requesting a
+    video that always times out) would fill the scratch volume. Sweeping the
+    video's own glob after every job attempt — success or failure — bounds
+    scratch to files belonging to jobs actually in flight.
+
+    Safe against the zombie downloader: a timed-out ``asyncio.to_thread``
+    yt-dlp keeps writing from its thread; deleting its output unlinks the
+    name (POSIX), the inode is freed when the thread finishes, and the file
+    can never outlive the process. ``video_id`` is the canonicalized
+    11-character ID (``ytt.canonicalize``), so the glob pattern contains no
+    metacharacters and matches only this video's files.
+    """
+    scratch = Path(scratch_dir)
+    deleted = 0
+    try:
+        candidates = list(scratch.glob(f"{video_id}.*"))
+    except OSError:
+        return 0
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            path.unlink(missing_ok=True)
+            deleted += 1
+        except OSError as exc:
+            log.warning(
+                "whisper_scratch_sweep_failed",
+                video_id=video_id,
+                file=path.name,
+                error=str(exc),
+            )
+    if deleted:
+        log.debug("whisper_scratch_swept", video_id=video_id, files_deleted=deleted)
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# WhisperJobRegistry (plan §Whisper fallback — Registry + FSM)
+# ---------------------------------------------------------------------------
 
 
 class WhisperJobRegistry:
@@ -401,6 +472,17 @@ class WhisperJobRegistry:
         """Return the job for *video_id*, or ``None`` if not found."""
         async with self._lock:
             return self._jobs.get(video_id)
+
+    async def active_count(self) -> int:
+        """Number of jobs currently ``pending`` or ``running``.
+
+        This is the queue-depth signal for ``MAX_PENDING_WHISPER_JOBS``:
+        pending jobs are work waiting for the
+        ``YTT_MAX_CONCURRENT_WHISPER`` semaphore, running jobs hold it.
+        ``done``/``error`` jobs merely await TTL GC and don't count.
+        """
+        async with self._lock:
+            return sum(1 for j in self._jobs.values() if j.status in ("pending", "running"))
 
     async def update_status(
         self,
@@ -572,7 +654,8 @@ async def run_whisper_job(
         #    one-shot ip_blocked proxy retry as caption fetches (plan
         #    §ip_blocked: "the proxy retry applies equally to caption fetches
         #    and Whisper audio downloads"); timeout + retry semantics live in
-        #    fetch.run_with_proxy_retry.
+        #    fetch.run_with_proxy_retry. The duration cap rides along as a
+        #    backstop for videos whose duration was unknown at job creation.
         audio_path = await run_with_proxy_retry(
             lambda proxy: asyncio.to_thread(
                 _do_download_audio,
@@ -580,6 +663,7 @@ async def run_whisper_job(
                 settings.scratch_dir,
                 settings.max_audio_bytes,
                 proxy,
+                max_asr_duration_sec=settings.max_asr_duration_sec,
             ),
             proxy_url=settings.proxy_url,
             timeout_sec=float(settings.whisper_timeout_sec),
@@ -694,7 +778,12 @@ async def run_whisper_job(
         log.exception("whisper_job_unexpected_error", video_id=video_id)
 
     finally:
-        # 6. Always delete audio — Invariant 4
+        # 6. Always delete audio — Invariant 4. On top of the completed
+        #    download, sweep any partial ``{video_id}.*`` file a timed-out or
+        #    aborted downloader left behind: on those paths ``audio_path`` is
+        #    None and the partial file would otherwise sit in scratch until
+        #    the next restart (disk-exhaustion vector; see
+        #    _sweep_video_scratch).
         if audio_path is not None:
             try:
                 Path(audio_path).unlink(missing_ok=True)
@@ -705,3 +794,4 @@ async def run_whisper_job(
                     video_id=video_id,
                     error=str(exc),
                 )
+        _sweep_video_scratch(video_id, settings.scratch_dir)

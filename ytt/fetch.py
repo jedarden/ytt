@@ -53,7 +53,7 @@ import yt_dlp
 import yt_dlp.utils
 
 from ytt import errors
-from ytt.errors import YttError
+from ytt.errors import NoCaptionsError, YttError
 from ytt.models import Segment
 from ytt.observability import redact_credentials
 from ytt.parse_json3 import parse_json3
@@ -182,6 +182,19 @@ def get_available_langs(info: dict) -> list[str]:
     return sorted(keys)
 
 
+def _no_captions(msg: str, info: dict) -> NoCaptionsError:
+    """Build the no-captions error, carrying the video duration when known.
+
+    The duration rides on the error (``NoCaptionsError.duration_sec``) so the
+    Whisper fallback can enforce ``MAX_ASR_DURATION_SEC`` at job-creation
+    time — before a quota slot is charged or any audio is pulled — instead of
+    discovering a 10-hour video at transcription time.
+    """
+    raw_dur = info.get("duration")
+    duration_sec = float(raw_dur) if raw_dur is not None else None
+    return NoCaptionsError(msg, duration_sec=duration_sec)
+
+
 def _find_json3_url(track_list: list[dict] | None) -> str | None:
     """Return the first ``ext='json3'`` URL in a caption format list, or ``None``."""
     for fmt in (track_list or []):
@@ -257,10 +270,10 @@ def _select_track(
                     f"requested {lang!r} unavailable; served {served!r}"
                 )
 
-        raise YttError(
-            errors.EMPTY_BODY,
+        raise _no_captions(
             f"No captions available for {lang!r}. "
             f"Available: {get_available_langs(info)}",
+            info,
         )
 
     else:
@@ -292,7 +305,7 @@ def _select_track(
             if url:
                 return url, "asr", _normalize_lang_key(k), None
 
-        raise YttError(errors.EMPTY_BODY, "No captions available.")
+        raise _no_captions("No captions available.", info)
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,13 @@ _concurrency = ConcurrencyState.from_settings(_settings_singleton)
 #: Whisper job registry (Phase 6).
 whisper_registry = WhisperJobRegistry()
 
+#: Strong references to in-flight background transcription tasks. The event
+#: loop keeps only weak references to tasks — an unreferenced one can be
+#: garbage-collected mid-flight, stranding its WhisperJob as `pending` forever
+#: and permanently consuming a MAX_PENDING_WHISPER_JOBS slot. Entries are
+#: discarded by a done-callback as each task finishes.
+_background_jobs: set[asyncio.Task[None]] = set()
+
 #: Active Whisper model name — updated by check_model_guard() at startup.
 _active_whisper_model: str = _settings_singleton.whisper_model
 
@@ -326,6 +333,29 @@ def _build_app():
             if exc.error_code == errors.EMPTY_BODY:
                 # No captions — start or retrieve existing Whisper job.
                 # Plan §Whisper fallback: "get-or-create under a lock keyed by video_id"
+                #
+                # Queued-work cap (MAX_PENDING_WHISPER_JOBS): deny *new* jobs
+                # while the pending+running backlog is at capacity, so the ASR
+                # queue itself is a bounded resource — the per-subject quota
+                # caps each subject's rate, this caps the system's backlog.
+                # Joining a job already in flight is always allowed (it adds
+                # no work); the check precedes the quota charge so a
+                # queue-full denial never spends a slot.
+                if await whisper_registry.get(video_id) is None:
+                    active_jobs = await whisper_registry.active_count()
+                    if active_jobs >= settings.max_pending_whisper_jobs:
+                        _record_rate_limited(subject, "get_youtube_transcript(asr)")
+                        return {
+                            "video_id": video_id,
+                            "status": "error",
+                            "error_code": errors.RATE_LIMITED,
+                            "message": (
+                                "Whisper queue full "
+                                f"({active_jobs}/{settings.max_pending_whisper_jobs} "
+                                "jobs pending or running). Try again later."
+                            ),
+                        }
+
                 # Per-subject ASR quota (docs/notes/auth.md): charged only when
                 # this call would START a new job — joining an in-flight job
                 # (or polling via get_transcript_job) is free, or clients
@@ -360,7 +390,15 @@ def _build_app():
                 try:
                     job, is_new = await whisper_registry.get_or_create(
                         video_id,
-                        duration_sec=None,  # duration unknown without extract_info
+                        # Duration from the fetch's extract_info metadata, when
+                        # the no-captions error could carry it — this is what
+                        # makes the MAX_ASR_DURATION_SEC cap enforceable at job
+                        # creation (too_long_for_asr before any quota spend,
+                        # download, or transcription) and gives the pending
+                        # response a real ETA. Plain empty_body errors (yt-dlp
+                        # returned nothing) have no duration; the download-time
+                        # backstop still applies later.
+                        duration_sec=getattr(exc, "duration_sec", None),
                         settings=settings,
                     )
                     if quota_charged and not is_new:
@@ -399,7 +437,14 @@ def _build_app():
                     # Start background transcription task, holding one
                     # YTT_MAX_CONCURRENT_WHISPER slot for the job's whole
                     # lifecycle (released when it reaches done/error).
-                    asyncio.create_task(
+                    #
+                    # The loop holds only WEAK references to tasks — an
+                    # unreferenced one can be garbage-collected mid-flight,
+                    # stranding its job as `pending` forever. That would
+                    # permanently consume a MAX_PENDING_WHISPER_JOBS slot and
+                    # ratchet the queue shut (a queued-work leak the cap can't
+                    # see), so hold a strong reference until the task finishes.
+                    _task = asyncio.create_task(
                         _run_whisper_job_bounded(
                             job,
                             whisper_registry,
@@ -408,6 +453,8 @@ def _build_app():
                             _active_whisper_model,
                         )
                     )
+                    _background_jobs.add(_task)
+                    _task.add_done_callback(_background_jobs.discard)
 
                 eta_str = (
                     f" (~{job.eta_sec:.0f}s)" if job.eta_sec is not None else ""

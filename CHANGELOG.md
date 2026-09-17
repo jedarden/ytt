@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bounded download & Whisper resource guardrails** (bead `ytt-89d1e56d`). The
+  ASR fallback path is now a bounded resource end to end — an allowlisted
+  caller (or a fleet of them) cannot exhaust scratch disk, the shared Whisper
+  service, or the network:
+  - **Queued-work cap** — new `YTT_MAX_PENDING_WHISPER_JOBS` (default `16`)
+    bounds the system's ASR *backlog* (pending + running jobs). Where the
+    per-subject quota caps each subject's *rate*, this caps the backlog: a
+    caption-less request that would start a *new* job while the queue is at
+    capacity is denied with the stable `rate_limited` error ("Whisper queue
+    full (…/…)"), spending no quota slot. Joining an in-flight job is always
+    allowed — it adds no work. `0` = deny every new job (fail-closed, same
+    convention as the per-subject limits; negative values are startup errors).
+  - **Duration cap enforced at job creation** — the no-captions error now
+    carries the video's duration from `extract_info` metadata
+    (`ytt.errors.NoCaptionsError.duration_sec`), so a video over
+    `YTT_MAX_ASR_DURATION_SEC` is refused `too_long_for_asr` *before* a job is
+    registered, a quota slot is charged, or any audio is downloaded. A new
+    download-time backstop re-checks the duration inside
+    `ytt.whisper._do_download_audio` for videos whose duration was unknown at
+    creation (or whose metadata changed since) — still before any bytes hit
+    the wire.
+  - **Scratch cleanup on every exit path** — each job attempt now sweeps its
+    own `{video_id}.*` partial files after success *or* failure
+    (`_sweep_video_scratch`). Previously a download that timed out or aborted
+    mid-stream leaked its partial file (up to `YTT_MAX_AUDIO_BYTES` per
+    failure) until the next restart's startup sweep; repeated failures of the
+    same video could fill the scratch volume. Sweeping is safe against the
+    zombie downloader: a timed-out `asyncio.to_thread` yt-dlp keeps writing
+    from its thread, and deleting the file unlinks the name — the inode frees
+    when the thread exits and the file can never outlive the process.
+  - **Cancellation** — cancelling a job task releases its
+    `YTT_MAX_CONCURRENT_WHISPER` slot (`async with`) and still runs the
+    scratch sweep; a job that never reaches a terminal state is recovered by
+    the stale-running GC (`timeout + TTL`), which frees the queue slot it
+    pinned.
+  Coverage: `tests/unit/test_whisper.py` (duration backstop, scratch sweep,
+  `active_count` queue-depth signal, failed/cancelled-job hygiene, slot
+  release) and `tests/unit/test_server.py` (queue-full denial without quota
+  spend, join-while-full, check ordering, duration refusal at creation).
+
 - **`YTT_PROXY_URL` end-to-end** (bead `ytt-8c702583`). The proxy contract is
   now specified, enforced, and tested — `docs/notes/proxy-egress.md` is the
   single spec. `Settings` validates the URL at startup (http/https only — no
