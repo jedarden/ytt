@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **yt-dlp player-client / PoToken contract tests + notes doc** (bead
+  `ytt-70690b3d`). ytt avoids YouTube's PoToken (BotGuard) requirements
+  purely through player-client choice (`YDL_EXTRACTOR_ARGS` pins
+  `player_client` to `[tv, web_embedded, mweb]`), and every way that
+  assumption breaks on an yt-dlp bump is *silent at runtime*: unknown
+  client names are skipped with a warn-only message, PO-gated media
+  formats are skipped, PO-gated caption tracks are discarded, and a
+  renamed extractor key means the override is never applied at all. New
+  `tests/unit/test_ytdlp_contract.py` verifies the pin against the
+  *installed* yt-dlp's own structured policy data (`INNERTUBE_CLIENTS`:
+  `GVS_PO_TOKEN_POLICY` / `SUBS_PO_TOKEN_POLICY` / `REQUIRE_AUTH`) and
+  drives a real `YoutubeDL` through the production opts — offline — so a
+  breaking bump fails in CI naming the broken assumption and the fix.
+  The relied-on settings, the per-client policy table for the pinned
+  version, why `mweb` (media-GVS-gated, caption-clean) rides last, and
+  the rotation SOP now live in `docs/notes/yt-dlp-player-client.md`.
+
 - **One-shot residential-egress canary** (`ytt canary --once`, bead
   `ytt-58325cdf`). Fetches captions for one known-good video from wherever it
   runs and prints a JSON report — `verdict: "ok"` vs `"ip_blocked"` (exit
