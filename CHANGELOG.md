@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One-shot residential-egress canary** (`ytt canary --once`, bead
+  `ytt-58325cdf`). Fetches captions for one known-good video from wherever it
+  runs and prints a JSON report — `verdict: "ok"` vs `"ip_blocked"` (exit
+  0/1), with the ipinfo egress classification as context and a UTC `ran_at`
+  stamp for evidence. The lightweight vehicle for the plan's residential-
+  egress Proof Obligation: runnable in-cluster via `kubectl exec` (or any
+  one-shot pod/Argo step) without deploying the long-running canary
+  Deployment. The long-running `ytt canary` loop and its `:8081` metrics are
+  unchanged.
+
 ## [0.2.15] — 2026-09-16
 
 ### Added

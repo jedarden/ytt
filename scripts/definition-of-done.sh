@@ -13,5 +13,16 @@
 # docs/notes/single-replica.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# pytest >= 9 exits 5 (NO_TESTS_COLLECTED) for the module-level skip in a
+# clean extraction, which `set -e` would turn into a bogus gate failure —
+# the skip is the guard saying "nothing to enforce here", not a red suite.
+# Tolerate exactly 5; any other non-zero exit (real divergence = 1,
+# collection error = 2) still fails the gate.
+set +e
 uv run pytest tests/unit/test_deploy_parity.py -q
+parity_status=$?
+set -e
+if [ "$parity_status" -ne 0 ] && [ "$parity_status" -ne 5 ]; then
+  exit "$parity_status"
+fi
 exec uv run pytest -m "not integration" -q

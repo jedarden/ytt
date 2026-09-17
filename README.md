@@ -56,6 +56,15 @@ Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-
 | **Single replica** | In-process state (LRU cache, single-flight, Whisper job registry). Scale-out requires a redesign. |
 | **Auth required** | OAuth 2.1 with a subject allowlist. Empty allowlist = deny all. |
 
+Verify the egress assumption from wherever the server runs:
+
+```bash
+ytt canary --once    # fetches captions for one known-good video; JSON report,
+                     # verdict "ok" vs "ip_blocked", exit 0/1
+```
+
+In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --once`.
+
 ## Configuration
 
 All config is environment-variable-based. Nothing ardenone-specific is

@@ -112,6 +112,14 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
 |----------|---------|-------------|
 | `YTT_CANARY_INTERVAL_SEC` | `600` | Seconds between canary probe runs. Consumed by the canary Deployment, not the main server. |
 
+The long-running probe loop (`ytt canary`) serves `ytt_canary_*` metrics on
+:8081. For a one-off egress check there is also `ytt canary --once`: it
+fetches captions for one known-good video from wherever it runs, prints a
+JSON report (`verdict`: `ok` vs `ip_blocked`, plus the ipinfo egress
+classification as context), and exits 0/1 — usable from an in-cluster
+`kubectl exec`, a debug pod, or a self-host smoke test without deploying
+anything.
+
 ## Size format
 
 All size variables (`YTT_CACHE_MAX_BYTES`, `YTT_MAX_AUDIO_BYTES`) accept:

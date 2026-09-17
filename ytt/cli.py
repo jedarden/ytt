@@ -7,6 +7,9 @@ Subcommands (plan: Deliverables / CLI):
                     emits a JSON summary to stdout
 - ``ytt selftest``  run the egress probe (ip/asn/org/is_residential);
                     ``--show-sub`` prints the last decoded token ``sub`` (allowlist setup)
+- ``ytt canary``    run the residential-egress canary — long-running probe loop
+                    by default, or a one-shot caption fetch + JSON report with
+                    ``--once`` (exit 0 on ok, 1 on ip_blocked/other failure)
 
 Exit code is 0 on success, non-zero on failure.
 """
@@ -42,6 +45,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--show-sub",
         action="store_true",
         help="print the last decoded token 'sub' (for YTT_ALLOWED_SUBJECTS setup)",
+    )
+
+    p_can = sub.add_parser(
+        "canary",
+        help="run the residential-egress canary (probe loop by default)",
+    )
+    p_can.add_argument(
+        "--once",
+        action="store_true",
+        help=(
+            "one-shot probe: fetch captions for one known-good video, print a "
+            "JSON report (verdict: ok vs ip_blocked), exit 0/1"
+        ),
+    )
+    p_can.add_argument(
+        "--video-id",
+        default=None,
+        help="override the canary video ID (one-shot mode only)",
     )
 
     return parser
@@ -86,7 +107,34 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return run_selftest(show_sub=args.show_sub)
 
+    if args.command == "canary":
+        if args.video_id and not args.once:
+            parser.error("--video-id is only valid with --once")
+        if args.once:
+            return _run_canary_once(video_id=args.video_id)
+        from ytt.canary import main as canary_main
+
+        return canary_main()
+
     parser.print_help()
+    return 0
+
+
+def _run_canary_once(video_id: str | None) -> int:
+    """Run the one-shot canary and print its JSON report; exit 0 iff verdict is ok."""
+    import json
+
+    from ytt.canary import run_once
+
+    report = run_once(video_id=video_id)
+    print(json.dumps(report, indent=2))
+    if report["verdict"] != "ok":
+        print(
+            f"CANARY FAILED: {report['verdict']} — residential egress is not working "
+            f"from here (video {report['video_id']})",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

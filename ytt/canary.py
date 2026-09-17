@@ -21,6 +21,10 @@ The canary Deployment is separate from the main ytt server; it has its own
 
 Usage (within the canary Deployment):
     CMD ["ytt", "canary"]   — or directly: python -m ytt.canary
+
+One-shot mode (lightweight Proof-Obligation canary):
+    ytt canary --once               # egress report + caption fetch, JSON, exit 0/1
+    python -m ytt.canary --once     # same, no CLI dependency
 """
 
 from __future__ import annotations
@@ -55,17 +59,28 @@ CANARY_VIDEO_IDS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _probe_one(video_id: str, settings: Any) -> bool:
-    """Run a single yt-dlp caption probe against ``video_id``.
+def probe_once_detail(video_id: str) -> dict:
+    """Run a single caption probe against ``video_id`` and classify the outcome.
 
-    Returns ``True`` on success (captions extracted), ``False`` on any error.
-    Intentionally synchronous — called via ``asyncio.to_thread`` from the probe loop.
+    Returns a JSON-serializable dict::
+
+        {"ok": bool, "outcome": str, "langs": list[str],
+         "duration_sec": float, "error": str | None}
+
+    ``outcome`` is ``"ok"`` or a stable :mod:`ytt.errors` error_code —
+    ``ip_blocked`` when YouTube blocks the fetch, ``empty_body`` for an
+    unrecognized failure (plan §Error taxonomy).  Synchronous; network-bound.
+
+    This is the fetch half of the one-shot canary (``ytt canary --once``) —
+    the lightweight vehicle for proving residential egress from wherever the
+    command runs (in-cluster one-shot, ``kubectl exec``, or an Argo step).
     """
+    started = time.monotonic()
     try:
-        from ytt.fetch import YDL_BASE_OPTS, get_available_langs
+        from ytt.fetch import YDL_BASE_OPTS, classify_ydl_error, get_available_langs
         import yt_dlp
 
-        # Reuse the same yt-dlp options as the main fetch path (plan §Canary:
+        # Same yt-dlp options as the main fetch path (plan §Canary:
         # "calls yt-dlp directly (same code path as fetch.py)").
         opts = dict(YDL_BASE_OPTS)
         opts.update(
@@ -83,19 +98,48 @@ def _probe_one(video_id: str, settings: Any) -> bool:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # Success if at least one caption track exists.
-        if info:
-            subs = info.get("subtitles") or {}
-            auto = info.get("automatic_captions") or {}
-            if subs or auto:
-                return True
+    except Exception as exc:
+        duration = round(time.monotonic() - started, 2)
+        outcome = classify_ydl_error(str(exc))
+        log.error("Canary probe error for %s: %s (outcome=%s)", video_id, exc, outcome)
+        return {
+            "ok": False,
+            "outcome": outcome,
+            "langs": [],
+            "duration_sec": duration,
+            "error": str(exc),
+        }
 
-        log.warning("Canary: no captions found for %s", video_id)
-        return False
+    duration = round(time.monotonic() - started, 2)
+    from ytt.errors import EMPTY_BODY
 
-    except Exception as exc:  # pragma: no cover — integration path
-        log.error("Canary probe error for %s: %s", video_id, exc)
-        return False
+    langs = get_available_langs(info or {})
+    if langs:
+        return {
+            "ok": True,
+            "outcome": "ok",
+            "langs": langs,
+            "duration_sec": duration,
+            "error": None,
+        }
+
+    log.warning("Canary: no captions found for %s", video_id)
+    return {
+        "ok": False,
+        "outcome": EMPTY_BODY,
+        "langs": [],
+        "duration_sec": duration,
+        "error": "known-good video returned no caption tracks",
+    }
+
+
+def _probe_one(video_id: str, settings: Any) -> bool:
+    """Run a single yt-dlp caption probe against ``video_id``.
+
+    Returns ``True`` on success (captions extracted), ``False`` on any error.
+    Intentionally synchronous — called via ``asyncio.to_thread`` from the probe loop.
+    """
+    return bool(probe_once_detail(video_id)["ok"])
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +182,60 @@ async def run_probe_loop(interval_sec: int = 600) -> None:
 
 
 # ---------------------------------------------------------------------------
+# One-shot mode (lightweight canary — bead ytt-58325cdf / plan Proof Obligation)
+# ---------------------------------------------------------------------------
+
+
+def run_once(video_id: str | None = None) -> dict:
+    """Run the canary once: egress report + one caption fetch.
+
+    The lightweight Proof-Obligation canary (plan §Proof Obligations —
+    "Residential egress is 'decisive, free'"): fetches captions for one
+    known-good video from wherever the command runs and reports ``ok`` vs
+    ``ip_blocked``.  Complements the long-running probe loop above; intended
+    for one-shot use inside ardenone-cluster (``kubectl exec``, a probe pod,
+    or an Argo step) and by self-hosters verifying their egress.
+
+    Returns a JSON-serializable report with ``verdict`` set to the caption
+    fetch ``outcome`` (``"ok"`` or a stable error_code) and ``ran_at`` stamped
+    UTC — the report is meant to be pasted somewhere durable as evidence.
+    Contains no secrets.
+    """
+    from datetime import datetime, timezone
+
+    from ytt.config import get_settings
+    from ytt.selftest import probe_egress
+
+    settings = get_settings()
+    vid = video_id or CANARY_VIDEO_IDS[0]
+
+    # Egress classification is context, not the verdict — if ipinfo.io is
+    # unreachable the caption fetch is still the ground truth.
+    try:
+        report_egress = probe_egress(proxy_url=settings.proxy_url)
+        egress: dict = {
+            "ip": report_egress.ip,
+            "asn": report_egress.asn,
+            "org": report_egress.org,
+            "via_proxy": report_egress.via_proxy,
+            "is_residential": report_egress.is_residential,
+        }
+    except Exception as exc:
+        egress = {"error": str(exc), "via_proxy": settings.proxy_url is not None}
+
+    fetch_report = probe_once_detail(vid)
+
+    return {
+        "mode": "once",
+        "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "video_id": vid,
+        "egress": egress,
+        "caption_fetch": fetch_report,
+        "verdict": fetch_report["outcome"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -160,3 +258,19 @@ def main() -> int:
 
     asyncio.run(run_probe_loop(interval_sec=interval))
     return 0  # pragma: no cover
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    if "--once" in _sys.argv:
+        import json as _json
+
+        _vid: str | None = None
+        if "--video-id" in _sys.argv:
+            _vid = _sys.argv[_sys.argv.index("--video-id") + 1]
+        _report = run_once(video_id=_vid)
+        print(_json.dumps(_report, indent=2))
+        _sys.exit(0 if _report["verdict"] == "ok" else 1)
+
+    _sys.exit(main())
