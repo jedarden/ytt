@@ -8,13 +8,20 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
 - fail-closed semantics: a limit of 0 denies everything it guards — there
   is no "unlimited" setting,
 - ``WhisperQuota`` exhaust + refund-on-join (joining an in-flight job is
-  free — the charge only sticks when a NEW job starts).
+  free — the charge only sticks when a NEW job starts),
+- concurrent access with real threads: total admissions never exceed
+  capacity, and a first-touch race cannot reset a subject's bucket.
 
 Server-level enforcement (which paths are charged, what a denial looks like
 to the model) lives in ``test_server.py`` §Per-subject limits.
 """
 
 from __future__ import annotations
+
+import contextlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -48,6 +55,7 @@ def clock(monkeypatch):
 # ---------------------------------------------------------------------------
 # TokenBucket — drain, deny, refill, refund
 # ---------------------------------------------------------------------------
+
 
 def test_token_bucket_starts_full_and_denies_when_empty(clock):
     b = TokenBucket(capacity=3, refill_rate=0.0)
@@ -108,6 +116,7 @@ def test_token_bucket_retry_after_sec_infinite_at_zero_rate(clock):
 # SubjectRateLimiter — construction + per-subject isolation
 # ---------------------------------------------------------------------------
 
+
 def test_from_rate_per_min_math():
     rl = SubjectRateLimiter.from_rate_per_min(30)
     assert rl.capacity == 30
@@ -163,6 +172,7 @@ def test_subject_limiter_refund(clock):
 # WhisperQuota — exhaust + refund, fail-closed zero
 # ---------------------------------------------------------------------------
 
+
 def test_whisper_quota_allows_jobs_per_hour_then_denies(clock):
     q = WhisperQuota(jobs_per_hour=2)
     assert q.consume("alice") is True
@@ -193,3 +203,95 @@ def test_whisper_quota_fail_closed_zero_denies_all_asr(clock):
     assert q.consume("alice") is False
     clock.advance(3600.0)
     assert q.consume("alice") is False
+
+
+# ---------------------------------------------------------------------------
+# Concurrent access — real threads, real timing (no fake clock: the lock is
+# the thing under test, and the FakeClock patch is not thread-safe to swap)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _aggressive_preemption():
+    """Tighten the interpreter's switch interval for the block, so thread
+    preemption lands inside the code under test as often as the platform
+    allows (the previous interval is restored on exit)."""
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(old)
+
+
+def test_concurrent_same_subject_never_exceeds_capacity():
+    """Threads hammering ONE subject admit exactly ``capacity`` requests.
+
+    The admission invariant under concurrency: total admits == capacity
+    (refill 0) — never over-admitted (racy check-then-act lets two threads
+    both pass the token check against the same last token) and never
+    under-admitted (a lost consume would strand a token). The bucket lock
+    makes this hold by construction; on GIL CPython the pre-lock code was
+    only accidentally safe (the eval breaker cannot preempt straight-line
+    bytecode), which is not a guarantee this limiter may rely on.
+    """
+    rl = SubjectRateLimiter(capacity=25, refill_rate_per_sec=0.0)
+    threads, attempts = 8, 60
+    barrier = threading.Barrier(threads)
+
+    def hammer(_i: int) -> list[bool]:
+        barrier.wait()  # maximise contention on the first consume
+        return [rl.consume("carol") for _ in range(attempts)]
+
+    with _aggressive_preemption():
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            admitted = [
+                ok
+                for thread_result in pool.map(hammer, range(threads))
+                for ok in thread_result
+            ]
+
+    assert len(admitted) == threads * attempts
+    assert sum(admitted) == 25
+
+
+def test_concurrent_first_touch_same_subject_does_not_reset_bucket():
+    """Concurrent first-touch of one subject admits exactly ``capacity``.
+
+    The registry get-or-create is check-then-act too: two threads racing on
+    a brand-new subject could each build a full bucket, the loser's
+    assignment discarding the winner's consumed tokens — capacity reset,
+    over-admission. The registry lock keeps it to one bucket.
+    """
+    rl = SubjectRateLimiter(capacity=1, refill_rate_per_sec=0.0)
+    threads = 8
+    barrier = threading.Barrier(threads)
+
+    def first_touch(_i: int) -> bool:
+        barrier.wait()
+        return rl.consume("dave")
+
+    with _aggressive_preemption():
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            admitted = list(pool.map(first_touch, range(threads)))
+
+    assert len(admitted) == threads
+    assert sum(admitted) == 1
+
+
+def test_concurrent_subjects_stay_isolated_under_threads():
+    """Distinct subjects draining in parallel each get their own full
+    bucket: nobody's exhaustion costs anyone else a token."""
+    rl = SubjectRateLimiter(capacity=2, refill_rate_per_sec=0.0)
+    subjects = [f"subject-{i}" for i in range(12)]
+    barrier = threading.Barrier(len(subjects))
+
+    def drain(subject: str) -> int:
+        barrier.wait()
+        return sum(rl.consume(subject) for _ in range(5))
+
+    with _aggressive_preemption():
+        with ThreadPoolExecutor(max_workers=len(subjects)) as pool:
+            counts = list(pool.map(drain, subjects))
+
+    assert counts == [2] * len(subjects)

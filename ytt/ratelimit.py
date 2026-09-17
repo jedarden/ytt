@@ -24,17 +24,20 @@ Usage::
     if not limiter.consume(sub):
         raise YttError(RATE_LIMITED, "Rate limit exceeded. Retry after ...")
 
-Both classes are thread-safe (GIL-protected attribute updates with
-``time.monotonic()`` for refill). asyncio-safe because the GIL serialises
-Python bytecode; no asyncio lock is needed for single-process / single-worker
-deployments.
+Both classes are safe for concurrent requests. Bucket state is guarded by
+an explicit ``threading.Lock``: refill-check-decrement is a check-then-act
+sequence the GIL does **not** make atomic (two threads can both pass the
+token check against the same last token and both decrement, admitting
+beyond burst), and the per-subject registry locks bucket creation so a
+first-touch race cannot swap in a fresh full bucket. No asyncio lock is
+needed: the guarded sections never ``await``, so coroutines cannot
+interleave inside them, and threads are covered by the lock.
 """
 
 from __future__ import annotations
 
-import math
+import threading
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -56,9 +59,13 @@ class TokenBucket:
         self.refill_rate = refill_rate  # tokens / second
         self._tokens: float = float(capacity)  # start full
         self._last_refill: float = time.monotonic()
+        #: Guards the refill-check-decrement sequence below — check-then-act
+        #: is not atomic under the GIL, so concurrent consumers could both
+        #: pass the token check against the same last token.
+        self._lock = threading.Lock()
 
-    def _refill(self) -> None:
-        """Add tokens based on elapsed wall-clock time (called before every consume)."""
+    def _refill_locked(self) -> None:
+        """Add tokens for elapsed wall-clock time (caller holds :attr:`_lock`)."""
         now = time.monotonic()
         elapsed = now - self._last_refill
         self._tokens = min(
@@ -73,11 +80,12 @@ class TokenBucket:
         The bucket is refilled before the check, so this implements a
         "token bucket" (not strict leaky bucket).
         """
-        self._refill()
-        if self._tokens >= n:
-            self._tokens -= n
-            return True
-        return False
+        with self._lock:
+            self._refill_locked()
+            if self._tokens >= n:
+                self._tokens -= n
+                return True
+            return False
 
     def refund(self, n: int = 1) -> None:
         """Return *n* tokens to the bucket (capped at capacity).
@@ -86,25 +94,28 @@ class TokenBucket:
         get-or-create, then refunded if the call turned out to join an
         existing job rather than start one (joining is free).
         """
-        self._refill()
-        self._tokens = min(float(self.capacity), self._tokens + n)
+        with self._lock:
+            self._refill_locked()
+            self._tokens = min(float(self.capacity), self._tokens + n)
 
     @property
     def tokens_remaining(self) -> float:
         """Current token count after a virtual refill (read-only diagnostic)."""
-        now = time.monotonic()
-        elapsed = now - self._last_refill
-        return min(float(self.capacity), self._tokens + elapsed * self.refill_rate)
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            return min(float(self.capacity), self._tokens + elapsed * self.refill_rate)
 
     def retry_after_sec(self) -> float:
         """Estimated seconds until 1 token is available (Retry-After header)."""
-        self._refill()
-        deficit = 1.0 - self._tokens
-        if deficit <= 0:
-            return 0.0
-        if self.refill_rate <= 0:
-            return float("inf")
-        return deficit / self.refill_rate
+        with self._lock:
+            self._refill_locked()
+            deficit = 1.0 - self._tokens
+            if deficit <= 0:
+                return 0.0
+            if self.refill_rate <= 0:
+                return float("inf")
+            return deficit / self.refill_rate
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +138,10 @@ class SubjectRateLimiter:
         self.capacity = capacity
         self.refill_rate_per_sec = refill_rate_per_sec
         self._buckets: dict[str, TokenBucket] = {}
+        #: Guards bucket creation: a concurrent first-touch of one subject
+        #: must not build two buckets (the loser's assignment would discard
+        #: the winner's consumed tokens and reset the bucket to full).
+        self._registry_lock = threading.Lock()
 
     @classmethod
     def from_rate_per_min(cls, rate_per_min: int) -> "SubjectRateLimiter":
@@ -155,12 +170,15 @@ class SubjectRateLimiter:
         )
 
     def _get_or_create(self, sub: str) -> TokenBucket:
-        if sub not in self._buckets:
-            self._buckets[sub] = TokenBucket(
-                capacity=self.capacity,
-                refill_rate=self.refill_rate_per_sec,
-            )
-        return self._buckets[sub]
+        with self._registry_lock:
+            bucket = self._buckets.get(sub)
+            if bucket is None:
+                bucket = TokenBucket(
+                    capacity=self.capacity,
+                    refill_rate=self.refill_rate_per_sec,
+                )
+                self._buckets[sub] = bucket
+            return bucket
 
     def consume(self, sub: str, n: int = 1) -> bool:
         """Consume *n* tokens for *sub*. Returns ``True`` on success."""

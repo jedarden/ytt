@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
@@ -120,6 +120,29 @@ def _record_rate_limited(subject: str, tool: str) -> None:
     subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:8]
     ytt_rate_limited_total.labels(subject_hash=subject_hash).inc()
     log.warning("Rate limited", subject_hash=subject_hash, tool=tool)
+
+
+def _limiter_check(limiter: Any, subject: str, tool: str) -> tuple[bool, float]:
+    """Consume one token from *limiter*, failing closed when it cannot operate.
+
+    Returns ``(admitted, retry_after_sec)``. A limiter that raises is broken
+    storage, not an admission signal — the request is denied anyway (the
+    deterministic ``rate_limited`` shape below), so a limiter failure can
+    never admit a request to the protected fetch/ASR work it guards. The
+    retry hint degrades to "no hint" rather than raising into the tool.
+    """
+    try:
+        admitted = bool(limiter.consume(subject))
+    except Exception:
+        log.exception("Rate limiter failed — denying (fail closed)", tool=tool)
+        return False, float("inf")
+    if admitted:
+        return True, 0.0
+    try:
+        return False, limiter.retry_after_sec(subject)
+    except Exception:
+        log.exception("Retry-hint computation failed — denying without hint", tool=tool)
+        return False, float("inf")
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +265,11 @@ def _build_app():
         # fetches spend a token too: the limit guards yt-dlp/egress effort,
         # not successful responses.
         subject = _request_subject()
-        if not _rate_limiter.consume(subject):
+        admitted, retry_sec = _limiter_check(
+            _rate_limiter, subject, "get_youtube_transcript"
+        )
+        if not admitted:
             _record_rate_limited(subject, "get_youtube_transcript")
-            retry_sec = _rate_limiter.retry_after_sec(subject)
             retry_txt = (
                 f" Try again in ~{retry_sec:.0f}s." if retry_sec != float("inf") else ""
             )
@@ -280,12 +305,14 @@ def _build_app():
                 # The charge lands before the get-or-create so there is no
                 # fail-open race window, and is refunded when the call turns
                 # out to join an existing job (or no job gets created).
-                quota_charged = _whisper_quota.consume(subject)
+                quota_charged, quota_retry_sec = _limiter_check(
+                    _whisper_quota, subject, "get_youtube_transcript(asr)"
+                )
                 if not quota_charged and (
                     await whisper_registry.get(video_id) is None
                 ):
                     _record_rate_limited(subject, "get_youtube_transcript(asr)")
-                    retry_sec = _whisper_quota.retry_after_sec(subject)
+                    retry_sec = quota_retry_sec
                     retry_txt = (
                         f" Try again in ~{retry_sec:.0f}s."
                         if retry_sec != float("inf")

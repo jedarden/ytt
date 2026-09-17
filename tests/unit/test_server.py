@@ -464,7 +464,6 @@ async def test_rate_limit_denies_cache_miss_without_fetching(monkeypatch):
     YTT_RATE_LIMIT_PER_MIN=0 fail-closed: capacity 0 denies every fetch.
     """
     from ytt import server
-    from ytt.errors import YttError
     from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
 
     _install_limits(
@@ -691,6 +690,74 @@ async def test_get_transcript_job_poll_consumes_nothing(monkeypatch):
     for _ in range(3):  # repeated polls never hit either limit
         sc = (await mcp.call_tool("get_transcript_job", {"video_id": "dQw4w9WgXcQ"})).structured_content
         assert sc["status"] == "pending"
+
+
+class _ExplodingLimiter:
+    """Limiter whose backing state is gone — every operation raises."""
+
+    def consume(self, sub):
+        raise RuntimeError("limiter storage unavailable")
+
+    def retry_after_sec(self, sub):
+        raise RuntimeError("limiter storage unavailable")
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_failure_denies_without_fetching(monkeypatch):
+    """Fail closed: a limiter that cannot operate denies deterministically
+    (the structured rate_limited shape, no retry hint) and the fetch never
+    runs — no limiter exception escapes to the caller as a crash, and no
+    admission slips through to protected work."""
+    from ytt import server
+    from ytt.ratelimit import WhisperQuota
+
+    _install_limits(monkeypatch, _ExplodingLimiter(), WhisperQuota(jobs_per_hour=10))
+    _cache_miss(monkeypatch)
+
+    async def must_not_run(fn, video_id=None):
+        raise AssertionError("fetch must not run when the limiter cannot operate")
+
+    monkeypatch.setattr(server._concurrency.fetch_pool, "run", must_not_run)
+
+    before = _limited_count("anonymous")
+    result = await mcp.call_tool(
+        "get_youtube_transcript", {"url": "https://youtu.be/dQw4w9WgXcQ"}
+    )
+    sc = result.structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "rate_limited"
+    assert "Rate limit exceeded" in sc["message"]
+    assert "Try again" not in sc["message"]  # broken limiter → no hint, not a wrong one
+    assert _limited_count("anonymous") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_whisper_quota_failure_denies_new_asr_job(monkeypatch):
+    """Fail closed on the ASR path: a quota limiter that raises denies the
+    new-job branch before get_or_create — no protected Whisper work starts."""
+    from ytt import server
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter
+
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        _ExplodingLimiter(),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+
+    async def must_not_create(*a, **kw):
+        raise AssertionError("get_or_create must not run when the quota limiter is broken")
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", must_not_create)
+
+    before = _limited_count("anonymous")
+    sc = (await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})).structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "rate_limited"
+    assert "Whisper ASR quota exhausted" in sc["message"]
+    assert _limited_count("anonymous") == before + 1
 
 
 # ---------------------------------------------------------------------------
