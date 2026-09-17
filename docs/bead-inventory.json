@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-09-16T20:55:32Z",
+  "generated_at": "2026-09-17T15:43:03Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 55,
-    "open": 6,
-    "in_progress": 1,
-    "closed": 48
+    "total_beads": 65,
+    "open": 9,
+    "in_progress": 2,
+    "closed": 54
   },
   "beads_not_closed": [
     {
@@ -18,23 +18,24 @@
       "priority": 2,
       "assignee": null,
       "labels": [
-        "failure-count:1",
-        "quarantine-until:2026-09-16T18:05:10.056041566+00:00",
+        "failure-count:3",
+        "quarantine-until:2026-09-17T01:26:17.734133443+00:00",
+        "verification-failed",
         "weave-generated"
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 3,
+      "revision": 9,
       "created_at": "2026-09-16T15:25:56.758370261Z",
-      "updated_at": "2026-09-16T18:00:10.623890577Z"
+      "updated_at": "2026-09-17T01:06:18.252387584Z"
     },
     {
       "id": "ytt-5a4e9a6e",
       "title": "Add an automated deploy/ \u2194 declarative-config manifest parity check (drift already happened once)",
-      "status": "open",
-      "effective_status": "open",
+      "status": "in_progress",
+      "effective_status": "in_progress",
       "priority": 2,
-      "assignee": null,
+      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
       "labels": [
         "failure-count:1",
         "over-budget",
@@ -44,27 +45,125 @@
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 5,
+      "revision": 6,
       "created_at": "2026-09-16T19:05:01.333206493Z",
-      "updated_at": "2026-09-16T20:28:13.172992547Z"
+      "updated_at": "2026-09-17T15:21:23.506480061Z"
     },
     {
-      "id": "ytt-6c1eef9d",
-      "title": "ytt: define and document per-subject rate-limit + Whisper-quota configuration surface",
+      "id": "ytt-5b715a7f",
+      "title": "Add runtime tests for the single-replica flock guard",
       "status": "open",
       "effective_status": "open",
       "priority": 2,
       "assignee": null,
       "labels": [
         "failure-count:1",
-        "quarantine-until:2026-09-16T18:00:29.512344899+00:00",
+        "over-budget",
+        "quarantine-until:2026-09-17T00:50:11.101035190+00:00",
+        "verification-failed",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 5,
+      "created_at": "2026-09-16T22:23:37.847094932Z",
+      "updated_at": "2026-09-17T00:45:10.783928176Z"
+    },
+    {
+      "id": "ytt-70690b3d",
+      "title": "Pin and regression-test yt-dlp player-client and PoToken behavior",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "degraded-window-failure:0",
+        "failure-count:1",
+        "quarantine-until:2026-09-17T11:08:38.244027619+00:00",
         "weave-generated"
       ],
       "manual_blocked": false,
       "dependencies": [],
       "revision": 3,
-      "created_at": "2026-09-16T15:25:56.621182603Z",
-      "updated_at": "2026-09-16T17:55:29.977084465Z"
+      "created_at": "2026-09-16T22:23:38.309738703Z",
+      "updated_at": "2026-09-17T11:04:53.972979953Z"
+    },
+    {
+      "id": "ytt-80a4da40",
+      "title": "Add automated MCP OAuth discovery and audience/path conformance tests",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "over-budget",
+        "quarantine-until:2026-09-16T23:51:27.442189654+00:00",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-16T22:23:37.690746662Z",
+      "updated_at": "2026-09-16T23:46:27.956564906Z"
+    },
+    {
+      "id": "ytt-89d1e56d",
+      "title": "Add bounded download and Whisper resource guardrails",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "failure-count:1",
+        "quarantine-until:2026-09-17T01:07:19.174841989+00:00",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-16T22:23:37.999736276Z",
+      "updated_at": "2026-09-17T01:04:19.71508915Z"
+    },
+    {
+      "id": "ytt-8a2beb88",
+      "title": "Gate broken: close_verification \u2014 close reason carries no verification evidence (fingerprint:ea603be160bd)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "degraded-window-failure:0",
+        "failure-count:1",
+        "fingerprint:ea603be160bd",
+        "infra",
+        "priority:0",
+        "quarantine-until:2026-09-17T13:12:43.040927133+00:00"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-17T01:50:04.578523085Z",
+      "updated_at": "2026-09-17T13:07:43.648499681Z"
+    },
+    {
+      "id": "ytt-8c702583",
+      "title": "Implement and test YTT_PROXY_URL end to end",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "degraded-window-failure:0",
+        "failure-count:1",
+        "quarantine-until:2026-09-17T07:02:35.304318608+00:00",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 3,
+      "created_at": "2026-09-16T22:23:38.15533369Z",
+      "updated_at": "2026-09-17T06:57:35.801952183Z"
     },
     {
       "id": "ytt-8efb9b9d",
@@ -74,33 +173,15 @@
       "priority": 2,
       "assignee": null,
       "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-16T19:05:01.698314121Z",
-      "updated_at": "2026-09-16T19:05:01.698314121Z"
-    },
-    {
-      "id": "ytt-b156b5ba",
-      "title": "Update docs/pluck-configuration.md for the bead-rs migration (it still documents the deprecated bf/br backend)",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
         "failure-count:1",
-        "over-budget",
-        "quarantine-until:2026-09-16T19:52:26.077342633+00:00",
-        "verification-failed",
+        "quarantine-until:2026-09-16T22:12:37.253887497+00:00",
         "weave-generated"
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 5,
-      "created_at": "2026-09-16T19:05:01.160055553Z",
-      "updated_at": "2026-09-16T19:47:25.782275189Z"
+      "revision": 3,
+      "created_at": "2026-09-16T19:05:01.698314121Z",
+      "updated_at": "2026-09-16T22:07:37.772952101Z"
     },
     {
       "id": "ytt-cbbdf5c7",
@@ -110,13 +191,16 @@
       "priority": 2,
       "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
       "labels": [
+        "failure-count:1",
+        "quarantine-until:2026-09-16T21:12:31.038261018+00:00",
+        "verification-failed",
         "weave-generated"
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 2,
+      "revision": 6,
       "created_at": "2026-09-16T19:05:01.501143713Z",
-      "updated_at": "2026-09-16T20:28:18.951130754Z"
+      "updated_at": "2026-09-17T15:32:37.746738268Z"
     },
     {
       "id": "ytt-f4064fab",
@@ -126,13 +210,16 @@
       "priority": 2,
       "assignee": null,
       "labels": [
+        "failure-count:1",
+        "quarantine-until:2026-09-16T22:49:30.162116397+00:00",
+        "verification-failed",
         "weave-generated"
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 1,
+      "revision": 5,
       "created_at": "2026-09-16T19:05:01.827375362Z",
-      "updated_at": "2026-09-16T19:05:01.827375362Z"
+      "updated_at": "2026-09-16T22:44:29.830824536Z"
     }
   ],
   "pluck_label_analysis": {
@@ -146,7 +233,7 @@
     "quarantine_windows": [
       {
         "id": "ytt-58325cdf",
-        "until": "2026-09-16T18:05:10.056041566+00:00",
+        "until": "2026-09-17T01:26:17.734133443+00:00",
         "state": "expired"
       },
       {
@@ -155,13 +242,48 @@
         "state": "expired"
       },
       {
-        "id": "ytt-6c1eef9d",
-        "until": "2026-09-16T18:00:29.512344899+00:00",
+        "id": "ytt-5b715a7f",
+        "until": "2026-09-17T00:50:11.101035190+00:00",
         "state": "expired"
       },
       {
-        "id": "ytt-b156b5ba",
-        "until": "2026-09-16T19:52:26.077342633+00:00",
+        "id": "ytt-70690b3d",
+        "until": "2026-09-17T11:08:38.244027619+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-80a4da40",
+        "until": "2026-09-16T23:51:27.442189654+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-89d1e56d",
+        "until": "2026-09-17T01:07:19.174841989+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-8a2beb88",
+        "until": "2026-09-17T13:12:43.040927133+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-8c702583",
+        "until": "2026-09-17T07:02:35.304318608+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-8efb9b9d",
+        "until": "2026-09-16T22:12:37.253887497+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-cbbdf5c7",
+        "until": "2026-09-16T21:12:31.038261018+00:00",
+        "state": "expired"
+      },
+      {
+        "id": "ytt-f4064fab",
+        "until": "2026-09-16T22:49:30.162116397+00:00",
         "state": "expired"
       }
     ]
