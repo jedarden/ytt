@@ -10,6 +10,9 @@ configured ``YTT_PATH_PREFIX`` (default ``/ytt/``).
 Phase 5: per-subject authorization controls enforced — subject allowlist via
 AuthMiddleware (``ytt.authz``), plus the per-subject rate limit (cache-miss
 fetch path) and Whisper ASR quota (new jobs only) from ``ytt.ratelimit``.
+New Whisper jobs additionally hold a ``YTT_MAX_CONCURRENT_WHISPER`` slot for
+their whole lifecycle (:func:`_run_whisper_job_bounded`) — the reservation is
+released when the job reaches a terminal state, success or failure alike.
 Phase 7: full pipeline wired — cache → fetch → pagination.
 Phase 8: observability wired — structlog, Prometheus /metrics, /admin/egress.
 """
@@ -38,6 +41,7 @@ from ytt.singleton import (
     SingletonLockUnavailable,
     acquire_singleton_lock,
 )
+from ytt import whisper as ytt_whisper
 from ytt.whisper import WhisperJobRegistry
 
 logger = logging.getLogger(__name__)
@@ -145,6 +149,31 @@ def _limiter_check(limiter: Any, subject: str, tool: str) -> tuple[bool, float]:
         return False, float("inf")
 
 
+async def _run_whisper_job_bounded(
+    job: Any,
+    registry: WhisperJobRegistry,
+    settings: Any,
+    cache: Any,
+    active_model: str,
+) -> None:
+    """Run one Whisper job while holding its ``YTT_MAX_CONCURRENT_WHISPER`` slot.
+
+    The semaphore slot is the job's *concurrency reservation*: it is acquired
+    before the job leaves ``pending`` (a queued job polls as pending — it has
+    not started Whisper work yet) and released only when the job reaches a
+    terminal state. ``async with`` releases it on success **and** on failure
+    (and on task cancellation), so a crashed or failed transcription can never
+    hold the shared CPU service's only slot forever (plan: "Cap total in-flight
+    WhisperJobs", ``Semaphore(YTT_MAX_CONCURRENT_WHISPER)``).
+
+    ``run_whisper_job`` is resolved from the :mod:`ytt.whisper` module at call
+    time (not imported into this namespace) so tests can stub the job body at
+    its source module.
+    """
+    async with _concurrency.whisper_sem:
+        await ytt_whisper.run_whisper_job(job, registry, settings, cache, active_model)
+
+
 # ---------------------------------------------------------------------------
 # Build the FastMCP application (module-level singleton so tests can import it)
 # ---------------------------------------------------------------------------
@@ -228,7 +257,6 @@ def _build_app():
         from ytt.errors import YttError
         from ytt import pagination
         from ytt.fetch import fetch_transcript
-        from ytt.whisper import run_whisper_job
 
         settings = get_settings()
 
@@ -349,11 +377,30 @@ def _build_app():
                         "error_code": tla_exc.error_code,
                         "message": tla_exc.message,
                     }
+                except Exception as exc:
+                    # Registry failure — no job was started, so the caller's
+                    # slot is released rather than spent on a server fault.
+                    # Reported in the same structured shape as any other
+                    # unexpected tool error (raising here would escape the
+                    # outer handlers, since this is already inside except).
+                    if quota_charged:
+                        _whisper_quota.refund(subject)
+                    logger.exception(
+                        "Unexpected error starting Whisper job: %s", exc
+                    )
+                    return {
+                        "video_id": video_id,
+                        "status": "error",
+                        "error_code": errors.EMPTY_BODY,
+                        "message": f"Unexpected error: {exc}",
+                    }
 
                 if is_new:
-                    # Start background transcription task
+                    # Start background transcription task, holding one
+                    # YTT_MAX_CONCURRENT_WHISPER slot for the job's whole
+                    # lifecycle (released when it reaches done/error).
                     asyncio.create_task(
-                        run_whisper_job(
+                        _run_whisper_job_bounded(
                             job,
                             whisper_registry,
                             settings,

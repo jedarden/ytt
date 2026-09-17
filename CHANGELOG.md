@@ -19,6 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deployment. The long-running `ytt canary` loop and its `:8081` metrics are
   unchanged.
 
+### Fixed
+
+- **`YTT_MAX_CONCURRENT_WHISPER` is now actually enforced** (bead
+  `ytt-7dc271a6`). The semaphore existed (`ConcurrencyState.whisper_sem`) and
+  the knob was documented, but no code ever acquired it — any number of
+  "concurrent" jobs could hit the shared CPU Whisper service at once. New
+  jobs now run under a per-job reservation
+  (`server._run_whisper_job_bounded`): the slot is held from the moment the
+  job leaves `pending` until it reaches `done` or `error` — released on
+  success and failure alike, and on task cancellation — so a failed
+  transcription cannot wedge the shared service. Jobs beyond the cap queue as
+  `pending` (they have already paid their `YTT_WHISPER_JOBS_PER_HOUR` slot).
+  Also: a quota charge whose `get_or_create` unexpectedly fails is refunded
+  (release-on-failure — a server fault no longer permanently spends a
+  caller's slot), surfaced in the usual structured error shape instead of an
+  escaping exception.
+
 ## [0.2.15] — 2026-09-16
 
 ### Added

@@ -47,7 +47,14 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
   `get_transcript_job` polls cost nothing**, so waiting on one transcription
   never drains a caller's budget.
 - **What costs a Whisper slot:** only *starting* a new ASR job. Joining an
-  already-running job for the same video, or polling it, is free.
+  already-running job for the same video, or polling it, is free. A slot
+  charged for a job that never actually starts (the registry failed after the
+  charge) is refunded.
+- **In-flight cap:** independent of the per-subject quota, at most
+  `YTT_MAX_CONCURRENT_WHISPER` jobs run at once (the shared CPU service is
+  protected from every subject combined). Jobs beyond the cap queue as
+  `pending` — they have already paid their quota slot — and start when a
+  running job reaches `done` or `error`, which releases its slot either way.
 - **Fail-closed:** `0` is valid and denies everything the limit guards; there
   is no "unlimited" setting. Negative values fail startup validation.
 - **On denial** the tool returns `status="error"`, `error_code="rate_limited"`

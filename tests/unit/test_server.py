@@ -10,6 +10,7 @@ here; they require the in-cluster integration suite (Phase 9).
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -758,6 +759,275 @@ async def test_whisper_quota_failure_denies_new_asr_job(monkeypatch):
     assert sc["error_code"] == "rate_limited"
     assert "Whisper ASR quota exhausted" in sc["message"]
     assert _limited_count("anonymous") == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Whisper concurrency reservation (YTT_MAX_CONCURRENT_WHISPER) + release paths
+#
+# The per-subject quota denies *new* jobs; the semaphore bounds how many of
+# those jobs actually run at once. These tests pin the reservation lifecycle:
+# a queued job holds nothing, a running job holds one slot, and the slot is
+# released when the job reaches a terminal state — done or error alike.
+# ---------------------------------------------------------------------------
+
+
+async def _wait_until(pred, timeout: float = 2.0) -> None:
+    """Yield to the event loop until *pred()* is true (background tasks)."""
+    deadline = time.time() + timeout
+    while not pred():
+        if time.time() > deadline:
+            raise AssertionError("background Whisper task did not reach expected state")
+        await asyncio.sleep(0.01)
+
+
+def _new_job(video_id: str):
+    from ytt.models import WhisperJob
+
+    return WhisperJob(
+        video_id=video_id, status="pending", created_at=time.time(), eta_sec=60.0
+    )
+
+
+def _install_new_job_registry(monkeypatch):
+    """Make get_or_create always report a freshly created job (is_new=True)."""
+    from ytt import server
+
+    async def mock_get_or_create(video_id, duration_sec, settings):
+        return _new_job(video_id), True
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
+
+
+@pytest.mark.asyncio
+async def test_whisper_concurrency_cap_serializes_running_jobs(monkeypatch):
+    """With YTT_MAX_CONCURRENT_WHISPER=1 a second job stays queued (pending —
+    it has not started Whisper work) until the running job reaches its terminal
+    state; the released slot then admits it. Release-on-success."""
+    from ytt import server
+    from ytt import whisper as ytt_whisper
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    monkeypatch.setattr(server._concurrency, "whisper_sem", asyncio.Semaphore(1))
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        WhisperQuota(jobs_per_hour=10),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+    _install_new_job_registry(monkeypatch)
+
+    entered: list[str] = []
+    gate = asyncio.Event()
+
+    async def fake_run(job, registry, settings, cache, active_model):
+        entered.append(job.video_id)  # reached only once the slot is held
+        job.status = "running"
+        if job.video_id == "dQw4w9WgXcQ":
+            await gate.wait()  # hold the single slot
+        job.status = "done"
+
+    monkeypatch.setattr(ytt_whisper, "run_whisper_job", fake_run)
+
+    first = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})
+    ).structured_content
+    assert first["status"] == "pending"
+    await _wait_until(lambda: entered == ["dQw4w9WgXcQ"])  # holds the slot now
+
+    second = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "abcdefghijk"})
+    ).structured_content
+    assert second["status"] == "pending"
+
+    # Give the queued task every chance to misbehave before releasing.
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert entered == ["dQw4w9WgXcQ"], "second job must not start while the cap is held"
+
+    gate.set()  # first job finishes → its slot is released
+    # Entry events only: "abcdefghijk" can only enter once the running job
+    # released the slot, so this stable end state proves serialization AND
+    # release-on-success (job status transitions carry the terminal states).
+    await _wait_until(lambda: entered == ["dQw4w9WgXcQ", "abcdefghijk"])
+    assert entered[-1] == "abcdefghijk", "released slot must admit the queued job"
+
+
+@pytest.mark.asyncio
+async def test_whisper_concurrency_cap_released_when_job_fails(monkeypatch):
+    """A job that ends in ``error`` releases its slot exactly like a done one —
+    a failed transcription must not wedge the shared Whisper service forever."""
+    from ytt import server
+    from ytt import whisper as ytt_whisper
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    monkeypatch.setattr(server._concurrency, "whisper_sem", asyncio.Semaphore(1))
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        WhisperQuota(jobs_per_hour=10),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+
+    terminal: list[str] = []
+    jobs = {
+        "dQw4w9WgXcQ": _new_job("dQw4w9WgXcQ"),
+        "abcdefghijk": _new_job("abcdefghijk"),
+    }
+
+    async def failing_run(job, registry, settings, cache, active_model):
+        # Mirror run_whisper_job's failure semantics: never raises —
+        # transitions to error and returns (the wrapper sees a normal return).
+        job.status = "error"
+        terminal.append(job.video_id)
+
+    async def ok_run(job, registry, settings, cache, active_model):
+        job.status = "running"
+        job.status = "done"
+        terminal.append(job.video_id)
+
+    async def mock_get_or_create(video_id, duration_sec, settings):
+        return jobs[video_id], True
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
+    # Stub the job body BEFORE the first call — otherwise the real job runs.
+    monkeypatch.setattr(ytt_whisper, "run_whisper_job", failing_run)
+
+    sc = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})
+    ).structured_content
+    assert sc["status"] == "pending"
+    await _wait_until(lambda: terminal == ["dQw4w9WgXcQ"])
+    assert jobs["dQw4w9WgXcQ"].status == "error"
+
+    # The failed job's slot is free: the next job starts immediately.
+    monkeypatch.setattr(ytt_whisper, "run_whisper_job", ok_run)
+    sc = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "abcdefghijk"})
+    ).structured_content
+    assert sc["status"] == "pending"
+    await _wait_until(lambda: terminal == ["dQw4w9WgXcQ", "abcdefghijk"])
+    assert jobs["abcdefghijk"].status == "done"
+
+
+@pytest.mark.asyncio
+async def test_whisper_slot_released_when_job_coroutine_raises(monkeypatch):
+    """Even a job coroutine that *raises* (not the normal error transition)
+    must not keep its concurrency reservation — the release guards failure,
+    not just the happy path."""
+    from ytt import server
+    from ytt import whisper as ytt_whisper
+    from ytt.config import get_settings
+    from ytt.models import WhisperJob
+
+    sem = asyncio.Semaphore(1)
+    monkeypatch.setattr(server._concurrency, "whisper_sem", sem)
+
+    async def boom(*a, **kw):
+        raise RuntimeError("job task crashed")
+
+    monkeypatch.setattr(ytt_whisper, "run_whisper_job", boom)
+
+    job = WhisperJob(
+        video_id="dQw4w9WgXcQ", status="pending", created_at=time.time(), eta_sec=1.0
+    )
+    with pytest.raises(RuntimeError):
+        await server._run_whisper_job_bounded(
+            job,
+            server.whisper_registry,
+            get_settings(),
+            server.transcript_cache,
+            "large-v3-turbo",
+        )
+    assert sem._value == 1, "reservation must be released when the job task raises"
+
+
+@pytest.mark.asyncio
+async def test_whisper_quota_released_when_registry_fails(monkeypatch):
+    """A quota charge that never became a job is refunded: if the registry
+    itself fails after the charge, the caller keeps their slot (release on
+    failure — a server fault must not permanently spend quota)."""
+    from ytt import server
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    quota = WhisperQuota(jobs_per_hour=1)
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        quota,
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+
+    async def broken_get_or_create(*a, **kw):
+        raise RuntimeError("registry storage unavailable")
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", broken_get_or_create)
+
+    sc = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})
+    ).structured_content
+    assert sc["status"] == "error"  # surfaced as the unexpected-error shape
+    # No job started → the charged slot was released: quota still usable.
+    assert quota.consume("anonymous") is True
+
+
+@pytest.mark.asyncio
+async def test_authorized_subject_is_still_quota_limited(monkeypatch):
+    """Allowlisting authorizes a subject; it does not exempt them from the ASR
+    quota. An authenticated, allowlisted caller's own exhaustion denies them,
+    charged to their own (lowercased email) bucket — other subjects' quotas
+    are untouched (per-subject isolation holds at the server layer)."""
+    from types import SimpleNamespace
+
+    from fastmcp.server import dependencies as fastmcp_dependencies
+
+    from ytt import whisper as ytt_whisper
+    from ytt.errors import EMPTY_BODY, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    quota = WhisperQuota(jobs_per_hour=1)
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0 / 60.0),
+        quota,
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(monkeypatch, YttError(EMPTY_BODY, "empty body"))
+    _install_new_job_registry(monkeypatch)
+
+    started: list[str] = []
+
+    async def noop_run(job, *a, **kw):
+        started.append(job.video_id)
+
+    monkeypatch.setattr(ytt_whisper, "run_whisper_job", noop_run)
+    # Authenticated request context: the allowlisted account "Me@JedCabanero.com".
+    monkeypatch.setattr(
+        fastmcp_dependencies,
+        "get_access_token",
+        lambda: SimpleNamespace(claims={"email": "Me@JedCabanero.com"}),
+    )
+
+    sc = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "dQw4w9WgXcQ"})
+    ).structured_content
+    assert sc["status"] == "pending"  # job admitted — charged to the email subject
+    await _wait_until(lambda: started == ["dQw4w9WgXcQ"])
+    assert quota.consume("me@jedcabanero.com") is False  # their bucket was drained
+
+    sc = (
+        await mcp.call_tool("get_youtube_transcript", {"url": "abcdefghijk"})
+    ).structured_content
+    assert sc["status"] == "error"
+    assert sc["error_code"] == "rate_limited"
+    assert "Whisper ASR quota exhausted" in sc["message"]
+    # ...while a different subject's quota is untouched (isolation by subject).
+    assert quota.consume("someoneelse@jedcabanero.com") is True
 
 
 # ---------------------------------------------------------------------------
