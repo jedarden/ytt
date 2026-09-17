@@ -130,7 +130,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had no definition, `[Unreleased]` still compared against `v0.2.13`);
   and `uv.lock` was left at 0.2.13 by the 0.2.14 commit (which bumped
   `pyproject.toml` without a lock regen — `uv lock --check` failed on a
-  clean checkout). (This entry's registry note was corrected in 0.2.16:
+  clean checkout). One at-tag fact recorded on re-audit: the tagged tree
+  of `v0.2.13` itself carries stale metadata — `pyproject.toml` still
+  0.2.12, `ytt.__version__` still 0.2.1 (stale since 0.2.1, and
+  advertised by the running server), `uv.lock` still 0.2.1 — because the
+  reconciliation that fixed them (`a0f2cfe`) is the commit *after* the
+  tagged release commit `c0d0d8e`, and the tag is immutable history. A
+  clean checkout of `v0.2.13` therefore reports those stale values; 0.2.14
+  was the first release whose tagged tree had matching `pyproject.toml`
+  and `__version__` (its own `uv.lock` lag is the fix above).
+  (This entry's registry note was corrected in 0.2.16:
   `ronaldraygun/ytt:0.2.13` and `:0.2.14` were in fact published on
   2026-09-16, and 0.2.15 itself shipped without an image — see the 0.2.16
   entry.)
