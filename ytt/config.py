@@ -11,6 +11,14 @@ parsing it enforces:
   ``WHISPER_JOBS_PER_HOUR``) must be >= 0: 0 is meaningful (deny-all —
   fail-closed), negatives are config errors. Unset ``RATE_LIMIT_BURST``
   resolves to ``RATE_LIMIT_PER_MIN`` (one full minute of requests up front).
+- Malformed limit values (non-integer env strings: ``abc``, ``2.5``, empty)
+  are config errors — pydantic rejects them at construction and the server
+  exits before binding. There is no lenient fallback and no "unlimited"
+  escape value.
+- ``RATE_LIMIT_PER_MIN=0`` with an *explicit* positive ``RATE_LIMIT_BURST``
+  is rejected: 0 is documented deny-all (no refill), so a one-shot burst
+  allowance would silently contradict it. An explicit ``RATE_LIMIT_BURST=0``
+  is valid with any rate — capacity 0 denies every fetch (fail-closed).
 - Storage sizing: for ``pvc`` backend, ``statvfs(cache_dir)`` must be >=
   ``cache_max_bytes`` (fail fast); for ``emptydir`` a warning is emitted instead
   (statvfs reports node disk, not the kubelet ``sizeLimit``). This filesystem
@@ -106,6 +114,9 @@ class Settings(BaseSettings):
     # Per-subject burst capacity (bucket size). None resolves to
     # rate_limit_per_min (burst == one minute's worth of requests), so
     # YTT_RATE_LIMIT_PER_MIN=0 with no explicit burst denies everything.
+    # An explicit 0 is valid with any rate (capacity 0 = deny all); an
+    # explicit positive burst under a 0 rate is a config error — the
+    # resolution validator rejects it (0 is documented deny-all).
     rate_limit_burst: int | None = None
     # Per-subject Whisper ASR jobs per rolling hour. Charged only when a NEW
     # job starts (joining/polling an existing job is free). 0 = deny all ASR
@@ -194,9 +205,21 @@ class Settings(BaseSettings):
     def _resolve_rate_limit_burst(self) -> "Settings":
         """Unset burst defaults to the per-minute rate (one full minute of
         requests may arrive at once) — so YTT_RATE_LIMIT_PER_MIN=0 with no
-        explicit burst leaves no initial allowance either (fail-closed)."""
+        explicit burst leaves no initial allowance either (fail-closed).
+
+        An explicit positive burst under a zero rate is rejected: 0 is
+        documented as deny-all (no refill), and a one-shot allowance would
+        silently contradict that promise — the unsafe combination fails
+        startup instead (fail-closed)."""
         if self.rate_limit_burst is None:
             self.rate_limit_burst = self.rate_limit_per_min
+        elif self.rate_limit_per_min == 0 and self.rate_limit_burst > 0:
+            raise ValueError(
+                "YTT_RATE_LIMIT_PER_MIN=0 means deny-all (no refill), so an "
+                f"explicit YTT_RATE_LIMIT_BURST={self.rate_limit_burst} would "
+                "grant a one-shot allowance that contradicts it — unset the "
+                "burst or raise the rate"
+            )
         return self
 
     @model_validator(mode="after")

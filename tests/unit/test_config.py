@@ -3,7 +3,10 @@
 Covers the Configuration table defaults, ``2Gi``-style size parsing, the
 path-prefix trailing-slash rule + path join, public-url normalization, the
 allowlist parser, **Invariant 7** (ETA-timeout safety), and the PVC/emptyDir
-storage validation.
+storage validation. The per-subject limit knobs (``RATE_LIMIT_PER_MIN`` /
+``RATE_LIMIT_BURST`` / ``WHISPER_JOBS_PER_HOUR``) are pinned for absent,
+zero, negative, malformed, and unsafe-combination values (fail-closed rules
+in the :mod:`ytt.config` module docstring).
 """
 
 from __future__ import annotations
@@ -109,6 +112,46 @@ def test_zero_limits_are_valid_and_fail_closed():
     assert s.rate_limit_per_min == 0
     assert s.rate_limit_burst == 0  # unset burst follows the 0 rate
     assert s.whisper_jobs_per_hour == 0
+
+
+@pytest.mark.parametrize("field", ["rate_limit_per_min", "rate_limit_burst", "whisper_jobs_per_hour"])
+@pytest.mark.parametrize("bad", ["abc", "", "2.5", "20 requests"])
+def test_malformed_limit_values_rejected(field, bad):
+    """Non-integer limit values are config errors — startup fails instead of
+    guessing a limit (or falling open)."""
+    with pytest.raises(ValidationError):
+        Settings(**{field: bad})
+
+
+def test_malformed_limit_env_fails_startup(monkeypatch):
+    """The malformed-value rejection holds on the operator path (env var),
+    which is where a typo like 'YTT_RATE_LIMIT_PER_MIN=2O' would arrive."""
+    monkeypatch.setenv("YTT_RATE_LIMIT_PER_MIN", "abc")
+    with pytest.raises(ValidationError, match="rate_limit_per_min"):
+        Settings()
+
+
+def test_zero_rate_with_explicit_positive_burst_rejected():
+    """rate=0 is documented deny-all (no refill); an explicit positive burst
+    would hand every subject a one-shot allowance that contradicts it — the
+    unsafe combination is rejected at startup (fail-closed)."""
+    with pytest.raises(ValidationError, match="deny-all"):
+        Settings(rate_limit_per_min=0, rate_limit_burst=5)
+
+
+def test_zero_rate_with_explicit_zero_burst_ok():
+    """Explicit burst=0 under rate=0 agrees with the deny-all promise."""
+    s = Settings(rate_limit_per_min=0, rate_limit_burst=0)
+    assert s.rate_limit_burst == 0
+
+
+def test_explicit_zero_burst_with_positive_rate_is_deny_all():
+    """burst=0 with a positive rate is coherent and stricter, not unsafe:
+    capacity 0 means the bucket can never hold a token, so every fetch is
+    denied regardless of the refill rate."""
+    s = Settings(rate_limit_per_min=20, rate_limit_burst=0)
+    assert s.rate_limit_burst == 0
+    assert s.rate_limit_per_min == 20
 
 
 # --- path prefix + join -----------------------------------------------------
