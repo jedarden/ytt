@@ -34,33 +34,62 @@ change, not a config change.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values (e.g. `user@example.com,abc123`). Empty list denies all requests. Discover your `sub` via `ytt selftest --show-sub` after the first OAuth flow. |
-| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate limit — token-bucket **refill rate** in requests/minute. Only cache-miss fetches consume it (see below). `0` = deny every fetch for every subject. |
-| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject token-bucket **capacity** — how many fetches a subject may make at once before the per-minute refill throttles. Unset, it resolves to `YTT_RATE_LIMIT_PER_MIN` (a full minute's worth of requests up front). |
-| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject quota for **new** Whisper ASR jobs per rolling hour (token bucket refilling at `jobs/3600` per second). `0` = deny every new ASR job; caption fetches still work. |
+| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate limit — token-bucket **refill rate** in requests/minute (one token every `60/rate` seconds; 3 s at the default). Only cache-miss fetches consume it (see below). `0` = deny every fetch for every subject. |
+| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject token-bucket **capacity** — how many fetches a subject may make at once before the per-minute refill throttles (the bucket starts full). Unset, it resolves to `YTT_RATE_LIMIT_PER_MIN` (a full minute's worth of requests up front). An explicit `0` is valid with any rate — capacity 0 denies every fetch; an explicit positive burst under a `0` rate is rejected at startup (it would grant a one-shot allowance contradicting `0` = deny-all). |
+| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject quota for **new** Whisper ASR jobs per rolling hour — a token bucket that starts full and refills at `jobs/3600` tokens per second, so a fresh subject may start up to N jobs at once and is then held to one new job every `3600/N` seconds (6 min at the default). `0` = deny every new ASR job; caption fetches still work. |
 
 Per-subject limits (rationale: [../notes/auth.md](../notes/auth.md) — "even an
 allowlisted caller can't exhaust the home IP / shared Whisper service"):
 
+- **Enforcement order:** on every tool call the OAuth signature/audience is
+  verified first, then the allowlist (`AuthMiddleware`), and only then do the
+  limiters apply — so only allowlisted subjects ever hold a bucket. Buckets
+  are keyed on the lowercased `email` claim; `@domain` allowlist entries match
+  many addresses, but each matching mailbox still gets its own bucket. Calls
+  made outside a request context (unit tests, local runs with auth
+  unconfigured) share one `anonymous` bucket so volume stays bounded even
+  there.
 - **What costs a token:** only the cache-miss fetch path of
   `get_youtube_transcript` (failed fetches included — the limit guards
   yt-dlp/egress effort, not successful responses). **Cache hits and
   `get_transcript_job` polls cost nothing**, so waiting on one transcription
-  never drains a caller's budget.
+  never drains a caller's budget. A caption-less video costs two charges:
+  the fetch token is spent first, then a Whisper slot for the ASR fallback.
+  A rejection by the global fetch pool (see
+  [Concurrency](#concurrency)) also keeps the already-spent token — the
+  charge happens before the pool is contacted.
 - **What costs a Whisper slot:** only *starting* a new ASR job. Joining an
-  already-running job for the same video, or polling it, is free. A slot
-  charged for a job that never actually starts (the registry failed after the
-  charge) is refunded.
+  already-running job for the same video, or polling it, is free. The slot is
+  charged before the get-or-create (no fail-open race window) and refunded
+  when the call turns out to join an existing job, or when no job actually
+  starts (duration check fails, registry fault). Because joining is decided
+  after the charge, an exhausted quota still lets a caller join a job that is
+  already running for the same video — exhaustion blocks only *new* jobs.
 - **In-flight cap:** independent of the per-subject quota, at most
   `YTT_MAX_CONCURRENT_WHISPER` jobs run at once (the shared CPU service is
   protected from every subject combined). Jobs beyond the cap queue as
   `pending` — they have already paid their quota slot — and start when a
   running job reaches `done` or `error`, which releases its slot either way.
-- **Fail-closed:** `0` is valid and denies everything the limit guards; there
-  is no "unlimited" setting. Negative values fail startup validation.
+- **Startup validation (fail-closed):** each of the three limit knobs must be
+  an integer ≥ 0 — `abc`, `2.5`, an empty string, or a negative value fails
+  Settings construction and the server exits before binding. `0` is valid and
+  denies everything the limit guards; there is no "unlimited" setting. One
+  combination is additionally rejected: `YTT_RATE_LIMIT_PER_MIN=0` with an
+  explicit positive `YTT_RATE_LIMIT_BURST` (0 is documented deny-all with no
+  refill, so a one-shot allowance would silently contradict it — unset the
+  burst or raise the rate).
 - **On denial** the tool returns `status="error"`, `error_code="rate_limited"`
   with a retry hint in the message, and `ytt_rate_limited_total{subject_hash}`
   increments on `/metrics` (subjects are exported only as an 8-char sha256
-  prefix, never in clear).
+  prefix, never in clear). The two messages callers see:
+  `"Rate limit exceeded (20 requests/min per subject). Try again in ~Ns."`
+  for the fetch bucket and
+  `"Whisper ASR quota exhausted (10 jobs/hour per subject). Try again in ~Ns."`
+  for the ASR quota (the numbers reflect your configured limits; the hint is
+  computed from the caller's own bucket). If the limiter itself raises, the
+  request is still denied with the same `rate_limited` shape but without a
+  hint — a broken limiter can neither admit a request to the work it guards
+  nor crash the tool.
 - Limits are enforced **per OAuth subject** (`email` claim) and held in
   process memory — correct only under the single-replica invariant
   (`replicas: 1`), like the cache and job registry.
@@ -85,8 +114,8 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_MAX_CONCURRENT_FETCHES` | `4` | Maximum simultaneous yt-dlp caption fetches. |
-| `YTT_MAX_CONCURRENT_WHISPER` | `1` | Maximum simultaneous Whisper jobs (shared CPU service). |
+| `YTT_MAX_CONCURRENT_FETCHES` | `4` | Maximum simultaneous yt-dlp caption fetches (global, all subjects — not per-subject). Up to 4× this many requests may additionally wait in an internal queue; beyond that, callers get `error_code="rate_limited"` ("Fetch pool full (active=…, queued=…); try again shortly.") until slots free. This is a capacity rejection, not the per-subject rate limit — and the caller's rate-limit token is already spent when it happens. |
+| `YTT_MAX_CONCURRENT_WHISPER` | `1` | Maximum simultaneous Whisper jobs across all subjects (shared CPU service). A new job holds its slot for its whole lifecycle — acquired before the job leaves `pending`, released only when it reaches `done` or `error` (success, failure, or cancellation alike), so a crashed transcription can never wedge the pool. Jobs beyond the cap queue as `pending` (their quota slot is already paid) and start when a slot frees. |
 | `YTT_EXTRACT_TIMEOUT_SEC` | `60` | Timeout for `yt-dlp extract_info` calls. On expiry, the single-flight Future resolves as `rate_limited`. |
 
 ## Whisper ASR

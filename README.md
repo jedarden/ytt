@@ -76,9 +76,10 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_PUBLIC_URL` | *(required)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. |
 | `YTT_PATH_PREFIX` | `/ytt/` | Path the server is mounted under. Must end with `/`. |
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values allowed to call tools. See [connector.md](docs/usage/connector.md) for how to discover your `sub`. |
-| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate (token-bucket refill). Only cache-miss fetches consume it — cache hits and `get_transcript_job` polls are free. `0` = deny all fetches (fail-closed). |
-| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject burst capacity (fetches allowed at once before the per-minute refill throttles). |
-| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject *new* Whisper ASR jobs per rolling hour. Joining or polling an in-flight job is free. `0` = deny all ASR, caption fetches still work (fail-closed). |
+| `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate — token-bucket **refill rate** in requests/minute (1 token every `60/rate` seconds; 3 s at the default). Charged only on the cache-miss fetch path, failed fetches included; cache hits and `get_transcript_job` polls are free. `0` = deny all fetches (fail-closed). |
+| `YTT_RATE_LIMIT_BURST` | *(= rate)* | Per-subject token-bucket **capacity** — fetches a subject may make at once before the per-minute refill throttles (the bucket starts full). Unset, it resolves to `YTT_RATE_LIMIT_PER_MIN`. Explicit `0` is valid with any rate (denies every fetch); an explicit positive burst under a `0` rate is rejected at startup — it would contradict the documented deny-all. |
+| `YTT_WHISPER_JOBS_PER_HOUR` | `10` | Per-subject quota of *new* Whisper ASR jobs per rolling hour — a token bucket that starts full and refills at `jobs/3600` per second (up to 10 jobs at once, then 1 new job every 6 min sustained at the default). Joining or polling an in-flight job is free. `0` = deny all new ASR jobs; caption fetches still work (fail-closed). |
+| `YTT_MAX_CONCURRENT_WHISPER` | `1` | Whisper jobs running at once across **all** subjects (protects the shared ASR service). Jobs beyond the cap queue as `pending` — their quota slot is already paid — and start when a running job reaches `done` or `error`. |
 | `YTT_OAUTH_CLIENT_ID` | *(required)* | OAuth2 client ID of the `ytt` application on the upstream IdP. Startup exits 1 if unset. |
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
 | `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
@@ -87,6 +88,18 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |
 | `YTT_SCRATCH_DIR` | `/scratch` | Scratch directory for temporary Whisper audio. Must be a dedicated volume (emptyDir recommended) — see the warning below. |
 | `YTT_PROXY_URL` | *(unset)* | Optional residential proxy URL (e.g. `http://user:pass@proxy.example.com:port`). |
+
+Per-subject limits apply **after** the allowlist: `YTT_ALLOWED_SUBJECTS`
+decides who may call at all, and the limiters then bound what each allowlisted
+subject can spend — keyed on the OAuth `email` claim, one bucket per mailbox
+(`@domain` allowlist entries match many addresses but each still gets its own
+bucket). When a limit is exhausted the tool returns `status="error"` with
+`error_code="rate_limited"` and a "Try again in ~Ns." hint; denials increment
+`ytt_rate_limited_total{subject_hash}` on `/metrics` (subjects are hashed,
+never exported in clear). There is no "unlimited" setting: malformed,
+negative, or self-contradictory limit values exit 1 at startup, and a limiter
+that cannot compute an answer denies rather than admits (fail-closed at every
+layer).
 
 > **⚠️ `YTT_SCRATCH_DIR` is swept on every boot.** At startup ytt deletes
 > **every file** in the scratch directory, unconditionally — safe only because
@@ -120,7 +133,7 @@ ytt MCP server (uvicorn, 1 worker)
   ├─ /.well-known/oauth-* (path-inserted RFC 9728 metadata)
   ├─ AuthN: OAuth bearer (audience-bound to YTT_PUBLIC_URL)
   ├─ AuthZ: subject allowlist (YTT_ALLOWED_SUBJECTS)
-  ├─ Rate limit: per-subject token bucket
+  ├─ Limits: per-subject rate bucket + Whisper quota
   ├─ Single-flight: one yt-dlp call per video per in-flight window
   ├─ LRU cache: flat files, byte-cap, whole-unit eviction
   ▼
