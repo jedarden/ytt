@@ -36,6 +36,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's slot), surfaced in the usual structured error shape instead of an
   escaping exception.
 
+## [0.2.16] — 2026-09-17
+
+### Fixed
+
+- **Registry-note correction, and the README-advertised image actually
+  published** (follow-up on the 0.2.15 reconciliation, bead
+  `ytt-8efb9b9d`). That entry claimed `ronaldraygun/ytt:0.2.14` was never
+  built and that 0.2.15 was the first ronaldraygun/ytt tag CI builds and
+  pushes — both wrong: Docker Hub shows `0.2.13` published 2026-09-16
+  14:19 UTC and `0.2.14` at 18:26 UTC (the 0.2.14 push passed the
+  `resolve-version` VERSION-bump gate and CI built it minutes later).
+  The gate does, by design, fail any later master push that doesn't bump
+  VERSION — which left 0.2.15 itself without an image: master moved past
+  its bump commit, and the kaniko git context resolves only
+  `refs/heads/<branch>`, so the tagged commit is not buildable that way
+  either. 0.2.15 therefore stands as a metadata-only release (its tag and
+  CHANGELOG entry are accurate; it simply has no image), and this bump
+  exists so CI builds the image the README advertises. No code changes.
+
 ## [0.2.15] — 2026-09-16
 
 ### Added
@@ -74,10 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had no definition, `[Unreleased]` still compared against `v0.2.13`);
   and `uv.lock` was left at 0.2.13 by the 0.2.14 commit (which bumped
   `pyproject.toml` without a lock regen — `uv lock --check` failed on a
-  clean checkout). Also note `ronaldraygun/ytt:0.2.14` was never built:
-  the 0.2.14 push produced no CI workflow run and every subsequent master
-  push failed the `resolve-version` VERSION-bump gate, so 0.2.15 is the
-  first ronaldraygun/ytt tag CI actually builds and pushes.
+  clean checkout). (This entry's registry note was corrected in 0.2.16:
+  `ronaldraygun/ytt:0.2.13` and `:0.2.14` were in fact published on
+  2026-09-16, and 0.2.15 itself shipped without an image — see the 0.2.16
+  entry.)
 - The 0.2.14 entry's Docker Hub wording ("the Docker Hub repo must stay
   public") wrongly implied the visibility flip had already happened; it is
   a pending operator step (anonymous pulls 401 until flipped — the same
@@ -435,7 +454,8 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.15...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.16...HEAD
+[0.2.16]: https://github.com/jedarden/ytt/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/jedarden/ytt/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/jedarden/ytt/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/jedarden/ytt/compare/v0.2.12...v0.2.13
