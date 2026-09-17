@@ -11,7 +11,9 @@ Handles the caption-less code path:
 4. **run_whisper_job** — the background asyncio Task that drives the full
    audio lifecycle: download bestaudio → scratch → POST /v1/audio/transcriptions
    → write ``<id>.whisper.*`` cache → delete audio (context-manager, success or
-   failure, Invariant 4).
+   failure, Invariant 4). The yt-dlp audio download goes direct first and
+   retries once through ``YTT_PROXY_URL`` on ``ip_blocked`` — the same
+   semantics as caption fetches (see ``docs/notes/proxy-egress.md``).
 
 Plan references: §Whisper fallback, §Concurrency (Invariant 2), §Caching
 (Invariant 4: audio always deleted), Invariant 7 (ETA-timeout safety, validated
@@ -33,8 +35,14 @@ import yt_dlp.utils
 
 from ytt import errors
 from ytt.errors import YttError
-from ytt.fetch import YDL_EXTRACTOR_ARGS, YDL_NO_COOKIES, classify_ydl_error
+from ytt.fetch import (
+    YDL_EXTRACTOR_ARGS,
+    YDL_NO_COOKIES,
+    classify_ydl_error,
+    run_with_proxy_retry,
+)
 from ytt.models import WhisperJob
+from ytt.observability import redact_credentials
 
 if TYPE_CHECKING:
     from ytt.cache import TranscriptCache
@@ -282,11 +290,13 @@ def _do_download_audio(
     except YttError:
         raise
     except yt_dlp.utils.DownloadError as exc:
+        # yt-dlp error strings can quote the configured proxy URL verbatim
+        # (creds included) — sanitize before they become a relayable message.
         code = classify_ydl_error(str(exc))
-        raise YttError(code, str(exc)) from exc
+        raise YttError(code, redact_credentials(str(exc))) from exc
     except yt_dlp.utils.ExtractorError as exc:
         code = classify_ydl_error(str(exc))
-        raise YttError(code, str(exc)) from exc
+        raise YttError(code, redact_credentials(str(exc))) from exc
 
     # Find the downloaded file (yt-dlp fills in the real extension)
     for candidate in sorted(scratch.glob(f"{video_id}.*")):
@@ -294,11 +304,6 @@ def _do_download_audio(
             return str(candidate)
 
     raise YttError(errors.EMPTY_BODY, "Audio download produced no output file.")
-
-
-# ---------------------------------------------------------------------------
-# WhisperJobRegistry (plan §Whisper fallback — Registry + FSM)
-# ---------------------------------------------------------------------------
 
 
 class WhisperJobRegistry:
@@ -563,24 +568,24 @@ async def run_whisper_job(
     await registry.update_status(video_id, "running")
 
     try:
-        # 2. Download audio (blocking → thread, with timeout)
-        try:
-            audio_path = await asyncio.wait_for(
-                asyncio.to_thread(
-                    _do_download_audio,
-                    video_id,
-                    settings.scratch_dir,
-                    settings.max_audio_bytes,
-                    settings.proxy_url,
-                ),
-                timeout=float(settings.whisper_timeout_sec),
-            )
-        except asyncio.TimeoutError:
-            raise YttError(
-                errors.ASR_FAILED,
-                f"Audio download timed out after {settings.whisper_timeout_sec}s.",
-            )
-        # YttError propagates as-is
+        # 2. Download audio (blocking → thread) — direct-first with the same
+        #    one-shot ip_blocked proxy retry as caption fetches (plan
+        #    §ip_blocked: "the proxy retry applies equally to caption fetches
+        #    and Whisper audio downloads"); timeout + retry semantics live in
+        #    fetch.run_with_proxy_retry.
+        audio_path = await run_with_proxy_retry(
+            lambda proxy: asyncio.to_thread(
+                _do_download_audio,
+                video_id,
+                settings.scratch_dir,
+                settings.max_audio_bytes,
+                proxy,
+            ),
+            proxy_url=settings.proxy_url,
+            timeout_sec=float(settings.whisper_timeout_sec),
+            timeout_code=errors.ASR_FAILED,
+            what="Audio download",
+        )
 
         # 3. POST audio to Whisper service
         own_client = http_client is None

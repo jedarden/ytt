@@ -27,6 +27,11 @@ a renderer:
     Blocked URL values: any field whose string value contains ``@`` (credential-
         bearing URL — Webshare etc.) is sanitized to ``<redacted-url>``.
 
+Free-text error messages are NOT structured fields and bypass this processor —
+upstream exception strings that may quote the credentialed proxy URL must be
+passed through :func:`redact_credentials` before they become a
+``YttError`` message or a log argument.
+
 Usage
 -----
 Import this module once at startup; call ``configure_logging()`` before any log
@@ -143,6 +148,43 @@ _REDACTED_FIELD_NAMES: frozenset[str] = frozenset(
 
 #: Regex that matches credential-bearing URLs (contains ``user:pass@``).
 _CREDENTIAL_URL_RE = re.compile(r"https?://[^@\s]+@")
+
+#: A credential-bearing URL embedded in free text: ``scheme://user[:pass]@host…``.
+#: The userinfo run may not contain whitespace, ``/`` or ``@``; the host run
+#: stops at whitespace or a common closer so surrounding punctuation in a
+#: sentence survives. Matches any scheme — yt-dlp error strings quote the
+#: configured proxy verbatim, and that proxy may be socks-shaped in future.
+_CRED_URL_IN_TEXT_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)"
+    r"(?P<userinfo>[^\s/@]+)"
+    r"@"
+    r"(?P<hostport>[^\s,;)\]]*)"
+)
+
+
+def redact_credentials(text: str) -> str:
+    """Strip ``user:password@`` userinfo from any URL embedded in free text.
+
+    yt-dlp exception strings (and httpx's) can quote the configured proxy URL
+    verbatim — e.g. ``Unable to communicate with proxy
+    http://user:pass@proxy.example.com:3128``. Those strings become
+    :class:`~ytt.errors.YttError` messages, which are verbatim-relayable to
+    MCP clients *and* logged; plan §Observability requires that Webshare
+    credentials never reach logs, error messages, or the ``ip_blocked`` retry
+    note. The structlog redaction filter only sees structured *fields*, so
+    every code path that turns an upstream exception into a message string
+    must run it through this helper first (``ytt.fetch``, ``ytt.whisper``,
+    ``ytt.canary``, ``ytt.server``).
+
+    ``"dial http://alice:secret@proxy.example.com:3128 failed"`` →
+    ``"dial http://proxy.example.com:3128 failed"``. Text without a
+    credential-bearing URL is returned unchanged.
+    """
+    if "@" not in text:
+        return text
+    return _CRED_URL_IN_TEXT_RE.sub(
+        lambda m: f"{m.group('scheme')}{m.group('hostport')}", text
+    )
 
 
 def _sanitize_url(value: str) -> str:

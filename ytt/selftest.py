@@ -135,12 +135,21 @@ def probe_egress(proxy_url: str | None = None) -> EgressReport:
     This function is **synchronous** (blocking) so it can run at startup before
     the event loop starts, or be called via ``asyncio.to_thread`` from async
     contexts.  Raises ``httpx.HTTPError`` on network failure (integration only).
+
+    When *proxy_url* is set the probe dials **through the proxy**, so the
+    classified IP is the proxy's egress — that is the point: it verifies the
+    effective fallback path (plan §ip_blocked), not the native one
+    (``ytt selftest`` probes direct for that).
     """
     kwargs: dict[str, Any] = {"timeout": _PROBE_TIMEOUT_SEC}
     via_proxy = False
 
     if proxy_url:
-        kwargs["proxies"] = proxy_url
+        # httpx >= 0.28: the kwarg is `proxy` (singular). The historical
+        # `proxies=` mapping was removed in 0.28 — passing it raises TypeError,
+        # which silently degraded every proxy-configured egress report
+        # (startup probe, /admin/egress, canary) into "probe failed".
+        kwargs["proxy"] = proxy_url
         via_proxy = True
 
     with httpx.Client(**kwargs) as client:

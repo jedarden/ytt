@@ -233,7 +233,7 @@ class TestCli:
         with patch("ytt.canary.run_once") as run_once_mock:
             run_once_mock.return_value = {"verdict": "ok", "video_id": "x"}
             cli_main(["canary", "--once", "--video-id", "x"])
-        run_once_mock.assert_called_once_with(video_id="x")
+        run_once_mock.assert_called_once_with(video_id="x", via_proxy=False)
 
     def test_canary_without_once_uses_loop_main(self):
         with patch("ytt.canary.main", return_value=0) as loop_main:

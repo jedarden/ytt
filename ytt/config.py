@@ -7,6 +7,10 @@ parsing it enforces:
 - **Invariant 7** (ETA-timeout safety): ``MAX_ASR_DURATION_SEC × RT_FACTOR <
   WHISPER_TIMEOUT_SEC`` — validated at construction (raises -> server exits 1).
 - ``YTT_PATH_PREFIX`` must end with ``/`` (raises if missing).
+- ``YTT_PROXY_URL`` must be a well-formed http(s) proxy URL or unset; an
+  empty string is an error, not a silent unset (fail-closed — a manifest
+  interpolating a missing secret must not quietly disable the proxy). See
+  :func:`Settings._proxy_url_valid` and ``docs/notes/proxy-egress.md``.
 - Per-subject limits (``RATE_LIMIT_PER_MIN``, ``RATE_LIMIT_BURST``,
   ``WHISPER_JOBS_PER_HOUR``) must be >= 0: 0 is meaningful (deny-all —
   fail-closed), negatives are config errors. Unset ``RATE_LIMIT_BURST``
@@ -34,6 +38,7 @@ import os
 import re
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import BeforeValidator, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -82,6 +87,14 @@ def parse_size(value: object) -> int:
 
 
 Bytes = Annotated[int, BeforeValidator(parse_size)]
+
+#: Schemes accepted for ``YTT_PROXY_URL``. Only ``http``/``https``: yt-dlp would
+#: also dial ``socks4/4a/5/5h`` (it bundles a native SOCKS client), but the
+#: httpx-based egress probe (:func:`ytt.selftest.probe_egress` — startup,
+#: ``/admin/egress``, canary) has no SOCKS adapter in this image, so a SOCKS
+#: URL would half-work and half-break. Fail fast at startup instead; most
+#: residential proxy providers (Webshare et al.) serve plain HTTP endpoints.
+_ALLOWED_PROXY_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
 
 def join_path(prefix: str, route: str) -> str:
@@ -200,6 +213,57 @@ class Settings(BaseSettings):
         # The audience/resource/issuer must be byte-identical with NO trailing
         # slash (RFC 8707 confused-deputy guard). Normalize defensively.
         return v.rstrip("/")
+
+    @field_validator("proxy_url")
+    @classmethod
+    def _proxy_url_valid(cls, v: str | None) -> str | None:
+        """``YTT_PROXY_URL`` must be a well-formed http(s) proxy URL — or unset.
+
+        Fail fast at startup: a typo'd proxy URL would otherwise sit unexercised
+        until YouTube blocks the direct path, and only then fail every
+        ``ip_blocked`` retry (plan §ip_blocked) with an opaque dial error.
+
+        - unset (``None``) is valid — direct egress, the default;
+        - empty/whitespace is an error, not a silent unset — an env line like
+          ``YTT_PROXY_URL: "${PROXY_URL}"`` with the secret missing must fail
+          startup, not quietly disable the proxy (fail-closed, same posture as
+          the limit validators above);
+        - whitespace anywhere is rejected (copy-paste line wraps are the
+          classic way a proxy URL gets split in a manifest);
+        - scheme must be http/https (see ``_ALLOWED_PROXY_SCHEMES``) and a
+          hostname must be present. Credentials (``user:pass@``) are optional
+          and never validated — or logged (observability redacts them).
+        """
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError(
+                "YTT_PROXY_URL is empty — unset the variable entirely for "
+                "direct egress; if the proxy is wanted, the URL must be "
+                "non-empty (e.g. http://user:pass@proxy.example.com:3128)"
+            )
+        if re.search(r"\s", stripped):
+            raise ValueError(
+                f"YTT_PROXY_URL contains whitespace: {stripped!r} — a proxy "
+                "URL is a single token (scheme://[user:pass@]host:port); "
+                "check for a copy-paste line wrap"
+            )
+        parsed = urlparse(stripped)
+        if parsed.scheme.lower() not in _ALLOWED_PROXY_SCHEMES:
+            raise ValueError(
+                f"YTT_PROXY_URL must use http:// or https:// — got scheme "
+                f"{parsed.scheme!r} in {stripped!r}. SOCKS proxies are not "
+                "supported (the httpx-based egress probe has no SOCKS "
+                "adapter); most residential proxy providers serve a plain "
+                "HTTP endpoint."
+            )
+        if not parsed.hostname:
+            raise ValueError(
+                f"YTT_PROXY_URL has no hostname: {stripped!r} "
+                "(expected e.g. http://user:pass@proxy.example.com:3128)"
+            )
+        return stripped
 
     @model_validator(mode="after")
     def _resolve_rate_limit_burst(self) -> "Settings":

@@ -698,8 +698,15 @@ def _build_app():
         try:
             report = await asyncio.to_thread(probe_egress, settings.proxy_url)
         except Exception as exc:
+            # httpx failure strings can quote the (credentialed) proxy URL —
+            # this body is logged and relayed, so sanitize it first.
+            from ytt.observability import redact_credentials
+
             return JSONResponse(
-                {"error": f"Egress probe failed: {exc}", "error_code": "probe_error"},
+                {
+                    "error": f"Egress probe failed: {redact_credentials(str(exc))}",
+                    "error_code": "probe_error",
+                },
                 status_code=502,
             )
 

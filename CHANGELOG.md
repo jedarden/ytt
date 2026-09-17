@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`YTT_PROXY_URL` end-to-end** (bead `ytt-8c702583`). The proxy contract is
+  now specified, enforced, and tested — `docs/notes/proxy-egress.md` is the
+  single spec. `Settings` validates the URL at startup (http/https only — no
+  SOCKS, the httpx egress probe has no adapter; empty is a fail-closed error,
+  not a silent unset; whitespace rejected). Caption extraction and the Whisper
+  audio download share `ytt.fetch.run_with_proxy_retry`: direct first, exactly
+  one proxied retry on `ip_blocked`, with defined failure behavior (retry
+  timeout → `timeout_code` "(proxy retry also timed out)"; retry failure → the
+  retry's `error_code` "(proxy retry also failed)"). The ASR POST and OAuth
+  traffic are never proxied. Proxy credentials never reach logs or relayed
+  errors: new `ytt.observability.redact_credentials()` strips `user:pass@`
+  from free-text exception strings at every yt-dlp/httpx boundary (fetch,
+  whisper, canary, `/admin/egress` 502). The egress probe now passes the
+  httpx >= 0.28 singular `proxy=` kwarg (the removed `proxies=` silently
+  degraded every proxy-configured egress report to "probe failed"). The canary
+  gains `--via-proxy` (`ytt canary --once --via-proxy`) — the in-cluster
+  end-to-end check that the proxy actually carries YouTube traffic. Mocked
+  coverage in `tests/unit/test_proxy.py`; in-cluster proof in
+  `tests/integration/test_proxy_live.py`.
+
 - **yt-dlp player-client / PoToken contract tests + notes doc** (bead
   `ytt-70690b3d`). ytt avoids YouTube's PoToken (BotGuard) requirements
   purely through player-client choice (`YDL_EXTRACTOR_ARGS` pins

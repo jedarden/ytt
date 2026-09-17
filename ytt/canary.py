@@ -37,6 +37,7 @@ from typing import Any
 from prometheus_client import REGISTRY, start_http_server
 
 from ytt.observability import (
+    redact_credentials,
     ytt_canary_failures_total,
     ytt_canary_last_success_timestamp_seconds,
 )
@@ -59,21 +60,28 @@ CANARY_VIDEO_IDS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def probe_once_detail(video_id: str) -> dict:
+def probe_once_detail(video_id: str, proxy: str | None = None) -> dict:
     """Run a single caption probe against ``video_id`` and classify the outcome.
 
     Returns a JSON-serializable dict::
 
         {"ok": bool, "outcome": str, "langs": list[str],
-         "duration_sec": float, "error": str | None}
+         "duration_sec": float, "via_proxy": bool, "error": str | None}
 
     ``outcome`` is ``"ok"`` or a stable :mod:`ytt.errors` error_code —
     ``ip_blocked`` when YouTube blocks the fetch, ``empty_body`` for an
     unrecognized failure (plan §Error taxonomy).  Synchronous; network-bound.
 
+    ``via_proxy`` reports whether *this probe* dialed through a proxy —
+    ``True`` only when *proxy* is passed (``ytt canary --once --via-proxy``).
+    The default (direct) matches how the caption path actually reaches
+    YouTube: direct first, proxy only on an ``ip_blocked`` retry.
+
     This is the fetch half of the one-shot canary (``ytt canary --once``) —
     the lightweight vehicle for proving residential egress from wherever the
     command runs (in-cluster one-shot, ``kubectl exec``, or an Argo step).
+    With ``--via-proxy`` it becomes the end-to-end check that the configured
+    proxy actually carries YouTube traffic (``docs/notes/proxy-egress.md``).
     """
     started = time.monotonic()
     try:
@@ -93,6 +101,8 @@ def probe_once_detail(video_id: str) -> dict:
                 "no_warnings": True,
             }
         )
+        if proxy:
+            opts["proxy"] = proxy
 
         url = f"https://www.youtube.com/watch?v={video_id}"
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -101,13 +111,19 @@ def probe_once_detail(video_id: str) -> dict:
     except Exception as exc:
         duration = round(time.monotonic() - started, 2)
         outcome = classify_ydl_error(str(exc))
-        log.error("Canary probe error for %s: %s (outcome=%s)", video_id, exc, outcome)
+        # The error string may quote the (credentialed) proxy URL — sanitize
+        # before it lands in the printed/JSON report or the logs.
+        error_text = redact_credentials(str(exc))
+        log.error(
+            "Canary probe error for %s: %s (outcome=%s)", video_id, error_text, outcome
+        )
         return {
             "ok": False,
             "outcome": outcome,
             "langs": [],
             "duration_sec": duration,
-            "error": str(exc),
+            "via_proxy": proxy is not None,
+            "error": error_text,
         }
 
     duration = round(time.monotonic() - started, 2)
@@ -120,6 +136,7 @@ def probe_once_detail(video_id: str) -> dict:
             "outcome": "ok",
             "langs": langs,
             "duration_sec": duration,
+            "via_proxy": proxy is not None,
             "error": None,
         }
 
@@ -129,6 +146,7 @@ def probe_once_detail(video_id: str) -> dict:
         "outcome": EMPTY_BODY,
         "langs": [],
         "duration_sec": duration,
+        "via_proxy": proxy is not None,
         "error": "known-good video returned no caption tracks",
     }
 
@@ -186,7 +204,7 @@ async def run_probe_loop(interval_sec: int = 600) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_once(video_id: str | None = None) -> dict:
+def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
     """Run the canary once: egress report + one caption fetch.
 
     The lightweight Proof-Obligation canary (plan §Proof Obligations —
@@ -196,14 +214,22 @@ def run_once(video_id: str | None = None) -> dict:
     for one-shot use inside ardenone-cluster (``kubectl exec``, a probe pod,
     or an Argo step) and by self-hosters verifying their egress.
 
+    ``via_proxy=True`` (``ytt canary --once --via-proxy``) runs the caption
+    probe **through** ``YTT_PROXY_URL`` — the end-to-end check that the
+    configured proxy actually carries YouTube traffic.  The default probes
+    direct, matching the caption path's direct-first behavior; the egress
+    classification half always dials through the proxy when one is set
+    (it classifies the proxy's egress, the effective fallback path).
+
     Returns a JSON-serializable report with ``verdict`` set to the caption
     fetch ``outcome`` (``"ok"`` or a stable error_code) and ``ran_at`` stamped
     UTC — the report is meant to be pasted somewhere durable as evidence.
-    Contains no secrets.
+    Contains no secrets (error strings are credential-redacted).
     """
     from datetime import datetime, timezone
 
     from ytt.config import get_settings
+    from ytt.observability import redact_credentials
     from ytt.selftest import probe_egress
 
     settings = get_settings()
@@ -221,9 +247,15 @@ def run_once(video_id: str | None = None) -> dict:
             "is_residential": report_egress.is_residential,
         }
     except Exception as exc:
-        egress = {"error": str(exc), "via_proxy": settings.proxy_url is not None}
+        # httpx failure strings can quote the proxy URL (creds included).
+        egress = {
+            "error": redact_credentials(str(exc)),
+            "via_proxy": settings.proxy_url is not None,
+        }
 
-    fetch_report = probe_once_detail(vid)
+    fetch_report = probe_once_detail(
+        vid, proxy=settings.proxy_url if via_proxy else None
+    )
 
     return {
         "mode": "once",
@@ -269,7 +301,9 @@ if __name__ == "__main__":
         _vid: str | None = None
         if "--video-id" in _sys.argv:
             _vid = _sys.argv[_sys.argv.index("--video-id") + 1]
-        _report = run_once(video_id=_vid)
+        _report = run_once(
+            video_id=_vid, via_proxy="--via-proxy" in _sys.argv
+        )
         print(_json.dumps(_report, indent=2))
         _sys.exit(0 if _report["verdict"] == "ok" else 1)
 

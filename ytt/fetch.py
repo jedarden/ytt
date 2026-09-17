@@ -15,6 +15,31 @@ In-process via the yt-dlp Python API (Unlicense).  Handles:
 - Async-safe: the blocking ``extract_info`` call runs in a thread via
   ``asyncio.to_thread``, wrapped in ``asyncio.wait_for`` with the configured
   timeout (plan §Concurrency, ``YTT_EXTRACT_TIMEOUT_SEC``).
+
+Proxy usage (``YTT_PROXY_URL`` — the contract, spec'd in
+``docs/notes/proxy-egress.md``)
+--------------------------------------------------------------------------
+
+Every YouTube-bound yt-dlp operation — this module's caption extraction
+(extract_info + json3 urlopen) and :mod:`ytt.whisper`'s audio download —
+goes **direct first** and retries **once through the proxy** only after an
+``ip_blocked`` classification (plan §ip_blocked: "the proxy retry applies
+equally to caption fetches and Whisper audio downloads"). :func:`run_with_proxy_retry`
+is the single implementation of those semantics; both paths call it. The
+proxy is never used for the Whisper ASR POST or OAuth traffic. The ipinfo
+egress probe (``ytt.selftest.probe_egress``) dials through the proxy when set
+— deliberately: it classifies the proxy's own egress.
+
+Failure behavior (defined, not incidental):
+
+- direct attempt times out → ``timeout_code`` with a plain timeout message;
+- direct attempt is ``ip_blocked`` + proxy set → exactly one proxied retry;
+- proxied retry times out → ``timeout_code`` with "(proxy retry also timed
+  out)";
+- proxied retry fails otherwise → the retry's ``error_code``, message
+  suffixed "(proxy retry also failed)";
+- ``ip_blocked`` with no proxy configured, or any non-``ip_blocked`` error →
+  raised unchanged, no retry.
 """
 
 from __future__ import annotations
@@ -22,7 +47,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 import yt_dlp
 import yt_dlp.utils
@@ -30,10 +55,13 @@ import yt_dlp.utils
 from ytt import errors
 from ytt.errors import YttError
 from ytt.models import Segment
+from ytt.observability import redact_credentials
 from ytt.parse_json3 import parse_json3
 
 if TYPE_CHECKING:
     from ytt.config import Settings
+
+T = TypeVar("T")
 
 
 # ---------------------------------------------------------------------------
@@ -323,11 +351,13 @@ def _do_fetch(
     except YttError:
         raise
     except yt_dlp.utils.DownloadError as exc:
+        # yt-dlp error strings can quote the configured proxy URL verbatim
+        # (creds included) — sanitize before they become a relayable message.
         code = classify_ydl_error(str(exc))
-        raise YttError(code, str(exc)) from exc
+        raise YttError(code, redact_credentials(str(exc))) from exc
     except yt_dlp.utils.ExtractorError as exc:
         code = classify_ydl_error(str(exc))
-        raise YttError(code, str(exc)) from exc
+        raise YttError(code, redact_credentials(str(exc))) from exc
 
     raw: dict = json.loads(raw_bytes.decode("utf-8"))
     events: list[dict] = raw.get("events", [])
@@ -360,6 +390,67 @@ def _do_fetch(
 # Async public API
 # ---------------------------------------------------------------------------
 
+async def run_with_proxy_retry(
+    op: Callable[[str | None], Awaitable[T]],
+    *,
+    proxy_url: str | None,
+    timeout_sec: float,
+    timeout_code: str,
+    what: str,
+    timeout_detail: str = "",
+) -> T:
+    """Run *op* against YouTube direct-first; retry once via the proxy on ``ip_blocked``.
+
+    The single implementation of the plan §ip_blocked proxy semantics, shared
+    by the caption path (:func:`fetch_transcript`) and the Whisper audio
+    download (:mod:`ytt.whisper`) — plan: "the proxy retry applies equally to
+    caption fetches and Whisper audio downloads".
+
+    Args:
+        op: ``async def op(proxy)`` — one attempt, ``None`` for direct or the
+            proxy URL to dial through. Each attempt is bounded by
+            ``asyncio.wait_for(..., timeout_sec)``.
+        proxy_url: the configured ``YTT_PROXY_URL`` (``None`` = never retry).
+        timeout_code: ``error_code`` for a timed-out attempt (fetch →
+            ``rate_limited``, audio download → ``asr_failed``).
+        what: noun for the timeout message ("Extraction", "Audio download").
+        timeout_detail: extra clause in the *direct*-attempt timeout message.
+
+    Failure behavior (see module docstring): direct timeout → ``timeout_code``;
+    direct ``ip_blocked`` + proxy set → one proxied retry; retry timeout →
+    ``timeout_code`` + "(proxy retry also timed out)"; retry failure → the
+    retry's ``error_code`` + "(proxy retry also failed)"; anything else →
+    raised unchanged.
+    """
+    async def attempt(proxy: str | None) -> T:
+        return await asyncio.wait_for(op(proxy), timeout=float(timeout_sec))
+
+    try:
+        return await attempt(None)
+    except asyncio.TimeoutError:
+        raise YttError(
+            timeout_code,
+            f"{what} timed out after {timeout_sec}s{timeout_detail}.",
+        ) from None
+    except YttError as exc:
+        if exc.error_code != errors.IP_BLOCKED or not proxy_url:
+            raise
+        # Retry once through the configured proxy (plan §ip_blocked proxy retry)
+        try:
+            return await attempt(proxy_url)
+        except asyncio.TimeoutError:
+            raise YttError(
+                timeout_code,
+                f"{what} timed out after {timeout_sec}s "
+                "(proxy retry also timed out).",
+            ) from None
+        except YttError as retry_exc:
+            raise YttError(
+                retry_exc.error_code,
+                retry_exc.message + " (proxy retry also failed)",
+            ) from retry_exc
+
+
 async def fetch_transcript(
     video_id: str,
     lang: str | None,
@@ -367,36 +458,15 @@ async def fetch_transcript(
 ) -> FetchResult:
     """Async caption fetch with timeout + ip_blocked proxy retry.
 
-    Wraps :func:`_do_fetch` in ``asyncio.to_thread`` + ``asyncio.wait_for``
-    (timeout = ``YTT_EXTRACT_TIMEOUT_SEC``).  On ``ip_blocked`` and
-    ``YTT_PROXY_URL`` set, retries once with the proxy (plan §ip_blocked).
+    Wraps :func:`_do_fetch` in ``asyncio.to_thread``; timeout and the
+    one-shot proxy retry are :func:`run_with_proxy_retry`'s shared semantics
+    (timeout = ``YTT_EXTRACT_TIMEOUT_SEC`` per attempt).
     """
-    async def _run(proxy: str | None) -> FetchResult:
-        return await asyncio.wait_for(
-            asyncio.to_thread(_do_fetch, video_id, lang, settings, proxy),
-            timeout=float(settings.extract_timeout_sec),
-        )
-
-    try:
-        return await _run(proxy=None)
-    except asyncio.TimeoutError:
-        raise YttError(
-            errors.RATE_LIMITED,
-            f"Extraction timed out after {settings.extract_timeout_sec}s "
-            "(possible silent hang; retrying may help).",
-        )
-    except YttError as exc:
-        if exc.error_code == errors.IP_BLOCKED and settings.proxy_url:
-            # Retry once through the configured proxy (plan §ip_blocked proxy retry)
-            try:
-                return await _run(proxy=settings.proxy_url)
-            except asyncio.TimeoutError:
-                raise YttError(
-                    errors.RATE_LIMITED,
-                    f"Extraction timed out after {settings.extract_timeout_sec}s "
-                    "(proxy retry also timed out).",
-                )
-            except YttError as retry_exc:
-                new_msg = retry_exc.message + " (proxy retry also failed)"
-                raise YttError(retry_exc.error_code, new_msg) from retry_exc
-        raise
+    return await run_with_proxy_retry(
+        lambda proxy: asyncio.to_thread(_do_fetch, video_id, lang, settings, proxy),
+        proxy_url=settings.proxy_url,
+        timeout_sec=float(settings.extract_timeout_sec),
+        timeout_code=errors.RATE_LIMITED,
+        what="Extraction",
+        timeout_detail=" (possible silent hang; retrying may help)",
+    )

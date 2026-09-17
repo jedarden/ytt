@@ -64,6 +64,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="override the canary video ID (one-shot mode only)",
     )
+    p_can.add_argument(
+        "--via-proxy",
+        action="store_true",
+        help=(
+            "one-shot mode only: dial the caption probe THROUGH YTT_PROXY_URL "
+            "— the end-to-end check that the configured proxy actually "
+            "carries YouTube traffic (docs/notes/proxy-egress.md)"
+        ),
+    )
 
     return parser
 
@@ -110,8 +119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "canary":
         if args.video_id and not args.once:
             parser.error("--video-id is only valid with --once")
+        if args.via_proxy and not args.once:
+            parser.error("--via-proxy is only valid with --once")
         if args.once:
-            return _run_canary_once(video_id=args.video_id)
+            return _run_canary_once(video_id=args.video_id, via_proxy=args.via_proxy)
         from ytt.canary import main as canary_main
 
         return canary_main()
@@ -120,13 +131,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _run_canary_once(video_id: str | None) -> int:
+def _run_canary_once(video_id: str | None, via_proxy: bool = False) -> int:
     """Run the one-shot canary and print its JSON report; exit 0 iff verdict is ok."""
     import json
 
     from ytt.canary import run_once
 
-    report = run_once(video_id=video_id)
+    report = run_once(video_id=video_id, via_proxy=via_proxy)
     print(json.dumps(report, indent=2))
     if report["verdict"] != "ok":
         print(
