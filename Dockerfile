@@ -34,6 +34,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project
 COPY ytt ./ytt
 COPY README.md ./
+# docs/ is required by the test stage: tests/unit/test_docs_env_coverage.py
+# reads docs/usage/configuration.md at collection time, and a missing file
+# aborts collection (pytest exit 2 -> kaniko exit 2, build dead).
+COPY docs ./docs
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen
 
