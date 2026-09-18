@@ -38,6 +38,10 @@ COPY README.md ./
 # reads docs/usage/configuration.md at collection time, and a missing file
 # aborts collection (pytest exit 2 -> kaniko exit 2, build dead).
 COPY docs ./docs
+# deploy/ likewise: tests/unit/test_single_replica.py scans deploy/k8s/ for
+# Deployment manifests at test time (replicas:1 + Recreate + PVC-mount pins)
+# and fails when the directory is absent from the image context.
+COPY deploy ./deploy
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen
 

@@ -448,7 +448,12 @@ class TestWhisperAudioPathProxiesTheRetry:
     async def test_retry_timeout_reports_asr_failed(self, tmp_path):
         """Proxied retry timing out → ASR_FAILED '(proxy retry also timed out)'."""
         settings = self._whisper_settings(str(tmp_path / "scratch"), _PROXY)
-        settings.whisper_timeout_sec = 0.05  # real, short wait_for timeout
+        # Real, short wait_for timeout. 0.5s (not 0.05s): the direct attempt
+        # must raise its ip_blocked error well inside the budget even on a
+        # CPU-throttled CI pod, where first-call to_thread executor spin-up
+        # alone blew a 50ms budget (in-container flake, 2026-09-18); the
+        # proxied retry sleeps 10x the budget so it still reliably times out.
+        settings.whisper_timeout_sec = 0.5
         scratch = settings.scratch_dir
         import os
         from pathlib import Path
@@ -457,7 +462,7 @@ class TestWhisperAudioPathProxiesTheRetry:
         (Path(scratch) / f"{self.VIDEO_ID}.mp4").write_bytes(b"fake audio")
 
         # Attempt 1 (direct) fails the bot check; the proxied retry's
-        # extract_info hangs past the 0.05s wait_for timeout.
+        # extract_info hangs past the 0.5s wait_for timeout.
         def slow_factory(opts):
             ctx = MagicMock()
             ydl = MagicMock()
@@ -467,7 +472,7 @@ class TestWhisperAudioPathProxiesTheRetry:
                     raise yt_dlp.utils.DownloadError(_BOT_CHECK)
                 import time as _time
 
-                _time.sleep(0.5)
+                _time.sleep(5)
                 return {"duration": 50}
 
             ydl.extract_info.side_effect = extract
