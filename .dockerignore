@@ -1,3 +1,9 @@
+# Build-context exclusions for the kaniko image build (Dockerfile).
+#
+# Do NOT list `deploy` here: the Dockerfile test stage runs
+# tests/unit/test_single_replica.py, which scans deploy/k8s/ for Deployment
+# manifests and fails the build when the tree is absent from the context
+# (0.2.18-0.2.19 never published for exactly that reason).
 .git
 .gitignore
 .venv
@@ -8,4 +14,3 @@
 .pytest_cache
 .ruff_cache
 *.egg-info
-deploy
