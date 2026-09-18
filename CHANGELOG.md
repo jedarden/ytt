@@ -113,6 +113,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's slot), surfaced in the usual structured error shape instead of an
   escaping exception.
 
+## [0.2.17] — 2026-09-18
+
+### Added
+
+- **First published image containing the egress canary** (bead
+  `ytt-275031ef`). The canary command (`ytt canary --once`, commit
+  `5747658`, with `--via-proxy` since the `YTT_PROXY_URL` work) has been in
+  the tree since before 0.2.16, yet no pullable `ronaldraygun/ytt` tag
+  newer than 0.2.14 exists: the `resolve-version` CI gate requires the
+  master *tip* commit to bump VERSION, every push after 0.2.16's bump
+  (docs and beads commits) failed that gate, and the kaniko git context
+  resolves only `refs/heads/master` — so the bump commit itself became
+  unbuildable the moment master moved on (the same failure 0.2.16's own
+  section records for 0.2.15). This release commit is both the VERSION
+  bump and the tip CI builds, so `ronaldraygun/ytt:0.2.17` carries the
+  canary together with the current master tree: the bounded
+  download/Whisper guardrails, the `YTT_PROXY_URL` contract, the yt-dlp
+  player-client contract tests, and enforced
+  `YTT_MAX_CONCURRENT_WHISPER`.
+
 ## [0.2.16] — 2026-09-17
 
 ### Fixed
@@ -540,7 +560,8 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.16...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.17...HEAD
+[0.2.17]: https://github.com/jedarden/ytt/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/jedarden/ytt/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/jedarden/ytt/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/jedarden/ytt/compare/v0.2.13...v0.2.14
