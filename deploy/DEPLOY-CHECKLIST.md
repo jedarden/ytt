@@ -5,6 +5,10 @@ cannot be done from inside a manifest.  The release path is: **bump `VERSION`
 → CI builds + pushes the image → bump the pinned tag in `declarative-config`
 → ArgoCD syncs.**
 
+> This checklist covers *building and pinning* a release.  What happens in the
+> cluster during the swap, post-deploy validation, and rollback is the
+> operator runbook: [RUNBOOK.md](RUNBOOK.md).
+
 > This checklist was rewritten 2026-09-16 to match the applied state.  The
 > pre-0.1.0 first-deploy procedure (GHCR publishing, Google-federated OAuth,
 > `ytt-test` canary harness) is history — see git log if you need it.

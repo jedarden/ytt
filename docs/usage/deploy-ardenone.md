@@ -135,6 +135,10 @@ Watch builds: https://argo-ci.ardenone.com
 
 ## Rollback
 
+The full upgrade/rollback workflow — Recreate-strategy downtime, what state
+survives a swap, post-deploy validation, and the kubectl do-not list — is
+[deploy/RUNBOOK.md](../../deploy/RUNBOOK.md).  The short form:
+
 ```bash
 cd ~/jedarden-declarative-config
 git revert HEAD    # reverts the tag-bump commit
