@@ -127,6 +127,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejection) and `tests/unit/test_auth.py` (the provider hands the
   configured issuer/discovery URL through).
 
+### Changed
+
+- **`YTT_PUBLIC_URL` is hard-required — the baked-in fallback is gone** (bead
+  `ytt-a1fbc575`). README.md and `docs/usage/configuration.md` called the
+  variable *required*, but the code silently defaulted it to the reference
+  deployment (`https://mcp.ardenone.com/ytt`) — so a self-hoster who missed
+  it got an OAuth audience/resource/issuer and every emitted RFC 9728
+  metadata document targeting the reference deployment. The contract is now
+  the documented one: unset or empty exits 1 at startup with an error naming
+  the variable (`ytt/config.py` field validator; same fail-closed posture as
+  `YTT_PROXY_URL`), and the value is validated when present — http(s) scheme,
+  hostname present, no whitespace/query/fragment, trailing slash still
+  normalized away (RFC 8707 byte-exactness). The reference deployment
+  already set the variable explicitly, so its behavior is unchanged.
+  Documentation aligned (README quick start + configuration table,
+  `configuration.md`, `self-hosting.md`); unit tests pin the unset, empty,
+  and malformed cases plus the still-valid http-local boot, and the
+  built-image smoke suite gains missing- and malformed-value fail-closed
+  boots.
+
 ### Fixed
 
 - **`YTT_MAX_CONCURRENT_WHISPER` is now actually enforced** (bead

@@ -6,7 +6,10 @@ behaviors the docs promise:
 
 1. **Fail closed** — no OAuth client configuration → the server exits 1 and
    never binds (``YTT_OAUTH_CLIENT_ID`` / ``YTT_OAUTH_CLIENT_SECRET`` are
-   startup-required; README: "the server exits 1 without it").
+   startup-required; README: "the server exits 1 without it"). Same for
+   ``YTT_PUBLIC_URL`` — startup-required with **no** fallback (bead
+   ``ytt-a1fbc575``): unset or malformed, the server must exit 1 rather
+   than emit OAuth metadata targeting the reference deployment.
 2. **Boots with the minimal documented config** — health, the mounted ``/ytt/``
    MCP transport, and the root-level OAuth discovery documents respond exactly
    as documented (self-hosting.md "OAuth discovery" + "Smoke testing").
@@ -426,8 +429,13 @@ def booted(image: str, network_mode: str, tmp_path_factory: pytest.TempPathFacto
 # ---------------------------------------------------------------------------
 
 
-def _fail_closed_run(image: str, missing: str) -> subprocess.CompletedProcess[str]:
-    """`docker run` the quick start with one OAuth client variable removed."""
+def _fail_closed_run(
+    image: str,
+    missing: str | None = None,
+    overrides: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """`docker run` the quick start with one variable removed and/or values
+    overridden — the harness for every startup-required fail-closed check."""
     base = {
         "YTT_PUBLIC_URL": "http://127.0.0.1:18080/ytt",
         "YTT_PATH_PREFIX": "/ytt/",
@@ -438,7 +446,9 @@ def _fail_closed_run(image: str, missing: str) -> subprocess.CompletedProcess[st
         # (stub or real) is needed here — the issuer only has to be https.
         "YTT_OIDC_ISSUER": "https://stub-idp.invalid/application/o/ytt/",
     }
-    base.pop(missing)
+    if missing is not None:
+        base.pop(missing)
+    base.update(overrides or {})
     return _docker(
         "run",
         "--rm",
@@ -466,6 +476,36 @@ def test_missing_oauth_client_secret_fails_closed(image: str):
     output = run.stdout + run.stderr
     assert run.returncode == 1, (
         f"expected exit 1, got {run.returncode}:\n{output[-2000:]}"
+    )
+
+
+def test_missing_public_url_fails_closed(image: str):
+    """Without YTT_PUBLIC_URL the server must exit 1 — there is no fallback
+    to the reference deployment (bead ytt-a1fbc575): the OAuth
+    audience/resource/issuer and every emitted RFC 9728 metadata document
+    derive from this value, so a silent default would mistarget them."""
+    run = _fail_closed_run(image, "YTT_PUBLIC_URL")
+    output = run.stdout + run.stderr
+    assert run.returncode == 1, (
+        f"expected exit 1, got {run.returncode}:\n{output[-2000:]}"
+    )
+    assert "YTT_PUBLIC_URL is required" in output, (
+        f"exit was 1 but the documented missing-public-url error is absent:\n{output[-2000:]}"
+    )
+
+
+def test_malformed_public_url_fails_closed(image: str):
+    """A malformed YTT_PUBLIC_URL must also exit 1 — the value is validated
+    when present, not merely required when absent."""
+    run = _fail_closed_run(
+        image, overrides={"YTT_PUBLIC_URL": "mcp.example.com/ytt"}
+    )
+    output = run.stdout + run.stderr
+    assert run.returncode == 1, (
+        f"expected exit 1, got {run.returncode}:\n{output[-2000:]}"
+    )
+    assert "YTT_PUBLIC_URL must use http:// or https://" in output, (
+        f"exit was 1 but the malformed-public-url error is absent:\n{output[-2000:]}"
     )
 
 

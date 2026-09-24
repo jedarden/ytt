@@ -1,12 +1,12 @@
 """Unit tests for config loading, size parsing, and startup validations.
 
 Covers the Configuration table defaults, ``2Gi``-style size parsing, the
-path-prefix trailing-slash rule + path join, public-url normalization, the
-allowlist parser, **Invariant 7** (ETA-timeout safety), and the PVC/emptyDir
-storage validation. The per-subject limit knobs (``RATE_LIMIT_PER_MIN`` /
-``RATE_LIMIT_BURST`` / ``WHISPER_JOBS_PER_HOUR``) are pinned for absent,
-zero, negative, malformed, and unsafe-combination values (fail-closed rules
-in the :mod:`ytt.config` module docstring).
+path-prefix trailing-slash rule + path join, public-url required-ness +
+normalization, the allowlist parser, **Invariant 7** (ETA-timeout safety),
+and the PVC/emptyDir storage validation. The per-subject limit knobs
+(``RATE_LIMIT_PER_MIN`` / ``RATE_LIMIT_BURST`` / ``WHISPER_JOBS_PER_HOUR``)
+are pinned for absent, zero, negative, malformed, and unsafe-combination
+values (fail-closed rules in the :mod:`ytt.config` module docstring).
 """
 
 from __future__ import annotations
@@ -70,7 +70,9 @@ def test_defaults_match_plan():
     assert s.chunk_chars == 18000
     assert s.proxy_url is None
     assert s.path_prefix == "/ytt/"
-    assert s.public_url == "https://mcp.ardenone.com/ytt"
+    # public_url deliberately has NO default (required, no fallback — see the
+    # dedicated section below); here it just reflects the test-session env
+    # that tests/conftest.py setdefaults.
 
 
 def test_env_override(monkeypatch):
@@ -184,6 +186,65 @@ def test_public_url_trailing_slash_stripped():
     s = Settings(public_url="https://mcp.ardenone.com/ytt/")
     assert s.public_url == "https://mcp.ardenone.com/ytt"
     assert s.audience == "https://mcp.ardenone.com/ytt"
+
+
+def test_public_url_env_used_when_set(monkeypatch):
+    """The operator path: an explicit env value lands byte-for-byte (modulo
+    the trailing-slash normalization) in public_url/audience."""
+    monkeypatch.setenv("YTT_PUBLIC_URL", "https://mcp.example.com/ytt")
+    s = Settings()
+    assert s.public_url == "https://mcp.example.com/ytt"
+    assert s.audience == "https://mcp.example.com/ytt"
+
+
+def test_public_url_required_no_fallback(monkeypatch):
+    """Unset YTT_PUBLIC_URL is a startup error, never the retired baked-in
+    reference-deployment default — OAuth metadata must not silently target
+    mcp.ardenone.com (bead ytt-a1fbc575)."""
+    monkeypatch.delenv("YTT_PUBLIC_URL", raising=False)
+    with pytest.raises(ValidationError, match="YTT_PUBLIC_URL is required"):
+        Settings()
+
+
+def test_public_url_empty_env_fails_closed(monkeypatch):
+    """Empty is the manifest-interpolating-a-missing-value case — an error,
+    not a silent fallback (same posture as YTT_PROXY_URL)."""
+    monkeypatch.setenv("YTT_PUBLIC_URL", "")
+    with pytest.raises(ValidationError, match="YTT_PUBLIC_URL is required"):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "   ",  # whitespace-only == empty
+        "https://mcp.example.com/ytt ",  # surrounding whitespace
+        "https://mcp.example.com/ ytt",  # embedded whitespace (line wrap)
+        "mcp.example.com/ytt",  # no scheme
+        "ftp://mcp.example.com/ytt",  # non-http scheme
+        "https://",  # no hostname
+        "https://mcp.example.com/ytt?a=1",  # query
+        "https://mcp.example.com/ytt#frag",  # fragment
+        "not-a-url",
+    ],
+)
+def test_public_url_rejects_malformed_values(monkeypatch, bad):
+    """Malformed values fail on the operator path (env var), which is where
+    a typo would arrive — startup fails instead of booting with a garbage
+    audience baked into every OAuth metadata document."""
+    monkeypatch.setenv("YTT_PUBLIC_URL", bad)
+    with pytest.raises(ValidationError, match="YTT_PUBLIC_URL"):
+        Settings()
+
+
+def test_public_url_http_allowed_for_local_boots(monkeypatch):
+    """http stays valid — the built-image smoke test and localhost dev boots
+    use it. Anthropic's backend needing https is a deployment concern, not a
+    startup-validation one."""
+    monkeypatch.setenv("YTT_PUBLIC_URL", "http://127.0.0.1:18080/ytt")
+    s = Settings()
+    assert s.public_url == "http://127.0.0.1:18080/ytt"
+    assert s.audience == "http://127.0.0.1:18080/ytt"
 
 
 # --- allowlist parsing ------------------------------------------------------

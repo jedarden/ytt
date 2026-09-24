@@ -26,7 +26,7 @@ services:
       - ytt-cache:/cache
       - ytt-scratch:/scratch
     environment:
-      YTT_PUBLIC_URL: "https://mcp.example.com/ytt"
+      YTT_PUBLIC_URL: "https://mcp.example.com/ytt"  # required — no fallback; server exits 1 without it
       YTT_PATH_PREFIX: "/ytt/"
       YTT_ALLOWED_SUBJECTS: ""      # set after discovering your sub (see connector.md)
       YTT_OAUTH_CLIENT_ID: "your-oauth-client-id"       # required — server exits 1 without it
@@ -140,6 +140,9 @@ ytt is its own OAuth Authorization Server (AS).  The public-facing metadata URLs
 - `WWW-Authenticate: Bearer resource_metadata="<prm-url>"` on 401
 
 The `resource` and `issuer` values will equal `YTT_PUBLIC_URL` exactly.
+That byte-for-byte derivation is why `YTT_PUBLIC_URL` is startup-required
+with no default: a missing value fails the boot (exit 1) instead of pointing
+your deployment's OAuth metadata at whoever shipped the image.
 
 These are served by ytt itself — no separate OAuth infrastructure is needed.
 

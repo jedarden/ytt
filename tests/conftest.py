@@ -31,6 +31,14 @@ from fastmcp.server.auth.oidc_proxy import OIDCConfiguration, OIDCProxy
 os.environ.setdefault("YTT_OAUTH_CLIENT_ID", "test-client-id")
 os.environ.setdefault("YTT_OAUTH_CLIENT_SECRET", "test-client-secret")
 
+# YTT_PUBLIC_URL is required with no fallback (see ytt/config.py): Settings
+# construction fails without it. Default it to the absolute base the OAuth
+# conformance suite hard-codes (BASE = "https://mcp.ardenone.com") — the same
+# value the retired baked-in default carried, now explicit test state instead
+# of product state. setdefault keeps an explicit env (e.g. an image smoke
+# run driving this suite) in charge.
+os.environ.setdefault("YTT_PUBLIC_URL", "https://mcp.ardenone.com/ytt")
+
 _FAKE_OIDC_CONFIG = OIDCConfiguration(
     issuer="https://sso.ardenone.com/application/o/ytt/",
     authorization_endpoint="https://sso.ardenone.com/application/o/authorize/",

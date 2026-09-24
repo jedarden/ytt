@@ -2,15 +2,17 @@
 
 All ytt configuration is via environment variables.  `YTT_PUBLIC_URL` and the
 OAuth client pair (`YTT_OAUTH_CLIENT_ID`, `YTT_OAUTH_CLIENT_SECRET`) are
-required — the server exits 1 without the client pair, and the baked-in
-`YTT_PUBLIC_URL` default points at the reference deployment.  Every other
-variable has a working default.
+required — the server exits 1 without any of them.  `YTT_PUBLIC_URL` has
+**no fallback**: the OAuth audience/resource/issuer and the emitted RFC 9728
+metadata documents derive from it byte-for-byte, so an unset or malformed
+value fails startup rather than silently targeting the reference deployment.
+Every other variable has a working default.
 
 ## Required variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_PUBLIC_URL` | *(required)* | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Must not have a trailing slash. **Set this to your own domain** before exposing the server. |
+| `YTT_PUBLIC_URL` | *(required — no fallback)* | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Startup exits 1 if unset or empty, and validates shape when set: http(s) scheme, hostname present, no whitespace/query/fragment (a trailing slash is normalized away). **Set this to your own domain** before exposing the server — Anthropic's connector backend requires https in production (http is accepted for localhost/dev boots). |
 | `YTT_PATH_PREFIX` | `/ytt/` | The path prefix the server is mounted under. Must end with `/`. Startup exits 1 if the slash is missing. Must match the IngressRoute / reverse-proxy config. |
 
 ## OAuth provider (upstream IdP)

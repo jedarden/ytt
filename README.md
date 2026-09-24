@@ -23,7 +23,10 @@ docker run --rm \
   ronaldraygun/ytt:0.2.20
 ```
 
-The OAuth client pair is startup-required — the server exits 1 without it.
+The OAuth client pair and `YTT_PUBLIC_URL` are startup-required — the server
+exits 1 without them, and `YTT_PUBLIC_URL` has **no fallback**: the OAuth
+audience and the emitted RFC 9728 metadata derive from it, so a missing value
+fails startup rather than silently targeting the reference deployment.
 The upstream IdP defaults to the reference Authentik instance
 (`sso.ardenone.com/application/o/ytt/`); set `YTT_OIDC_ISSUER` to point ytt
 at your own OIDC provider instead — the discovery URL is derived from the
@@ -80,13 +83,13 @@ In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --gate`
 ## Configuration
 
 All config is environment-variable-based. Nothing ardenone-specific is
-*required*, but a few baked-in defaults (`YTT_WHISPER_URL`, `YTT_OIDC_ISSUER`,
-and `YTT_PUBLIC_URL`'s fallback) point at the reference deployment — set
-your own.
+*required*, but a few baked-in defaults (`YTT_WHISPER_URL` and
+`YTT_OIDC_ISSUER`) point at the reference deployment — set your own.
+`YTT_PUBLIC_URL` deliberately has **no** default (see its row below).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `YTT_PUBLIC_URL` | *(required)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. |
+| `YTT_PUBLIC_URL` | *(required — no fallback)* | Public base URL — OAuth audience + emitted metadata derive from this. Set to your domain. Startup exits 1 if unset or empty, and validates shape when set: http(s) scheme, hostname present, no whitespace/query/fragment (a trailing slash is normalized away). |
 | `YTT_PATH_PREFIX` | `/ytt/` | Path the server is mounted under. Must end with `/`. |
 | `YTT_ALLOWED_SUBJECTS` | *(empty = deny all)* | Comma-separated OAuth `sub` values allowed to call tools. See [connector.md](docs/usage/connector.md) for how to discover your `sub`. |
 | `YTT_RATE_LIMIT_PER_MIN` | `20` | Per-subject fetch rate — token-bucket **refill rate** in requests/minute (1 token every `60/rate` seconds; 3 s at the default). Charged only on the cache-miss fetch path, failed fetches included; cache hits and `get_transcript_job` polls are free. `0` = deny all fetches (fail-closed). |

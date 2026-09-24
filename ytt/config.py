@@ -7,6 +7,14 @@ parsing it enforces:
 - **Invariant 7** (ETA-timeout safety): ``MAX_ASR_DURATION_SEC × RT_FACTOR <
   WHISPER_TIMEOUT_SEC`` — validated at construction (raises -> server exits 1).
 - ``YTT_PATH_PREFIX`` must end with ``/`` (raises if missing).
+- ``YTT_PUBLIC_URL`` is required with **no fallback**: the OAuth
+  audience/resource/issuer and every emitted RFC 9728 metadata document
+  derive from it byte-for-byte, so an unset or empty value raises at
+  construction (server exits 1) instead of silently targeting the reference
+  deployment the retired baked-in default pointed at. Whitespace-carrying,
+  non-http(s), hostname-less, or query/fragment-bearing values are equally
+  startup errors (same fail-closed posture as ``YTT_PROXY_URL``); a trailing
+  slash is normalized away (RFC 8707 byte-exactness).
 - ``YTT_PROXY_URL`` must be a well-formed http(s) proxy URL or unset; an
   empty string is an error, not a silent unset (fail-closed — a manifest
   interpolating a missing secret must not quietly disable the proxy). See
@@ -252,7 +260,14 @@ class Settings(BaseSettings):
     # --- egress / ingress ---
     proxy_url: str | None = None
     path_prefix: str = "/ytt/"
-    public_url: str = "https://mcp.ardenone.com/ytt"
+    # Required — no fallback. The empty-string default is a sentinel:
+    # validate_default=True routes it through the field validator, which
+    # raises, so construction fails whenever the env var is unset. The OAuth
+    # audience/resource/issuer and all emitted RFC 9728 metadata derive from
+    # this value byte-for-byte — a baked-in default would silently point a
+    # self-hoster's OAuth metadata at the reference deployment
+    # (https://mcp.ardenone.com/ytt), so there is deliberately none.
+    public_url: str = ""
 
     # --- OAuth (upstream OIDC IdP, from ESO/OpenBao) ---
     # Optional on the Settings model itself so unit tests can construct freely;
@@ -305,7 +320,62 @@ class Settings(BaseSettings):
 
     @field_validator("public_url")
     @classmethod
-    def _public_url_no_trailing_slash(cls, v: str) -> str:
+    def _public_url_required_and_well_formed(cls, v: str) -> str:
+        """``YTT_PUBLIC_URL`` is required — there is deliberately no fallback.
+
+        The audience/resource/issuer and every emitted RFC 9728 metadata
+        document derive from this value byte-for-byte (RFC 8707
+        confused-deputy guard), so a missing or malformed value must fail
+        startup, never silently target the reference deployment the retired
+        baked-in default pointed at (``https://mcp.ardenone.com/ytt``).
+        Same fail-closed posture as ``YTT_PROXY_URL``:
+
+        - empty is the unset/missing case — required, not defaulted (an env
+          line interpolating an unset manifest value must fail startup, not
+          fall back);
+        - whitespace anywhere is rejected (copy-paste line wraps);
+        - scheme must be http or https and a hostname must be present — http
+          stays valid for localhost/dev/smoke boots, while Anthropic's
+          connector backend requires https in production;
+        - query and fragment are rejected — the audience is a byte-exact
+          comparison value and metadata URLs are path-shaped;
+        - a trailing slash is normalized away (kept from the original
+          validator — the audience must never carry one).
+        """
+        if not v.strip():
+            raise ValueError(
+                "YTT_PUBLIC_URL is required — set it to the URL clients use "
+                "to reach this server (e.g. "
+                "https://your-domain.example.com/ytt). There is no fallback: "
+                "the OAuth audience and the emitted "
+                "oauth-protected-resource/authorization-server metadata "
+                "derive from this value, and a default would silently "
+                "target the reference deployment."
+            )
+        if re.search(r"\s", v):
+            raise ValueError(
+                f"YTT_PUBLIC_URL contains whitespace: {v!r} — a URL is a "
+                "single token (scheme://host/path); check for a copy-paste "
+                "line wrap"
+            )
+        parsed = urlparse(v)
+        if parsed.scheme.lower() not in ("http", "https"):
+            raise ValueError(
+                f"YTT_PUBLIC_URL must use http:// or https:// — got scheme "
+                f"{parsed.scheme!r} in {v!r}. https in production "
+                "(Anthropic's connector backend requires it); http is for "
+                "localhost/dev boots."
+            )
+        if not parsed.hostname:
+            raise ValueError(
+                f"YTT_PUBLIC_URL has no hostname: {v!r} "
+                "(expected e.g. https://your-domain.example.com/ytt)"
+            )
+        if parsed.query or parsed.fragment:
+            raise ValueError(
+                f"YTT_PUBLIC_URL must not carry a query or fragment: {v!r} "
+                "— it is the byte-exact OAuth audience/resource/issuer"
+            )
         # The audience/resource/issuer must be byte-identical with NO trailing
         # slash (RFC 8707 confused-deputy guard). Normalize defensively.
         return v.rstrip("/")
