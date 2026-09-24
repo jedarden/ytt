@@ -26,6 +26,14 @@
 # docs/bead-inventory.{md,json} pair and lints curated docs for hand-written
 # bead-status claims; its freshness leg skips where no live bead store exists
 # (same skip shape as the parity guard above).
+#
+# The egress-boundary guard (tests/unit/test_egress_boundary.py) also runs
+# inside the suite: static legs close the dependency / installed-plugin /
+# package-import / Settings-URL surfaces against third-party transcript APIs
+# and PoToken providers, and mocked-network drives of the caption and ASR
+# paths record every egress under a socket-level tripwire — enforcing the
+# documented no-third-party, cookie-free promise (README intro,
+# docs/notes/proxy-egress.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # --- release-metadata drift guard ------------------------------------------
