@@ -26,7 +26,8 @@ Prerequisites (everything else skips cleanly):
   * a built image ref: ``YTT_SMOKE_IMAGE`` (default: the ``VERSION``-pinned
     published tag ``ronaldraygun/ytt:X.Y.Z`` — a private Hub repo, so either
     ``docker login`` first or point ``YTT_SMOKE_IMAGE`` at a local build)
-  * ``openssl`` on the test host (self-signed stub-IdP certificate)
+  * the ``cryptography`` package (already in the project's dependency graph —
+    it signs the stub IdP's self-signed certificate)
 
 Run:  ``YTT_SMOKE_IMAGE=<ref> uv run pytest tests/image -m integration``
 """
@@ -139,38 +140,11 @@ class _StubIdp:
     def __init__(self, workdir: Path) -> None:
         self.cert = workdir / "idp-cert.pem"
         self.key = workdir / "idp-key.pem"
-        # The container dials the host via host.docker.internal (see the
-        # docker run flags below); the SAN must match that hostname.
-        gen = subprocess.run(
-            [
-                "openssl",
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-keyout",
-                str(self.key),
-                "-out",
-                str(self.cert),
-                "-days",
-                "3",
-                "-nodes",
-                "-subj",
-                "/CN=ytt-smoke-stub-idp",
-                "-addext",
-                "subjectAltName=DNS:host.docker.internal,IP:127.0.0.1",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if gen.returncode != 0:
-            pytest.skip(
-                f"openssl unavailable/failed — skipping smoke test: {gen.stderr[-300:]}"
-            )
+        self._generate_self_signed_cert()
         # The container reads the cert as uid 10001 — don't inherit a
         # restrictive host umask on the bind-mounted file.
         self.cert.chmod(0o644)
+        self.key.chmod(0o600)
 
         with socket.socket() as s:
             s.bind(("0.0.0.0", 0))
@@ -184,6 +158,58 @@ class _StubIdp:
         self._srv.socket = ctx.wrap_socket(self._srv.socket, server_side=True)
         self._thread = threading.Thread(target=self._srv.serve_forever, daemon=True)
         self._thread.start()
+
+    def _generate_self_signed_cert(self) -> None:
+        """Sign a throwaway cert for host.docker.internal (the hostname the
+        container dials, see the --add-host flag below) + 127.0.0.1."""
+        # Imported lazily so a venv without the dep skips instead of erroring
+        # at collection; cryptography ships with the project's dependency
+        # graph (fastmcp/mcp), so real environments always have it.
+        try:
+            import datetime
+            import ipaddress
+
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import NameOID
+        except ImportError as exc:
+            pytest.skip(f"cryptography unavailable — skipping smoke test: {exc}")
+
+        # The container dials the host via host.docker.internal; the SAN must
+        # match that hostname.
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, "ytt-smoke-stub-idp")]
+        )
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [
+                        x509.DNSName("host.docker.internal"),
+                        x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                    ]
+                ),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        self.cert.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        self.key.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         doc = {
