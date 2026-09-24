@@ -36,8 +36,14 @@ either read-only or forbidden (§7).
 
 Covered by [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) §1–§3, condensed:
 
-1. Bump `VERSION`, `pyproject.toml`, `ytt/__init__.py`, `CHANGELOG.md` in one
-   commit in `jedarden/ytt`; push to Forgejo.
+1. Bump all six version-bearing files — `VERSION`, `pyproject.toml`,
+   `uv.lock` (regen with `uv lock`), `ytt/__init__.py`, `README.md`
+   (quick-start image), `docs/usage/self-hosting.md` (compose image) — plus
+   a `CHANGELOG.md` section and compare links, in one commit in
+   `jedarden/ytt`; tag it `v<version>` (annotated) and push the commit and
+   the tag to Forgejo.  `scripts/definition-of-done.sh` fails the gate when
+   any of these drift apart (added after 0.2.20 shipped with five of the six
+   still at 0.2.19 and no tag — bead `ytt-d18f0ab1`).
 2. The push webhook fires `ytt-sensor` → `ytt-build` (iad-ci): the `VERSION`
    bump is validated, the Dockerfile's test stage runs
    `pytest -m "not integration"` as a build gate, and `ronaldraygun/ytt:<version>`

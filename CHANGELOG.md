@@ -113,6 +113,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's slot), surfaced in the usual structured error shape instead of an
   escaping exception.
 
+### Added
+
+- **Release-metadata drift guard in `scripts/definition-of-done.sh`** (bead
+  `ytt-d18f0ab1`). The gate now fails when the release version disagrees
+  across any of the places that advertise it: `VERSION`, the newest
+  `## [x.y.z]` CHANGELOG section, the pinned `ronaldraygun/ytt:x.y.z` image
+  in the README quick start and the self-hosting compose example,
+  `pyproject.toml`, `ytt.__version__`, the `uv.lock` project entry, and — in
+  a real checkout, where tags exist — the newest `vX.Y.Z` git tag. Covers the
+  drift class that produced the 0.2.15–0.2.20 reconciliation below: 0.2.20
+  bumped only `VERSION` while the other five version-bearing files stayed at
+  0.2.19, and 0.2.17–0.2.20 shipped without git tags at all.
+
+## [0.2.20] — 2026-09-18
+
+### Fixed
+
+- **`.dockerignore` excluded `deploy/` from the kaniko build context, so the
+  in-image pytest gate failed and 0.2.18–0.2.19 never published** (bead
+  `ytt-84c5a89c`; root cause read from the live kaniko log
+  `ytt-build-debug3-2zv2k` @ `0ac3243`, diagnosis tracked as bead
+  `ytt-e64b1b1d`). The `.dockerignore` had carried a bare `deploy` entry
+  since the scaffold commit (`b7c5e1d`), so kaniko's git context never
+  contained the tree and the Dockerfile's `COPY deploy ./deploy` (added in
+  0.2.19) copied nothing — `tests/unit/test_single_replica.py` then failed
+  both single-replica guard tests ("no Deployment documents found under
+  /app/deploy/k8s"). The bare entry is replaced by a comment explaining why
+  `deploy` must never be listed.
+- **First published image since 0.2.14, and the canary-capable one the
+  0.2.17 entry expected to advertise.** Docker Hub records
+  `ronaldraygun/ytt:0.2.20` pushed 2026-09-18 21:26 UTC; nothing newer than
+  0.2.14 existed before it (0.2.15–0.2.19 all failed to publish — see their
+  entries). 0.2.17's "first published image containing the egress canary"
+  claim therefore moves here: this is the first pullable tag carrying the
+  canary command, the bounded download/Whisper guardrails, the
+  `YTT_PROXY_URL` contract, and enforced `YTT_MAX_CONCURRENT_WHISPER`. It is
+  the image the in-cluster deployment pins (see
+  `docs/notes/canary-first-fetch.md`).
+- **Release-metadata reconciliation for 0.2.15–0.2.20** (bead
+  `ytt-d18f0ab1`, continuing the `ytt-a28cf823` → `ytt-8efb9b9d` line). The
+  0.2.20 release commit bumped only `VERSION` (+ `.dockerignore`), leaving
+  five of the six version-bearing files at 0.2.19 — the README quick-start
+  image, the self-hosting compose image, `pyproject.toml`, `uv.lock`, and
+  `ytt.__version__` (the set the 0.2.19 commit itself had called "the six
+  version-bearing files"). No CHANGELOG sections existed for 0.2.18–0.2.20,
+  the compare-link refs stopped at 0.2.17, and no release since 0.2.16 had a
+  git tag. This reconciliation: backfilled the annotated tags
+  `v0.2.17`–`v0.2.20` at their VERSION-bump commits (`6120325`, `d48a8b8`,
+  `0ac3243`, `332d6d8`); wrote the missing CHANGELOG sections from their
+  release commits plus the Docker Hub publication record (which also
+  corrected the 0.2.16 and 0.2.17 entries — pointers added in place, per the
+  0.2.15↔0.2.16 precedent); bumped the five lagging files to 0.2.20; added
+  the drift guard to `scripts/definition-of-done.sh` (see
+  [Unreleased]); and completed the release-commit checklist in
+  `deploy/RUNBOOK.md`, whose four-file list is what let 0.2.20 ship
+  half-bumped. One at-tag fact, same shape as the v0.2.13 note in the 0.2.15
+  entry: the tagged tree of `v0.2.20` itself carries the stale five values,
+  because the reconciliation is the commit *after* the tagged release commit
+  and the tag is immutable history.
+
+## [0.2.19] — 2026-09-18
+
+### Fixed
+
+- **Second kaniko failure mode: the build context was still incomplete, and
+  one proxy-retry test was timing-fragile** (bead `ytt-275031ef`; captured
+  live from `ytt-build-debug-vcj79`). The in-image pytest gate failed three
+  tests. `tests/unit/test_single_replica.py` scans `deploy/k8s/` for
+  Deployment manifests and the context had none — fixed by adding
+  `COPY deploy ./deploy` to the Dockerfile (which turned out to copy
+  nothing, see 0.2.20). `tests/unit/test_proxy.py`'s proxied-retry budget
+  (`whisper_timeout_sec` 0.05, retry sleep 0.5) was too tight for a
+  CPU-throttled pod: the DIRECT attempt timed out inside `wait_for` before
+  its `ip_blocked` error could surface, so the failure message lost the
+  "(proxy retry also timed out)" suffix; both sides got a 10x margin
+  (0.5 / 5) keeping the semantics. VERSION bumped across the six
+  version-bearing files in the same commit. **0.2.19 never published** —
+  kaniko died in the test stage before any push (the `.dockerignore`
+  exclusion, fixed in 0.2.20).
+
+## [0.2.18] — 2026-09-18
+
+### Fixed
+
+- **Image test stage aborted at collection: `docs/` missing from the build
+  context** (bead `ytt-275031ef`; kaniko exit 2).
+  `tests/unit/test_docs_env_coverage.py` reads `docs/usage/configuration.md`
+  at module scope, so a context without `docs/` made
+  `uv run pytest -m "not integration"` exit 2 (collection error) before any
+  test ran; the Dockerfile now COPYs `docs/` into the image. Reproduced with
+  collect-only: a README+ytt+tests-only tree exits 2, the same tree with
+  `docs/` exits 0. VERSION bumped in the same commit because the
+  `resolve-version` gate requires the tip commit to touch VERSION.
+  **0.2.18 never published either** — its kaniko run died in the test stage
+  (`deploy/` absent from the context, fixed in 0.2.19 → 0.2.20). This is
+  also where 0.2.17's true outcome was first recorded: "0.2.17's run died in
+  kaniko and never published, so the tag is free."
+
 ## [0.2.17] — 2026-09-18
 
 ### Added
@@ -132,6 +230,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   download/Whisper guardrails, the `YTT_PROXY_URL` contract, the yt-dlp
   player-client contract tests, and enforced
   `YTT_MAX_CONCURRENT_WHISPER`.
+  (Corrected in 0.2.18/0.2.20: the run died in kaniko and never published —
+  no `ronaldraygun/ytt:0.2.17` tag exists on the Hub. The first published
+  image containing the canary is 0.2.20, whose entry owns that claim.)
 
 ## [0.2.16] — 2026-09-17
 
@@ -151,6 +252,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   either. 0.2.15 therefore stands as a metadata-only release (its tag and
   CHANGELOG entry are accurate; it simply has no image), and this bump
   exists so CI builds the image the README advertises. No code changes.
+  (Corrected in 0.2.20: the image this bump sought to publish never built
+  either — no pullable tag newer than 0.2.14 existed until
+  `ronaldraygun/ytt:0.2.20`. Master moved past this bump commit the same
+  day, and the same resolve-version/kaniko-context resolution failure this
+  entry describes for 0.2.15 applied to it.)
 
 ## [0.2.15] — 2026-09-16
 
@@ -560,7 +666,10 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.17...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.20...HEAD
+[0.2.20]: https://github.com/jedarden/ytt/compare/v0.2.19...v0.2.20
+[0.2.19]: https://github.com/jedarden/ytt/compare/v0.2.18...v0.2.19
+[0.2.18]: https://github.com/jedarden/ytt/compare/v0.2.17...v0.2.18
 [0.2.17]: https://github.com/jedarden/ytt/compare/v0.2.16...v0.2.17
 [0.2.16]: https://github.com/jedarden/ytt/compare/v0.2.15...v0.2.16
 [0.2.15]: https://github.com/jedarden/ytt/compare/v0.2.14...v0.2.15
