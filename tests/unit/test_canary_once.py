@@ -8,13 +8,21 @@ never touch YouTube or ipinfo.io (real-network paths are integration-gated).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yt_dlp
 
-from ytt.canary import _probe_one, probe_once_detail, run_once
+from ytt.canary import (
+    CANARY_VIDEO_IDS,
+    _probe_one,
+    probe_once_detail,
+    run_once,
+    run_probe_loop,
+)
 from ytt.cli import main as cli_main
 from ytt.models import EgressReport
 
@@ -246,3 +254,196 @@ class TestCli:
         with pytest.raises(SystemExit) as excinfo:
             cli_main(["canary", "--video-id", "x"])
         assert excinfo.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# JSON report schema (the report is pasted somewhere durable as evidence —
+# its key set is a contract, not an implementation detail)
+# ---------------------------------------------------------------------------
+
+_PROBE_KEYS = {"ok", "outcome", "langs", "duration_sec", "via_proxy", "error"}
+_REPORT_KEYS = {"mode", "ran_at", "video_id", "egress", "caption_fetch", "verdict"}
+_EGRESS_OK_KEYS = {"ip", "asn", "org", "via_proxy", "is_residential"}
+_EGRESS_ERROR_KEYS = {"error", "via_proxy"}
+
+
+def _probe_ok() -> dict:
+    with patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())):
+        return probe_once_detail("jNQXAC9IVRw")
+
+
+def _probe_blocked() -> dict:
+    ctx = _ydl_raising(
+        yt_dlp.utils.DownloadError("ERROR: [youtube] jNQXAC9IVRw: HTTP Error 403: Forbidden")
+    )
+    with patch("yt_dlp.YoutubeDL", return_value=ctx):
+        return probe_once_detail("jNQXAC9IVRw")
+
+
+def _run_once_ok() -> dict:
+    with (
+        patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL),
+        patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())),
+    ):
+        return run_once()
+
+
+def _run_once_blocked() -> dict:
+    ctx = _ydl_raising(
+        yt_dlp.utils.DownloadError("ERROR: Sign in to confirm you're not a bot")
+    )
+    with (
+        patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL),
+        patch("yt_dlp.YoutubeDL", return_value=ctx),
+    ):
+        return run_once()
+
+
+class TestReportSchema:
+    def test_probe_schema_is_stable_across_outcomes(self):
+        """Success and every failure shape share one schema, discriminated by
+        ``ok``/``outcome`` — consumers (the CLI exit path, pasted evidence)
+        never branch on missing keys."""
+        assert set(_probe_ok()) == _PROBE_KEYS
+        assert set(_probe_blocked()) == _PROBE_KEYS
+
+    def test_probe_field_types(self):
+        report = _probe_ok()
+        assert isinstance(report["ok"], bool)
+        assert isinstance(report["langs"], list)
+        assert all(isinstance(lang, str) for lang in report["langs"])
+        assert isinstance(report["duration_sec"], float)
+        assert isinstance(report["via_proxy"], bool)
+        assert report["error"] is None
+
+    def test_run_once_top_level_schema(self):
+        report = _run_once_ok()
+        assert set(report) == _REPORT_KEYS
+        assert report["mode"] == "once"
+        assert set(report["egress"]) == _EGRESS_OK_KEYS
+        assert set(report["caption_fetch"]) == _PROBE_KEYS
+
+    def test_run_once_egress_error_schema(self):
+        """The degraded-egress shape swaps the classification fields for
+        ``error`` + ``via_proxy`` (no null-ip half-report)."""
+        with (
+            patch("ytt.selftest.probe_egress", side_effect=RuntimeError("dns fail")),
+            patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())),
+        ):
+            report = run_once()
+        assert set(report["egress"]) == _EGRESS_ERROR_KEYS
+
+    def test_verdict_mirrors_caption_fetch_outcome(self):
+        """``verdict`` is the caption fetch outcome — the exit code contract
+        hangs off it, so the mirror must hold on both sides."""
+        ok_report = _run_once_ok()
+        assert ok_report["verdict"] == ok_report["caption_fetch"]["outcome"] == "ok"
+        blocked = _run_once_blocked()
+        assert blocked["verdict"] == blocked["caption_fetch"]["outcome"] == "ip_blocked"
+
+    def test_report_round_trips_through_json_losslessly(self):
+        """Pasted-as-evidence means ``json.dumps`` is lossless: no datetimes,
+        no exceptions, no non-string keys leaking into the report."""
+        for report in (_run_once_ok(), _run_once_blocked()):
+            assert json.loads(json.dumps(report)) == report
+
+    def test_cli_prints_the_real_report_and_exits_zero(self, capsys):
+        """End to end: stdout is run_once's own report as JSON — schema,
+        verdict and langs intact — and the exit code is 0 on ok."""
+        with (
+            patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL),
+            patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())),
+        ):
+            code = cli_main(["canary", "--once"])
+        assert code == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert set(parsed) == _REPORT_KEYS
+        assert parsed["verdict"] == "ok"
+        assert parsed["caption_fetch"]["langs"]
+        assert captured.err == ""
+
+    def test_cli_ip_blocked_exits_one_with_failed_verdict(self, capsys):
+        """End to end: a real ip_blocked fetch prints the full report, exits 1
+        and says why on stderr."""
+        with (
+            patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL),
+            patch(
+                "yt_dlp.YoutubeDL",
+                return_value=_ydl_raising(
+                    yt_dlp.utils.DownloadError(
+                        "ERROR: Sign in to confirm you're not a bot"
+                    )
+                ),
+            ),
+        ):
+            code = cli_main(["canary", "--once"])
+        assert code == 1
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert parsed["verdict"] == "ip_blocked"
+        assert "CANARY FAILED" in captured.err
+        assert "ip_blocked" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Fallback-video behavior — the fixed internal video ladder
+# ---------------------------------------------------------------------------
+
+class _StopLoop(Exception):
+    """Raised by the patched ``asyncio.sleep`` to end the probe loop after
+    exactly one full cycle."""
+
+
+def _stop_after_one_cycle(_interval_sec: int) -> None:
+    raise _StopLoop
+
+
+class TestFallbackVideo:
+    """The fixed internal video list is a fallback ladder (plan §Canary):
+    probe in order, stop at the first success, and count one failure only
+    when the whole ladder misses."""
+
+    def test_ladder_is_nonempty_and_wellformed(self):
+        # At least two entries, or there is no fallback to speak of; every
+        # entry must be a well-formed 11-char YouTube video ID.
+        assert len(CANARY_VIDEO_IDS) >= 2
+        for video_id in CANARY_VIDEO_IDS:
+            assert re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id), video_id
+
+    def test_once_defaults_to_the_first_ladder_entry(self):
+        assert _run_once_ok()["video_id"] == CANARY_VIDEO_IDS[0]
+
+    def _one_cycle(self, probe_results: list[bool]):
+        """Run one ``run_probe_loop`` cycle with per-video outcomes; return
+        (video ids probed in order, success-gauge mock, failures-counter mock)."""
+        probed: list[str] = []
+
+        def probe(video_id, settings):
+            probed.append(video_id)
+            return probe_results[len(probed) - 1]
+
+        gauge, counter = MagicMock(), MagicMock()
+        with (
+            patch("ytt.canary._probe_one", side_effect=probe),
+            patch("ytt.canary.ytt_canary_last_success_timestamp_seconds", gauge),
+            patch("ytt.canary.ytt_canary_failures_total", counter),
+            patch("asyncio.sleep", side_effect=_stop_after_one_cycle),
+        ):
+            with pytest.raises(_StopLoop):
+                asyncio.run(run_probe_loop(interval_sec=600))
+        return probed, gauge, counter
+
+    def test_full_ladder_walked_when_every_video_fails(self):
+        probed, gauge, counter = self._one_cycle([False] * len(CANARY_VIDEO_IDS))
+        assert probed == list(CANARY_VIDEO_IDS)
+        gauge.set.assert_not_called()
+        counter.inc.assert_called_once_with()
+
+    def test_ladder_stops_at_first_success(self):
+        """The fallback video is only probed when the primary fails — one
+        good fetch per cycle, no wasted residential bandwidth."""
+        probed, gauge, counter = self._one_cycle([True, True])
+        assert probed == [CANARY_VIDEO_IDS[0]]
+        gauge.set.assert_called_once()
+        counter.inc.assert_not_called()
