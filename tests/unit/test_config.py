@@ -235,3 +235,97 @@ def test_validate_storage_pvc_missing_dir_raises():
     s = Settings(cache_backend="pvc", cache_dir="/nonexistent/ytt/cache")
     with pytest.raises(ValueError, match="statvfs"):
         s.validate_storage()
+
+
+# --- upstream OIDC IdP (YTT_OIDC_ISSUER / YTT_OIDC_CONFIG_URL) ---------------
+def test_oidc_defaults_are_the_reference_authentik():
+    """Unset env vars resolve to the reference Authentik endpoints —
+    byte-identical with the pre-0.2.21 hardcoded values in ytt/auth.py, so
+    the reference deployment's behavior is unchanged (the AUTHENTIK_*
+    aliases there are pinned to the same constants)."""
+    s = Settings()
+    assert s.oidc_issuer == "https://sso.ardenone.com/application/o/ytt/"
+    assert s.oidc_config_url == (
+        "https://sso.ardenone.com/application/o/ytt/.well-known/openid-configuration"
+    )
+    from ytt import auth
+
+    assert auth.AUTHENTIK_ISSUER == s.oidc_issuer
+    assert auth.AUTHENTIK_OIDC_CONFIG_URL == s.oidc_config_url
+
+
+def test_oidc_config_url_derived_from_issuer():
+    """BYO-IdP needs only YTT_OIDC_ISSUER: the discovery URL follows it per
+    OIDC Discovery §4, with the trailing-slash difference absorbed (the
+    reference Authentik issuer carries one; Keycloak-style realm issuers
+    don't — neither may be normalized off the issuer itself)."""
+    s = Settings(oidc_issuer="https://idp.example.com/realms/ytt")
+    assert s.oidc_issuer == "https://idp.example.com/realms/ytt"
+    assert s.oidc_config_url == (
+        "https://idp.example.com/realms/ytt/.well-known/openid-configuration"
+    )
+
+    s = Settings(oidc_issuer="https://idp.example.com/application/o/ytt/")
+    assert s.oidc_config_url == (
+        "https://idp.example.com/application/o/ytt/.well-known/openid-configuration"
+    )
+
+
+def test_oidc_config_url_explicit_override_wins():
+    """An IdP whose discovery document is not at the standard issuer-relative
+    path gets YTT_OIDC_CONFIG_URL — used verbatim, never re-derived."""
+    s = Settings(
+        oidc_issuer="https://idp.example.com/realms/ytt",
+        oidc_config_url="https://idp.example.com/static/discovery.json",
+    )
+    assert s.oidc_config_url == "https://idp.example.com/static/discovery.json"
+
+
+def test_oidc_env_overrides(monkeypatch):
+    monkeypatch.setenv("YTT_OIDC_ISSUER", "https://env.example.com/realms/ytt")
+    s = Settings()
+    assert s.oidc_issuer == "https://env.example.com/realms/ytt"
+    assert s.oidc_config_url == (
+        "https://env.example.com/realms/ytt/.well-known/openid-configuration"
+    )
+
+
+def test_oidc_env_config_url_override(monkeypatch):
+    monkeypatch.setenv("YTT_OIDC_ISSUER", "https://env.example.com/realms/ytt")
+    monkeypatch.setenv("YTT_OIDC_CONFIG_URL", "https://env.example.com/disc")
+    s = Settings()
+    assert s.oidc_config_url == "https://env.example.com/disc"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://idp.example.com/realms/ytt",  # not https (OIDC Core §3.1.2.1)
+        "",  # empty — an error, not a silent default (fail-closed)
+        "   ",  # whitespace-only == empty
+        "https://idp.example.com/realms ytt",  # embedded whitespace (line wrap)
+        " https://idp.example.com/realms/ytt ",  # surrounding whitespace
+        "https://idp.example.com/realms?x=1",  # query (iss is byte-exact)
+        "https://idp.example.com/realms#frag",  # fragment
+        "not-a-url",
+        "https://",  # no hostname
+    ],
+)
+def test_oidc_issuer_rejects_malformed_values(bad):
+    with pytest.raises(ValidationError):
+        Settings(oidc_issuer=bad)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "http://idp.example.com/discovery",
+        "",
+        "https://idp.example.com/d?x=1",
+        "https://idp.example.com/d#f",
+        "https://",
+    ],
+)
+def test_oidc_config_url_rejects_malformed_values(bad):
+    with pytest.raises(ValidationError):
+        Settings(oidc_config_url=bad)

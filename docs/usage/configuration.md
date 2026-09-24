@@ -17,16 +17,24 @@ variable has a working default.
 
 ytt federates authentication to an upstream OIDC provider (decision and
 threat model: [../notes/auth.md](../notes/auth.md)); it never falls back to
-an unauthenticated mode.  **The upstream issuer is currently hardcoded** to
-the reference Authentik instance — `https://sso.ardenone.com/application/o/ytt/`
-(`AUTHENTIK_ISSUER` / `AUTHENTIK_OIDC_CONFIG_URL` in `ytt/auth.py`) — so the
-OAuth2 client must exist there; pointing ytt at your own IdP is a code
-change, not a config change.
+an unauthenticated mode.  The upstream IdP is **configurable**: the baked-in
+defaults point at the reference Authentik instance —
+`https://sso.ardenone.com/application/o/ytt/` (`AUTHENTIK_ISSUER` /
+`AUTHENTIK_OIDC_CONFIG_URL` in `ytt/auth.py`, kept as the reference-default
+aliases) — so the reference deployment needs no extra variables, and any
+other deployment points ytt at its own IdP with the two variables below.
+Caveat: upstream `id_token`s are verified HS256-keyed-by-client-secret (the
+reference Authentik's signing mode, also Authentik's default for providers
+without an asymmetric signing key selected) — an IdP that signs RS256 via
+JWKS (e.g. Keycloak's default) is not yet supported; see the note in
+`ytt/auth.py::build_auth_provider`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YTT_OAUTH_CLIENT_ID` | *(required)* | Client ID of the `ytt` OAuth2 application on the upstream IdP. Startup exits 1 if unset (`ytt/auth.py::build_auth_provider`). |
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | Client secret of the same application. Doubles as the HS256 key that verifies upstream `id_token`s and as the HKDF seed for the signing key of ytt's own tokens. A secret — inject by reference (the reference deployment provisions it via ExternalSecret from OpenBao); never commit, log, or inline it. |
+| `YTT_OIDC_ISSUER` | `https://sso.ardenone.com/application/o/ytt/` | Issuer URL of the upstream OIDC provider. Matched **byte-for-byte** against the id token's `iss` claim, so set it to exactly the value your IdP advertises (Authentik per-application issuers end with `/`; Keycloak realm issuers do not — never normalized). Startup-validated: must be `https://` with a hostname, and must not contain whitespace, a query, or a fragment. |
+| `YTT_OIDC_CONFIG_URL` | *(derived)* | The IdP's OIDC discovery document, fetched once at startup. Unset, it is derived from `YTT_OIDC_ISSUER` as `<issuer>/.well-known/openid-configuration` (OIDC Discovery §4). Set it only when your IdP serves the document at a non-standard path. Same startup validation as the issuer. |
 | `YTT_JWT_SIGNING_SECRET` | *(unset)* | Optional explicit signing key for the tokens ytt issues to clients. Unset, it is derived from `YTT_OAUTH_CLIENT_SECRET` (stable across restarts). Set only to rotate ytt's token key independently of the upstream client secret. |
 
 ## Authorization

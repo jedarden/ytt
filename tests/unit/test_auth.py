@@ -661,3 +661,90 @@ class TestWrongAudienceRejected:
 
         result = await verifier.verify_token(correct_token)
         assert result is not None, "Correct-audience token must be accepted"
+
+
+class TestOidcEndpointConfiguration:
+    """The upstream IdP is settings-driven (bead ytt-c4205423).
+
+    build_auth_provider() must hand YTT_OIDC_ISSUER / YTT_OIDC_CONFIG_URL to
+    the id-token verifier and the discovery call — the AUTHENTIK_* names in
+    ytt.auth are only the reference defaults, so a settings override must
+    actually reach the provider (not stay pinned to the constants).
+    """
+
+    BASE_SETTINGS = dict(
+        public_url="https://mcp.example.com/ytt",
+        oauth_client_id="test-client-id",
+        oauth_client_secret="test-client-secret",
+    )
+
+    @staticmethod
+    def _capture_discovery_url(monkeypatch) -> dict:
+        """Patch the (conftest-stubbed, network-free) discovery call to
+        record the config_url the provider was actually constructed with."""
+        from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+        captured: dict = {}
+        real = OIDCProxy.get_oidc_configuration
+
+        def capturing(self, config_url, strict, timeout_seconds):
+            captured["config_url"] = str(config_url)
+            return real(self, config_url, strict, timeout_seconds)
+
+        monkeypatch.setattr(OIDCProxy, "get_oidc_configuration", capturing)
+        return captured
+
+    def test_token_verifier_issuer_follows_settings(self):
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        s = Settings(
+            **self.BASE_SETTINGS, oidc_issuer="https://idp.example.com/realms/ytt/"
+        )
+        provider = build_auth_provider(s)
+        assert provider._token_validator.issuer == (
+            "https://idp.example.com/realms/ytt/"
+        )
+        assert provider._token_validator.audience == "test-client-id"
+
+    def test_discovery_url_follows_settings(self, monkeypatch):
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        captured = self._capture_discovery_url(monkeypatch)
+        s = Settings(
+            **self.BASE_SETTINGS,
+            oidc_issuer="https://idp.example.com/realms/ytt",
+            oidc_config_url="https://idp.example.com/static/discovery.json",
+        )
+        build_auth_provider(s)
+        assert captured["config_url"] == (
+            "https://idp.example.com/static/discovery.json"
+        )
+
+    def test_discovery_url_derives_from_issuer_when_unset(self, monkeypatch):
+        """No explicit YTT_OIDC_CONFIG_URL: the provider discovers from the
+        issuer-derived standard path, not from the reference Authentik."""
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        captured = self._capture_discovery_url(monkeypatch)
+        s = Settings(
+            **self.BASE_SETTINGS, oidc_issuer="https://idp.example.com/realms/ytt"
+        )
+        build_auth_provider(s)
+        assert captured["config_url"] == (
+            "https://idp.example.com/realms/ytt/.well-known/openid-configuration"
+        )
+
+    def test_default_settings_still_pin_the_reference_authentik(self, monkeypatch):
+        """With nothing set, the wired provider is byte-identical to the
+        pre-0.2.21 hardcoded behavior (reference-default aliases)."""
+        from ytt import auth
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        captured = self._capture_discovery_url(monkeypatch)
+        provider = build_auth_provider(Settings(**self.BASE_SETTINGS))
+        assert provider._token_validator.issuer == auth.AUTHENTIK_ISSUER
+        assert captured["config_url"] == auth.AUTHENTIK_OIDC_CONFIG_URL

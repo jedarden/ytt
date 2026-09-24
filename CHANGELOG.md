@@ -96,6 +96,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deployment. The long-running `ytt canary` loop and its `:8081` metrics are
   unchanged.
 
+- **Configurable upstream OIDC IdP** (bead `ytt-c4205423`). The upstream
+  identity provider is no longer hardcoded to the reference Authentik —
+  BYO-IdP is now a config change, completing the self-hosting workflow the
+  README's quick start documented as requiring a fork. New validated
+  settings: `YTT_OIDC_ISSUER` (the issuer, matched byte-for-byte against the
+  id token's `iss` claim and therefore never normalized; startup-validated
+  https with a hostname, no whitespace/query/fragment — same fail-closed
+  posture as `YTT_PROXY_URL`) and `YTT_OIDC_CONFIG_URL` (the discovery
+  document, derived from the issuer as
+  `<issuer>/.well-known/openid-configuration` per OIDC Discovery §4 when
+  unset; an explicit value wins verbatim). Defaults keep the reference
+  deployment byte-identical — `AUTHENTIK_ISSUER` / `AUTHENTIK_OIDC_CONFIG_URL`
+  remain in `ytt/auth.py` as the reference-default aliases. Documented
+  caveat: id tokens are verified HS256-keyed-by-client-secret (the reference
+  Authentik's signing mode), so an RS256/JWKS-signing IdP (Keycloak's
+  default) is not yet supported. Coverage: `tests/unit/test_config.py`
+  (defaults, derivation, explicit + env overrides, malformed-value
+  rejection) and `tests/unit/test_auth.py` (the provider hands the
+  configured issuer/discovery URL through).
+
 ### Fixed
 
 - **`YTT_MAX_CONCURRENT_WHISPER` is now actually enforced** (bead

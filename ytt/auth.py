@@ -1,18 +1,21 @@
 """OAuth resource-server / FastMCP auth (plan: docs/notes/auth.md, ADR-003).
 
-Federates to the org's self-hosted Authentik (``sso.ardenone.com``) via
-FastMCP's generic ``OIDCProxy`` — an ``OAuthProxy`` that presents a
-DCR-compliant AS to MCP clients (Claude) while proxying the actual login to
-Authentik and verifying the resulting JWT against Authentik's JWKS. All
-endpoints are discovered from Authentik's per-application config document
-(``AUTHENTIK_OIDC_CONFIG_URL`` below) rather than hardcoded, unlike the
-Google-specific predecessor this replaces (ADR-003 in ``docs/plan/plan.md``).
+Federates to an upstream OIDC identity provider via FastMCP's generic
+``OIDCProxy`` — an ``OAuthProxy`` that presents a DCR-compliant AS to MCP
+clients (Claude) while proxying the actual login to the IdP and verifying
+the resulting JWT against the IdP's keys. Which IdP is configurable:
+``YTT_OIDC_ISSUER`` / ``YTT_OIDC_CONFIG_URL`` (reference default: the org's
+self-hosted Authentik; see ``ytt.config`` for the validation and the
+discovery-URL derivation). All upstream endpoints are discovered from the
+IdP's per-application config document rather than hardcoded, unlike the
+Google-specific predecessor this replaced (ADR-003 in
+``docs/plan/plan.md``).
 
 ytt has its own Authentik application/client (``ytt``) — it does **not**
 share a client with ibkr-mcp the way the old Google setup did (that was an
 unintentional coupling: two independent servers' authorization depended on
 one shared external credential). ``YTT_OAUTH_CLIENT_ID``/
-``YTT_OAUTH_CLIENT_SECRET`` are Authentik-generated values scoped to this
+``YTT_OAUTH_CLIENT_SECRET`` are IdP-generated values scoped to this
 application only.
 
 Do NOT reintroduce FastMCP's ``InMemoryOAuthProvider`` here. It is an
@@ -40,7 +43,11 @@ from starlette.routing import Route
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
-from ytt.config import Settings
+from ytt.config import (
+    DEFAULT_OIDC_CONFIG_URL,
+    DEFAULT_OIDC_ISSUER,
+    Settings,
+)
 
 # ---------------------------------------------------------------------------
 # Claude connector redirect URIs — the only redirect URIs ytt's AS will issue
@@ -53,15 +60,19 @@ CLAUDE_REDIRECT_URIS: list[str] = [
     "https://claude.com/api/mcp/auth_callback",
 ]
 
-# Authentik's per-application OIDC discovery document. The "ytt" slug must
-# match the application slug set in declarative-config's
-# k8s/ardenone-cluster/authentik/authentik-blueprints-configmap.yml (ADR-003).
-AUTHENTIK_OIDC_CONFIG_URL = (
-    "https://sso.ardenone.com/application/o/ytt/.well-known/openid-configuration"
-)
+# Reference-deployment defaults for the upstream IdP — the org's self-hosted
+# Authentik. The "ytt" slug must match the application slug set in
+# declarative-config's k8s/ardenone-cluster/authentik/
+# authentik-blueprints-configmap.yml (ADR-003). These are the baked-in
+# Settings defaults for YTT_OIDC_ISSUER / YTT_OIDC_CONFIG_URL (ytt/config.py):
+# build_auth_provider() reads the *settings*, so pointing ytt at a different
+# IdP is an env change, not a code change (docs/usage/self-hosting.md). The
+# names stay as the reference-default aliases the conformance tests pin
+# against (tests/unit/test_oauth_conformance.py).
+AUTHENTIK_OIDC_CONFIG_URL = DEFAULT_OIDC_CONFIG_URL
 
 # Same slug, without the discovery-doc suffix -- the ID token's iss claim.
-AUTHENTIK_ISSUER = "https://sso.ardenone.com/application/o/ytt/"
+AUTHENTIK_ISSUER = DEFAULT_OIDC_ISSUER
 
 
 class YttOIDCProvider(OIDCProxy):
@@ -167,7 +178,11 @@ class YttOIDCProvider(OIDCProxy):
 
 
 def build_auth_provider(settings: Settings) -> YttOIDCProvider:
-    """Create the Authentik-federated OAuth provider for the given settings.
+    """Create the IdP-federated OAuth provider for the given settings.
+
+    The upstream IdP is settings-driven (``YTT_OIDC_ISSUER`` /
+    ``YTT_OIDC_CONFIG_URL``, reference Authentik by default) — see
+    ``ytt.config`` for the validation and the discovery-URL derivation.
 
     Raises ``ValueError`` if OIDC credentials are not configured — fail fast
     at startup rather than silently falling back to an unauthenticated or
@@ -175,11 +190,12 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     """
     if not settings.oauth_client_id:
         raise ValueError(
-            "YTT_OAUTH_CLIENT_ID is required (Authentik OAuth2 client ID for "
-            "the 'ytt' application on sso.ardenone.com — see "
-            "docs/notes/auth.md, ADR-003). ytt must federate to a real "
-            "identity provider; it must never fall back to an "
-            "unauthenticated or self-issued-with-no-login provider."
+            "YTT_OAUTH_CLIENT_ID is required (OAuth2 client ID for the 'ytt' "
+            "application on the upstream OIDC IdP — YTT_OIDC_ISSUER, which "
+            "defaults to the reference Authentik — see docs/notes/auth.md, "
+            "ADR-003). ytt must federate to a real identity provider; it "
+            "must never fall back to an unauthenticated or "
+            "self-issued-with-no-login provider."
         )
 
     # Parse the *origin* (scheme+host) from the path-bearing public_url.
@@ -193,6 +209,17 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # verify_id_token=True + a custom HS256 token_verifier -- BOTH required,
     # confirmed 2026-08-15 across two rounds of live debugging
     # (FASTMCP_LOG_LEVEL=DEBUG, not guessed).
+    #
+    # Configurability caveat (bead ytt-c4205423): everything the IdP switch
+    # above (YTT_OIDC_ISSUER / YTT_OIDC_CONFIG_URL) changes is *where* to
+    # log in and who signed the token — this verifier's HS256-by-client-secret
+    # shape is the reference Authentik's signing mode (below: also Authentik's
+    # default for any provider without an asymmetric signing key selected) and
+    # is NOT configurable yet. An IdP that signs id tokens RS256 with a real
+    # JWKS (Keycloak's default) will complete the OAuth dance and then fail
+    # token verification. Documented in docs/usage/self-hosting.md; plumbing
+    # JWKS/symmetric verification selection is follow-up work, not silently
+    # attempted here.
     #
     # This Authentik instance signs EVERY OAuth2Provider's tokens (access
     # AND id) with HS256 (symmetric, keyed by the client_secret) -- not a
@@ -238,7 +265,7 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     token_verifier = JWTVerifier(
         public_key=settings.oauth_client_secret,
         algorithm="HS256",
-        issuer=AUTHENTIK_ISSUER,
+        issuer=settings.oidc_issuer,
         audience=settings.oauth_client_id,
     )
     #
@@ -280,7 +307,7 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     TWELVE_WEEKS_SECONDS = 12 * 7 * 24 * 3600
 
     provider = YttOIDCProvider(
-        config_url=AUTHENTIK_OIDC_CONFIG_URL,
+        config_url=settings.oidc_config_url,
         client_id=settings.oauth_client_id,
         client_secret=settings.oauth_client_secret,
         base_url=settings.public_url,

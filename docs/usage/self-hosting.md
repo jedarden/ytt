@@ -31,6 +31,7 @@ services:
       YTT_ALLOWED_SUBJECTS: ""      # set after discovering your sub (see connector.md)
       YTT_OAUTH_CLIENT_ID: "your-oauth-client-id"       # required — server exits 1 without it
       YTT_OAUTH_CLIENT_SECRET: "your-oauth-client-secret"
+      YTT_OIDC_ISSUER: "https://idp.example.com/application/o/ytt/"  # your IdP's issuer (see below)
       YTT_WHISPER_URL: "http://whisper:8000"
       YTT_CACHE_DIR: "/cache"
       YTT_CACHE_MAX_BYTES: "2Gi"
@@ -55,10 +56,22 @@ volumes:
 Put a reverse proxy (e.g. Traefik or Caddy) in front of ytt and expose
 `https://mcp.example.com/ytt` publicly.
 
-Note on the OAuth client: the upstream IdP is currently hardcoded to the
-reference Authentik instance (`sso.ardenone.com/application/o/ytt/`, see
-`ytt/auth.py`), so the client must exist there — BYO-IdP is a code change,
-not a config change (see the [configuration reference](configuration.md)).
+Note on the OAuth client: the upstream IdP is configurable. ytt defaults to
+the reference Authentik (`sso.ardenone.com/application/o/ytt/`); set
+`YTT_OIDC_ISSUER` to your IdP's issuer (as in the compose file above) and
+the discovery URL is derived from it as
+`<issuer>/.well-known/openid-configuration` — set `YTT_OIDC_CONFIG_URL`
+only if your IdP serves it elsewhere. The issuer must match your IdP's
+advertised value byte-for-byte (Authentik per-application issuers end with
+`/`; Keycloak realm issuers don't). On your IdP, register a confidential
+client for ytt with redirect URI `https://<your-domain>/ytt/auth/callback`
+and the `openid` + `email` scopes; its client ID/secret go in
+`YTT_OAUTH_CLIENT_ID` / `YTT_OAUTH_CLIENT_SECRET`. One caveat: id tokens
+are verified HS256-keyed-by-client-secret — the reference Authentik's
+signing mode (and Authentik's default without an asymmetric signing key) —
+so an IdP that signs RS256 via JWKS (Keycloak's default) is not yet
+supported; see the note in `ytt/auth.py::build_auth_provider` and the
+[configuration reference](configuration.md).
 
 ## Kubernetes (generic)
 

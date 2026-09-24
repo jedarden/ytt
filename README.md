@@ -24,10 +24,12 @@ docker run --rm \
 ```
 
 The OAuth client pair is startup-required — the server exits 1 without it.
-The upstream IdP is currently hardcoded to the reference Authentik instance
-(`sso.ardenone.com/application/o/ytt/`, see `ytt/auth.py`), so the OAuth2
-client must exist there; pointing ytt at your own IdP is a code change, not a
-config change.
+The upstream IdP defaults to the reference Authentik instance
+(`sso.ardenone.com/application/o/ytt/`); set `YTT_OIDC_ISSUER` to point ytt
+at your own OIDC provider instead — the discovery URL is derived from the
+issuer (`YTT_OIDC_CONFIG_URL` overrides it). You need an OAuth2 client on
+*your* IdP either way; see [docs/usage/self-hosting.md](docs/usage/self-hosting.md)
+for the full recipe.
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
 at `https://your-domain.example.com/ytt` (HTTPS required for Anthropic's backend).
@@ -68,8 +70,9 @@ In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --once`.
 ## Configuration
 
 All config is environment-variable-based. Nothing ardenone-specific is
-*required*, but a few baked-in defaults (`YTT_WHISPER_URL`, and
-`YTT_PUBLIC_URL`'s fallback) point at the reference deployment — set your own.
+*required*, but a few baked-in defaults (`YTT_WHISPER_URL`, `YTT_OIDC_ISSUER`,
+and `YTT_PUBLIC_URL`'s fallback) point at the reference deployment — set
+your own.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -83,6 +86,8 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_MAX_PENDING_WHISPER_JOBS` | `16` | ASR **backlog** cap across all subjects: pending + running jobs. A caption-less request that would start a *new* job past the cap is denied `rate_limited` ("Whisper queue full") without spending a quota slot; joining an in-flight job stays free. `0` = deny all new ASR jobs (fail-closed). |
 | `YTT_OAUTH_CLIENT_ID` | *(required)* | OAuth2 client ID of the `ytt` application on the upstream IdP. Startup exits 1 if unset. |
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
+| `YTT_OIDC_ISSUER` | *(reference Authentik)* | Issuer URL of the upstream OIDC provider — matched byte-for-byte against the id token's `iss` claim, so set it to exactly what your IdP advertises. Validated at startup (https, no whitespace/query/fragment). |
+| `YTT_OIDC_CONFIG_URL` | *(derived from the issuer)* | Discovery-document URL; defaults to `<issuer>/.well-known/openid-configuration`. Set only for a non-standard path. |
 | `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
 | `YTT_WHISPER_MODEL` | `large-v3-turbo` | Model name served by the Whisper endpoint. Auto-corrects via `/v1/models`. |
 | `YTT_CACHE_DIR` | `/cache` | Transcript cache directory. |

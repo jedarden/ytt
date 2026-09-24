@@ -23,6 +23,14 @@ parsing it enforces:
   is rejected: 0 is documented deny-all (no refill), so a one-shot burst
   allowance would silently contradict it. An explicit ``RATE_LIMIT_BURST=0``
   is valid with any rate — capacity 0 denies every fetch (fail-closed).
+- ``YTT_OIDC_ISSUER`` / ``YTT_OIDC_CONFIG_URL`` must be well-formed https
+  URLs (hostname required; whitespace, query, and fragment rejected — the
+  same fail-closed posture as ``YTT_PROXY_URL``, since the issuer is matched
+  byte-for-byte against the upstream id token's ``iss`` claim and a typo must
+  fail startup, not every login). An unset ``YTT_OIDC_CONFIG_URL`` is derived
+  from the issuer per OIDC Discovery §4; the issuer itself is never
+  normalized (see :func:`_require_https_url` and
+  :meth:`Settings._derive_oidc_config_url`).
 - Storage sizing: for ``pvc`` backend, ``statvfs(cache_dir)`` must be >=
   ``cache_max_bytes`` (fail fast); for ``emptydir`` a warning is emitted instead
   (statvfs reports node disk, not the kubelet ``sizeLimit``). This filesystem
@@ -95,6 +103,69 @@ Bytes = Annotated[int, BeforeValidator(parse_size)]
 #: URL would half-work and half-break. Fail fast at startup instead; most
 #: residential proxy providers (Webshare et al.) serve plain HTTP endpoints.
 _ALLOWED_PROXY_SCHEMES: frozenset[str] = frozenset({"http", "https"})
+
+
+# --- upstream OIDC IdP (reference-deployment defaults) -----------------------
+
+#: Issuer of the reference upstream IdP — the org's self-hosted Authentik
+#: application for ytt. Baked in as the ``YTT_OIDC_ISSUER`` default so the
+#: reference deployment needs no extra env vars; any other deployment points
+#: ytt at its own IdP by setting the variable. Compared byte-for-byte against
+#: the id token's ``iss`` claim, so it is validated but never normalized
+#: (Authentik per-application issuers end with ``/``, Keycloak realm issuers
+#: do not — stripping either side breaks token verification).
+DEFAULT_OIDC_ISSUER = "https://sso.ardenone.com/application/o/ytt/"
+
+#: The ``YTT_OIDC_CONFIG_URL`` that matches ``DEFAULT_OIDC_ISSUER`` — the
+#: OIDC Discovery §4 issuer-relative location of the discovery document,
+#: spelled out as a constant so the reference defaults are pinned
+#: byte-for-byte and a test can hold the derivation honest.
+DEFAULT_OIDC_CONFIG_URL = (
+    DEFAULT_OIDC_ISSUER.rstrip("/") + "/.well-known/openid-configuration"
+)
+
+
+def _require_https_url(env_name: str, value: str) -> None:
+    """Validate an https URL setting in the ``YTT_PROXY_URL`` style (fail fast).
+
+    - empty/whitespace is an error, not a silent default — a manifest
+      interpolating a missing value must fail startup, not quietly point ytt
+      back at the reference IdP (same fail-closed posture as ``YTT_PROXY_URL``);
+    - whitespace anywhere is rejected (copy-paste line wraps are the classic
+      way a URL gets split in a manifest);
+    - scheme must be https (OIDC Core §3.1.2.1 requires https issuers; ytt is
+      a deployed server, not a localhost dev tool);
+    - a hostname must be present;
+    - query and fragment components are rejected — the issuer is an opaque
+      byte-exact comparison value, and an ``iss`` claim never carries either.
+    """
+    if not value.strip():
+        raise ValueError(
+            f"{env_name} is empty — unset the variable entirely for the "
+            "reference-IdP default; if set, it must be a real URL "
+            "(e.g. https://idp.example.com/realms/ytt)"
+        )
+    if re.search(r"\s", value):
+        raise ValueError(
+            f"{env_name} contains whitespace: {value!r} — an OIDC URL is a "
+            "single token (scheme://host/path); check for a copy-paste line wrap"
+        )
+    parsed = urlparse(value)
+    if parsed.scheme.lower() != "https":
+        raise ValueError(
+            f"{env_name} must use https:// (OIDC Core §3.1.2.1 requires an "
+            f"https issuer) — got scheme {parsed.scheme!r} in {value!r}"
+        )
+    if not parsed.hostname:
+        raise ValueError(
+            f"{env_name} has no hostname: {value!r} "
+            "(expected e.g. https://idp.example.com/realms/ytt)"
+        )
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            f"{env_name} must not carry a query or fragment: {value!r} — the "
+            "issuer is matched byte-for-byte against the id token's iss claim"
+        )
 
 
 def join_path(prefix: str, route: str) -> str:
@@ -183,13 +254,24 @@ class Settings(BaseSettings):
     path_prefix: str = "/ytt/"
     public_url: str = "https://mcp.ardenone.com/ytt"
 
-    # --- OAuth (Google, from ESO/OpenBao) ---
+    # --- OAuth (upstream OIDC IdP, from ESO/OpenBao) ---
     # Optional on the Settings model itself so unit tests can construct freely;
     # ytt.auth.build_auth_provider raises at startup if oauth_client_id is
     # unset (see docs/notes/auth.md) rather than falling back to no auth.
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     jwt_signing_secret: str | None = None
+    # Upstream IdP location: the reference Authentik by default, any generic
+    # OIDC provider via env (docs/usage/self-hosting.md). The issuer is
+    # matched byte-for-byte against the id token's iss claim, so it is
+    # validated but never normalized — see _require_https_url.
+    oidc_issuer: str = DEFAULT_OIDC_ISSUER
+    # Upstream OIDC discovery document. Unset (absent from env/init, or an
+    # explicit None) is resolved by _derive_oidc_config_url below to
+    # <issuer>/.well-known/openid-configuration — the before-model-validator
+    # runs ahead of field validation, so the model type is plain str after
+    # construction and ytt.auth needs no None handling.
+    oidc_config_url: str = DEFAULT_OIDC_CONFIG_URL
 
     # ------------------------------------------------------------------ #
     @field_validator(
@@ -227,6 +309,34 @@ class Settings(BaseSettings):
         # The audience/resource/issuer must be byte-identical with NO trailing
         # slash (RFC 8707 confused-deputy guard). Normalize defensively.
         return v.rstrip("/")
+
+    @field_validator("oidc_issuer")
+    @classmethod
+    def _oidc_issuer_valid(cls, v: str) -> str:
+        """``YTT_OIDC_ISSUER`` must be a well-formed https issuer URL.
+
+        Fail fast at startup (same posture as ``YTT_PROXY_URL``): the issuer
+        is compared byte-for-byte against the upstream id token's ``iss``
+        claim by ``ytt.auth``'s JWTVerifier, so a typo'd value would sit
+        unexercised until the first login and then fail every token
+        verification with an opaque ``invalid_token``. Never normalized —
+        see :func:`_require_https_url`.
+        """
+        _require_https_url("YTT_OIDC_ISSUER", v)
+        return v
+
+    @field_validator("oidc_config_url")
+    @classmethod
+    def _oidc_config_url_valid(cls, v: str) -> str:
+        """``YTT_OIDC_CONFIG_URL`` must be a well-formed https URL.
+
+        The discovery fetch happens once, at provider construction (startup):
+        a malformed value must fail startup, not the first login. Unset
+        values never reach this validator — :meth:`_derive_oidc_config_url`
+        resolves them before field validation.
+        """
+        _require_https_url("YTT_OIDC_CONFIG_URL", v)
+        return v
 
     @field_validator("proxy_url")
     @classmethod
@@ -278,6 +388,29 @@ class Settings(BaseSettings):
                 "(expected e.g. http://user:pass@proxy.example.com:3128)"
             )
         return stripped
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_oidc_config_url(cls, data: object) -> object:
+        """Unset ``YTT_OIDC_CONFIG_URL`` derives from ``YTT_OIDC_ISSUER``.
+
+        OIDC Discovery §4 places the discovery document at
+        ``<issuer>/.well-known/openid-configuration``; the trailing-slash
+        difference is absorbed (Authentik-style issuers carry one, Keycloak
+        ones do not). Runs before field validation — so it sees env-sourced
+        values too — which also keeps the field type plain ``str`` after
+        construction: ``ytt.auth`` passes it straight to ``OIDCProxy`` with
+        no None handling. An explicit ``YTT_OIDC_CONFIG_URL`` always wins
+        verbatim (only ``None``/absent derives).
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("oidc_config_url") is None and data.get("oidc_issuer"):
+            data["oidc_config_url"] = (
+                str(data["oidc_issuer"]).rstrip("/")
+                + "/.well-known/openid-configuration"
+            )
+        return data
 
     @model_validator(mode="after")
     def _resolve_rate_limit_burst(self) -> "Settings":
