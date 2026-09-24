@@ -324,7 +324,7 @@ def _boot_container(
         if state.returncode != 0 or state.stdout.strip().startswith("False"):
             break
         try:
-            r = httpx.get(f"{base_url}/ytt/health", timeout=2.0)
+            r = httpx.get(f"{base_url}/health", timeout=2.0)
             if r.status_code == 200:
                 return True, base_url, ""
             last_err = f"health {r.status_code}"
@@ -476,7 +476,7 @@ def test_missing_oauth_client_secret_fails_closed(image: str):
 
 def test_quick_start_health(booted: BootedContainer):
     """self-hosting.md "Smoke testing": /ytt/health → {"status": "ok"}."""
-    r = httpx.get(f"{booted.base_url}/ytt/health", timeout=10.0)
+    r = httpx.get(f"{booted.base_url}/health", timeout=10.0)
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
 
@@ -485,7 +485,7 @@ def test_quick_start_mcp_transport_requires_auth(booted: BootedContainer):
     """The MCP transport mounted at /ytt must reject anonymous clients with the
     documented 401 + WWW-Authenticate resource_metadata pointer (README
     "Auth required"; server.py's challenge shape)."""
-    r = httpx.get(f"{booted.base_url}/ytt", timeout=10.0)
+    r = httpx.get(booted.base_url, timeout=10.0)
     assert r.status_code == 401, f"expected 401 on the MCP mount, got {r.status_code}"
     www_auth = r.headers.get("www-authenticate", "")
     expected_metadata = (
