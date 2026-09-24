@@ -11,6 +11,12 @@
 # sibling ../declarative-config checkout (or $YTT_DECLARATIVE_CONFIG_DIR) it
 # is the enforcement point for the "keep the two copies identical" rule in
 # docs/notes/single-replica.md.
+#
+# The bead-status documentation guard (tests/unit/test_bead_inventory_docs.py)
+# runs inside the suite below: it cross-checks the generated
+# docs/bead-inventory.{md,json} pair and lints curated docs for hand-written
+# bead-status claims; its freshness leg skips where no live bead store exists
+# (same skip shape as the parity guard above).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # pytest >= 9 exits 5 (NO_TESTS_COLLECTED) for the module-level skip in a

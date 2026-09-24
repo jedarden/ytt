@@ -13,7 +13,10 @@
 #     store state, dirtying the tree for every worker sharing the checkout.
 # The docs therefore carry an explicit point-in-time caveat instead. Run this
 # on demand when a current snapshot is needed, and commit the result when it
-# is going to be cited.
+# is going to be cited. A staleness gate bounds the "on demand" habit:
+# tests/unit/test_bead_inventory_docs.py fails the DoD suite where a live
+# bead store exists if the committed snapshot is older than 14 days —
+# regenerate (and commit BOTH files) when that gate trips.
 #
 # Requires: bead (bead-rs CLI — this workspace's declared backend per
 # .needle.yaml), python3.
@@ -31,6 +34,7 @@ $COMMAND > "$jsonl"
 
 python3 - "$jsonl" "$GENERATED_AT" "$COMMAND" <<'PYEOF'
 import json
+import re
 import sys
 from datetime import datetime
 from collections import Counter
@@ -160,6 +164,58 @@ if quarantined:
 else:
     quar_lines = "- No not-closed bead carries a `quarantine-until` label."
 
+# --- History (accumulated across regenerations) ---------------------------
+# Preserve the bullets from the previously committed snapshot — demoting its
+# "(this snapshot)" marker to a plain dated line — so History is an audit
+# trail instead of a single-slot overwrite. Static context bullets survive
+# via preservation; the fallback covers a first-generation (or deleted) file.
+STATIC_HISTORY = [
+    "- 2026-08-21 snapshot (superseded): 13 open.",
+    (
+        '- The bead that commissioned this regeneration quoted "~45 open '
+        'beads" — that figure did not match the live store then either; a '
+        "closed/total count had been misread as \"open\". Cite `bead list` "
+        "output, not this file, when the current count matters."
+    ),
+    (
+        "- The previous machine-readable copy lived at "
+        "`.beads/bead-inventory-open.json` and was removed: nothing under "
+        "`.beads/` may be hand-edited, which made maintaining a snapshot "
+        "there self-contradictory."
+    ),
+]
+
+
+def prior_history(md_path: Path) -> list:
+    if not md_path.exists():
+        return []
+    text = md_path.read_text()
+    if "## History" not in text:
+        return []
+    section = text.split("## History", 1)[1].split("\n## ", 1)[0]
+    bullets = []
+    for line in section.splitlines():
+        if line.startswith("- "):
+            bullets.append(line)
+        elif line[:1] in (" ", "\t") and bullets and line.strip():
+            # continuation of a wrapped bullet — rejoin onto one line
+            bullets[-1] += " " + line.strip()
+        elif line.strip():
+            break  # first non-bullet, non-indented line ends the list
+    demoted = []
+    for b in bullets:
+        m = re.match(r"- (\S+) \(this snapshot\): (.*)", b)
+        demoted.append(f"- {m.group(1)}: {m.group(2)}" if m else b)
+    return list(dict.fromkeys(demoted))  # dedupe, keep order
+
+
+history = prior_history(Path("docs/bead-inventory.md")) or STATIC_HISTORY
+history.append(
+    f"- {generated_at} (this snapshot): {open_n} open, {in_progress_n} in "
+    f"progress, {closed_n} closed."
+)
+history_text = "\n".join(history)
+
 doc = f"""# Workspace Bead Inventory
 
 > **Point-in-time snapshot — do not trust for planning.** This file records
@@ -208,16 +264,7 @@ do not by themselves hide a bead.
 
 ## History
 
-- 2026-08-21 snapshot (superseded): 13 open.
-- {generated_at} (this snapshot): {open_n} open, {in_progress_n} in progress, {closed_n} closed.
-- The bead that commissioned this regeneration quoted "~45 open beads" —
-  that figure does not match the live store at generation time ({open_n}
-  open); it is closest to the closed count ({closed_n}), suggesting a
-  closed/total count was misread as "open". Cite `bead list` output, not
-  this file, when the current count matters.
-- The previous machine-readable copy lived at `.beads/bead-inventory-open.json`
-  and was removed: nothing under `.beads/` may be hand-edited, which made
-  maintaining a snapshot there self-contradictory.
+{history_text}
 """
 
 md_doc = Path("docs/bead-inventory.md")
