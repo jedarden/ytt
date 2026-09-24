@@ -95,7 +95,11 @@ in-cluster only (datacenter IPs outside the cluster are blocked by design):
 1. **`ytt canary --once --via-proxy`** — one-shot JSON report; `verdict: "ok"`
    proves a caption fetch succeeded *through* the proxy, and the `egress` half
    classifies the proxy's exit IP. Runnable via `kubectl exec` against the
-   server Deployment or any one-shot pod/Argo step.
+   server Deployment or any one-shot pod/Argo step. In practice you rarely
+   invoke it directly: **`ytt canary --gate`** (the post-deploy release gate,
+   `deploy/RUNBOOK.md` §3) runs this probe *and* the direct one whenever
+   `YTT_PROXY_URL` is configured, requires `outcome=ok` on both, retains the
+   JSON evidence, and emits the rollback/escalation directive on failure.
 2. **`tests/integration/test_proxy_live.py`** — pytest integration suite
    (`-m integration`): asserts `/admin/egress` reports `via_proxy: true` with a
    residential classification, and runs the canary via-proxy fetch end to end.

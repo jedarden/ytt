@@ -8,8 +8,12 @@ Subcommands (plan: Deliverables / CLI):
 - ``ytt selftest``  run the egress probe (ip/asn/org/is_residential);
                     ``--show-sub`` prints the last decoded token ``sub`` (allowlist setup)
 - ``ytt canary``    run the residential-egress canary — long-running probe loop
-                    by default, or a one-shot caption fetch + JSON report with
-                    ``--once`` (exit 0 on ok, 1 on ip_blocked/other failure)
+                    by default, a one-shot caption fetch + JSON report with
+                    ``--once`` (exit 0 on ok, 1 on ip_blocked/other failure),
+                    or the post-deploy acceptance gate with ``--gate``: both
+                    one-shot probes (direct + ``--via-proxy`` when a proxy is
+                    configured), JSON evidence file, remediation directive on
+                    failure (deploy/RUNBOOK.md §3)
 
 Exit code is 0 on success, non-zero on failure.
 """
@@ -73,6 +77,23 @@ def _build_parser() -> argparse.ArgumentParser:
             "carries YouTube traffic (docs/notes/proxy-egress.md)"
         ),
     )
+    p_can.add_argument(
+        "--gate",
+        action="store_true",
+        help=(
+            "post-deploy acceptance gate: run the one-shot canary direct AND "
+            "via the proxy when YTT_PROXY_URL is configured, require "
+            "outcome=ok on both, write JSON evidence, exit 0 only on a full "
+            "pass (rollback/escalation directive on failure — RUNBOOK §3)"
+        ),
+    )
+    p_can.add_argument(
+        "--evidence-dir",
+        default=None,
+        metavar="DIR",
+        help="gate mode only: directory for the JSON evidence file "
+        "(default: /tmp/ytt-canary-evidence)",
+    )
 
     return parser
 
@@ -117,10 +138,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_selftest(show_sub=args.show_sub)
 
     if args.command == "canary":
-        if args.video_id and not args.once:
-            parser.error("--video-id is only valid with --once")
+        if args.video_id and not (args.once or args.gate):
+            parser.error("--video-id is only valid with --once or --gate")
         if args.via_proxy and not args.once:
-            parser.error("--via-proxy is only valid with --once")
+            parser.error(
+                "--via-proxy is only valid with --once (--gate runs it itself "
+                "when a proxy is configured)"
+            )
+        if args.evidence_dir and not args.gate:
+            parser.error("--evidence-dir is only valid with --gate")
+        if args.gate and args.once:
+            parser.error("--gate and --once are mutually exclusive")
+        if args.gate:
+            return _run_canary_gate(video_id=args.video_id, evidence_dir=args.evidence_dir)
         if args.once:
             return _run_canary_once(video_id=args.video_id, via_proxy=args.via_proxy)
         from ytt.canary import main as canary_main
@@ -145,6 +175,31 @@ def _run_canary_once(video_id: str | None, via_proxy: bool = False) -> int:
             f"from here (video {report['video_id']})",
             file=sys.stderr,
         )
+        return 1
+    return 0
+
+
+def _run_canary_gate(video_id: str | None, evidence_dir: str | None) -> int:
+    """Run the post-deploy acceptance gate; exit 0 only on a full pass.
+
+    The JSON report (stdout) is the evidence to retain with the release
+    record; on failure the remediation directive — rollback vs. escalate
+    (RUNBOOK §3.1) — goes to stderr alongside the report.
+    """
+    import json
+
+    from ytt.canary_gate import run_gate
+
+    report = run_gate(video_id=video_id, evidence_dir=evidence_dir)
+    print(json.dumps(report, indent=2))
+    if report["gate"] != "pass":
+        print(
+            f"CANARY GATE FAILED: {report['verdict']} "
+            f"(probe: {report['failed_probe']}, video {report['video_id']})",
+            file=sys.stderr,
+        )
+        if report["remediation"]:
+            print(report["remediation"], file=sys.stderr)
         return 1
     return 0
 

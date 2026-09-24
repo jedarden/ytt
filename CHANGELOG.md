@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Post-deploy canary acceptance gate** — `ytt canary --gate` (bead
+  `ytt-026fdbb4`). The release gate after any image or egress change: runs
+  the one-shot canary direct **and** `--via-proxy` when `YTT_PROXY_URL` is
+  configured, requires `outcome=ok` on every probe, writes the combined JSON
+  evidence (`--evidence-dir`, default `/tmp/ytt-canary-evidence/`; the
+  stdout copy is the durable record), and exits 0 only on a full pass. A
+  failure carries a `remediation` directive — rollback vs. escalate, keyed
+  by which probe failed and how (`ytt.canary_gate.remediation_for`, mirrored
+  by the decision table in `deploy/RUNBOOK.md` §3.1). Like `ytt canary
+  --once`, it never touches the singleton lock, so it is safe to exec into
+  the live server pod.
 - **Bounded download & Whisper resource guardrails** (bead `ytt-89d1e56d`). The
   ASR fallback path is now a bounded resource end to end — an allowlisted
   caller (or a fleet of them) cannot exhaust scratch disk, the shared Whisper

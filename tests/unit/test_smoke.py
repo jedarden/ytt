@@ -27,6 +27,7 @@ _MODULES = [
     "ytt.observability",
     "ytt.selftest",
     "ytt.canary",
+    "ytt.canary_gate",
 ]
 
 

@@ -65,7 +65,17 @@ ytt canary --once    # fetches captions for one known-good video; JSON report,
                      # verdict "ok" vs "ip_blocked", exit 0/1
 ```
 
-In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --once`.
+After changing the image or the egress config, run the acceptance gate
+instead — it runs the direct probe **and** `--via-proxy` when `YTT_PROXY_URL`
+is set, requires `outcome=ok` on both, retains the JSON evidence, and prints
+the rollback/escalation directive on failure:
+
+```bash
+ytt canary --gate    # release gate; exit 0 only on a full pass
+```
+
+In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --gate`
+(decision table: `deploy/RUNBOOK.md` §3.1).
 
 ## Configuration
 

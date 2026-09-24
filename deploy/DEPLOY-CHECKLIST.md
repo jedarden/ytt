@@ -103,6 +103,20 @@ curl -s https://mcp.ardenone.com/ytt/health        # {"status": "ok"}
 kubectl --server=http://traefik-ardenone-cluster:8001 get pods -n ytt
 ```
 
+Then run the **canary acceptance gate** in the new pod — required after any
+image or egress change (this checklist's §4 pin, or a `YTT_PROXY_URL`
+change):
+
+```bash
+kubectl --server=http://traefik-ardenone-cluster:8001 exec -n ytt deploy/ytt \
+  -- ytt canary --gate
+```
+
+Exit 0 + `outcome=ok` on every probe = release validated; retain the JSON
+(e.g. `| tee canary-gate-<ts>.json`) with the release record.  On failure the
+report's `remediation` names the rollback/escalation path — the decision
+table is [RUNBOOK.md](RUNBOOK.md) §3.1.
+
 ### 6. Verify OAuth metadata (and ibkr — do-not-harm gate)
 
 ```bash

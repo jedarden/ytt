@@ -176,16 +176,24 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    ytt's `/.well-known/*` must show `resource`/`issuer` `…/ytt`, and ibkr's
    two metadata hashes must be byte-identical to pre-deploy.  Any ibkr hash
    change → revert the declarative-config commit and push.
-4. **Egress canary, one-shot, in the new server pod**
+4. **Canary acceptance gate, in the new server pod** — the release gate after
+   any image or egress change:
    ```bash
-   $KS exec -n ytt deploy/ytt -- ytt canary --once
+   $KS exec -n ytt deploy/ytt -- ytt canary --gate \
+     | tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"
    ```
-   JSON report, verdict `ok`, exit 0.  This is the fast proof that the new pod
-   can actually reach YouTube (the one thing a green health probe does *not*
-   prove).  `ytt canary --once` does not touch the singleton lock — only
-   `serve()` does — so it is safe alongside the live server; the same is true
-   of `ytt selftest`.  (A stray `ytt serve` exec'd into the pod *will* exit 1
-   on the lock — that's the tripwire working.)
+   The gate runs `ytt canary --once` (direct) **and** `--via-proxy` when
+   `YTT_PROXY_URL` is configured, requires `outcome=ok` on every probe,
+   writes the combined JSON evidence (default
+   `/tmp/ytt-canary-evidence/`), and exits 0 **only** on a full pass.  The
+   `tee` copy is the retained evidence for the release record (the pod's
+   `/tmp` dies with the pod) — paste it into the release bead.  Exit 1 = gate
+   failed: the report's `remediation` field names the rollback/escalation
+   path (§3.1 below) and the report's `probes` half carries the per-probe
+   detail.  Like `ytt canary --once`, the gate does not touch the singleton
+   lock — only `serve()` does — so it is safe alongside the live server; the
+   same is true of `ytt selftest`.  (A stray `ytt serve` exec'd into the pod
+   *will* exit 1 on the lock — that's the tripwire working.)
 5. **Standing canary Deployment is healthy** — `ytt-canary` is a separate
    Deployment and does **not** restart when the server does; check its probe
    loop kept succeeding through the upgrade:
@@ -206,9 +214,37 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    checkout: `ytt test --integration` (see `docs/usage/deploy-ardenone.md`).
    Needs residential egress; never chases these from a datacenter machine.
 
-A formal canary *acceptance workflow* (gate rather than checklist) is tracked
-separately as bead `ytt-026fdbb4`; this section is the manual procedure that
-workflow should encode.
+### 3.1 The canary acceptance gate — decision table
+
+Step 4's gate (`ytt canary --gate`, bead `ytt-026fdbb4`) encodes this
+section mechanically; the table below is the same logic in prose (mirrored by
+`ytt.canary_gate.remediation_for`, the two are updated together).  It applies
+to **any** release that touched the image or the egress configuration — a
+new pinned tag, a `YTT_PROXY_URL` change, a proxy-provider swap.
+
+**Rule: the release is not done until the gate exits 0.**  Green health
+probe + unchanged OAuth metadata + no firing alerts do *not* prove the new
+pod can reach YouTube; only the gate does.
+
+On a failure: **re-run the gate once before acting** — single failures can
+be transient (a YouTube-side blip, a proxy flap).  On a repeat failure, act
+on the **first failing probe** (`report.failed_probe`) and its
+`outcome` (`report.verdict`):
+
+| First failing probe | `outcome` | Action |
+|---|---|---|
+| `via_proxy` (proxy configured) | `ip_blocked` | The fallback path is broken. If the release changed `YTT_PROXY_URL`/proxy handling → **roll back** (revert the declarative-config change, push; §5) and re-gate. Otherwise the proxy's residential IP is burned or quota exhausted → **escalate** to the proxy/egress owner with the evidence JSON; rollback will not help. Direct probe failing too = fetches down for users → treat as an incident. |
+| `direct` (proxy configured, `via_proxy` passed) | `ip_blocked` | Native egress blocked, proxy healthy — the caption path degrades to its proxied fallback (bandwidth cost, still serving). Not a release defect; **rollback will not fix it**. **Escalate** to the egress owner with the evidence, and decide explicitly whether to keep or revert the tag. |
+| `direct` (no proxy configured) | `ip_blocked` | If the release changed fetch code or bumped yt-dlp → **roll back** (§5) and re-gate on the previous tag. Otherwise the egress IP is burned → **escalate** to the egress owner with the evidence. |
+| either probe | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
+| either probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the environment and re-run; escalate with the evidence only if it persists. |
+
+**Retain the evidence either way.**  The `tee`d stdout copy (or
+`report.evidence_file` where the filesystem survives) goes into the release
+bead — pass or fail.  A pass without retained evidence is an unauditable
+release; a failure without evidence is an escalation nobody can act on.
+The report contains no secrets: probe error strings are credential-redacted
+and the proxy URL never appears.
 
 ## 4. Refresh the in-repo mirror
 
