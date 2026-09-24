@@ -8,6 +8,20 @@ spec:
     metadata:
       annotations:
         kubectl.kubernetes.io/restarted-at: '2026-08-07T07:53:59Z'
+    # PROBE (2026-09-20): argo-events v1.9.10 Template carries `container`, its own
+    # narrow Container type (resources/env/volumeMounts/securityContext), NOT a
+    # PodSpec. The `spec.containers[]` block below is preserved by the CRD's
+    # x-kubernetes-preserve-unknown-fields but the controller never reads it, so
+    # every generated sensor Deployment is resources:{} today. Testing the real
+    # field on this one sensor before converting the other 69.
+    container:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 256Mi
     spec:
       containers:
       - name: main
@@ -27,6 +41,7 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 2
           failureThreshold: 3
+        # (resources moved to spec.template.container — this block is inert; declarat-5dfe4a42)
   eventBusName: default
   fetchTimeout: 3s
   dependencies:

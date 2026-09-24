@@ -5,6 +5,8 @@
 #
 # Image: ronaldraygun/ytt (Docker Hub, fleet-standard registry — same as ibkr-mcp).
 # Pinned to a semver tag (k8s/CLAUDE.md Rule #8: never :latest, never bare SHA).
+# 0.2.20 is the canary-capable release (the canary probe Deployment that proves
+# residential egress runs beside this one — see canary-deployment.yml).
 # Pull via docker-hub-registry (auto-reflected into this namespace by kubernetes-reflector).
 #
 # Egress: ardenone-cluster is hosted on a residential connection, so yt-dlp
@@ -53,7 +55,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt
-          image: ronaldraygun/ytt:0.2.13
+          image: ronaldraygun/ytt:0.2.20
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

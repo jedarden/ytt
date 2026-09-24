@@ -1,0 +1,79 @@
+---
+# ytt residential-egress canary probe Deployment (plan §Observability / Canary).
+# A LONG-RUNNING probe — no kind: Job/CronJob anywhere (they are banned: ArgoCD
+# cannot manage them idempotently). Runs `ytt canary`, the probe loop, which
+# calls yt-dlp directly against a fixed internal video list — bypassing OAuth —
+# and exposes ytt_canary_* metrics via prometheus_client on :8081.
+#   interval: every 10 min (YTT_CANARY_INTERVAL_SEC=600)
+#   alert:    YttCanaryFailed fires if time() - ytt_canary_last_success_timestamp_seconds
+#             > 1800 (3 consecutive probes missed) — prometheusrule.yml
+#   scrape:   service/ytt-canary port metrics, via servicemonitor.yml
+# Image: ronaldraygun/ytt:0.2.20 — canary-capable release (canary commit 5747658;
+# 0.2.18/0.2.19 were burnt, never published). Pinned semver, no :latest.
+#
+# No volumes: the probe is stateless (yt-dlp caption extraction writes nothing
+# durable) and shares no in-process state with the server. NetworkPolicy does
+# not select this pod yet, so egress is cluster-default (DNS + 443 reach
+# YouTube); tightening it under the ytt policy's posture is a follow-up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: canary
+    app: ytt-canary
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    # a transient second probe pod would double-probe YouTube mid-rollout
+  selector:
+    matchLabels:
+      app: ytt-canary
+  template:
+    metadata:
+      labels:
+        app: ytt-canary
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: canary
+      annotations:
+        prometheus.io/scrape: "false"   # scraped via ServiceMonitor, not annotation
+    spec:
+      imagePullSecrets:
+        - name: docker-hub-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001        # matches the image's ytt user
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: ytt-canary
+          image: ronaldraygun/ytt:0.2.20
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8081
+              protocol: TCP
+          command: ["ytt", "canary"]
+          env:
+            - name: YTT_CANARY_INTERVAL_SEC
+              value: "600"
+          resources:
+            requests:
+              cpu: "50m"              # ardenone-cluster new-service default
+              memory: "128Mi"
+              ephemeral-storage: "50Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"         # 4x request — cluster guide ceiling
+              ephemeral-storage: "200Mi"
+          livenessProbe:
+            # /metrics is prometheus_client's always-200 endpoint; if the loop
+            # wedges hard enough that the server stops answering, kube restarts.
+            httpGet:
+              path: /metrics
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 60
+            failureThreshold: 3

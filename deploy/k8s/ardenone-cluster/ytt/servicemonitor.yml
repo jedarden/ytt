@@ -1,7 +1,9 @@
 ---
-# ServiceMonitor for the ytt main server (plan §Observability:
+# ServiceMonitor for both ytt workloads (plan §Observability:
 # "scraped via a ServiceMonitor — Prometheus-operator is present on the cluster").
-# Scrapes /ytt/metrics on the ClusterIP, no auth (Prometheus in-cluster only).
+#   - server (service/ytt):   /ytt/metrics on port http   (8080)
+#   - canary (service/ytt-canary): /metrics on port metrics (8081, prometheus_client)
+# Scraped on the ClusterIP, no auth (Prometheus in-cluster only).
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -14,11 +16,20 @@ metadata:
     # ardenone-cluster convention — mirror ibkr-mcp's label.
     prometheus: kube-prometheus
 spec:
+  # Select both the server and the canary Service. Each endpoint names a port
+  # only one Service has, so /ytt/metrics resolves against ytt and /metrics
+  # against ytt-canary; unmatched endpoint/port pairs are skipped by the operator.
   selector:
-    matchLabels:
-      app: ytt
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [ytt, ytt-canary]
   endpoints:
     - port: http
       path: /ytt/metrics
+      interval: 30s
+      scrapeTimeout: 10s
+    - port: metrics
+      path: /metrics
       interval: 30s
       scrapeTimeout: 10s

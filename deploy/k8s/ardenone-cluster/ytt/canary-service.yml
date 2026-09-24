@@ -1,0 +1,24 @@
+---
+# ClusterIP Service fronting the canary probe's metrics port (8081).
+# ServiceMonitors select Services (not pods), so the canary's /metrics endpoint
+# is only scrapeable through this Service — servicemonitor.yml's `metrics`
+# endpoint resolves against it. The server's service.yml deliberately does NOT
+# select app: ytt-canary: its :8080 must only ever reach the real server pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ytt-canary
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: canary
+    app: ytt-canary
+spec:
+  type: ClusterIP
+  selector:
+    app: ytt-canary
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: 8081
+      protocol: TCP
