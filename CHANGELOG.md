@@ -113,6 +113,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's slot), surfaced in the usual structured error shape instead of an
   escaping exception.
 
+- **`ytt_fetch_blocks_total` exports its zero series from startup** (bead
+  `ytt-f77d1be4`). prometheus_client emits no series for a labelled Counter
+  until its first child exists, so a fresh server or canary process carried
+  no `ytt_fetch_blocks_total` series at all while sibling counters that had
+  also never fired exported `0.0` — "never blocked" was indistinguishable
+  from "metric not registered" on exactly the signal (YouTube IP blocking)
+  the canary exists to watch (2026-09-18 collection,
+  `docs/notes/canary-first-fetch.md`). The canonical outcome children
+  (`ok`, `ip_blocked`, `no_captions_asr_started`) are now pre-created at
+  import; each exports `0.0` until incremented, and pre-registration records
+  no fetch event. The counter still has no increment site — wiring fetch
+  outcomes into it remains the candidate follow-up named in that note —
+  pre-registration only makes its absence semantics unambiguous.
+
 ### Added
 
 - **Release-metadata drift guard in `scripts/definition-of-done.sh`** (bead

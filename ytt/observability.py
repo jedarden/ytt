@@ -58,6 +58,24 @@ ytt_fetch_blocks_total = Counter(
     ["outcome"],
 )
 
+#: Canonical fetch-outcome label values, pre-registered below so the counter
+#: exports a 0 series per outcome from process startup. Mirrors the stable
+#: taxonomy in :mod:`ytt.errors` (``ip_blocked``, ``no_captions_asr_started``).
+FETCH_BLOCK_OUTCOMES: tuple[str, ...] = (
+    "ok",
+    "ip_blocked",
+    "no_captions_asr_started",
+)
+
+# prometheus_client exports no series for a labelled Counter until its first
+# child exists — so a fresh process carried no ``ytt_fetch_blocks_total``
+# series at all, and "never blocked" was indistinguishable from "metric not
+# registered" on the canary pod (docs/notes/canary-first-fetch.md).
+# Pre-create one child per canonical outcome: ``.labels()`` instantiates the
+# child at 0 and records no fetch event.
+for _fetch_outcome in FETCH_BLOCK_OUTCOMES:
+    ytt_fetch_blocks_total.labels(outcome=_fetch_outcome)
+
 #: Separate counter for empty/unrecognized bodies (distinct metric so silent
 #: breakage is visible — plan §Fetch core error taxonomy).
 ytt_fetch_empty_body_total = Counter(

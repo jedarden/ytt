@@ -79,6 +79,25 @@ def test_fetch_blocks_total_labels():
     ytt_fetch_blocks_total.labels(outcome="no_captions_asr_started")
 
 
+def test_fetch_blocks_total_zero_series_preregistered():
+    """Every canonical outcome series must exist before any block event.
+
+    prometheus_client exports no series for a labelled Counter until its
+    first child exists, so a fresh process previously exported nothing for
+    this family and "never blocked" was indistinguishable from "metric not
+    registered" on the canary pod (docs/notes/canary-first-fetch.md). The
+    children are pre-created (at 0, recording no event) at import time.
+    """
+    from prometheus_client import REGISTRY, generate_latest
+
+    from ytt.observability import FETCH_BLOCK_OUTCOMES
+
+    body = generate_latest(REGISTRY).decode()
+    for outcome in FETCH_BLOCK_OUTCOMES:
+        series = f'ytt_fetch_blocks_total{{outcome="{outcome}"}}'
+        assert series in body, f"Pre-registered series {series!r} missing from exposition"
+
+
 def test_whisper_errors_total_labels():
     """ytt_whisper_errors_total must accept a 'reason' label."""
     from ytt.observability import ytt_whisper_errors_total

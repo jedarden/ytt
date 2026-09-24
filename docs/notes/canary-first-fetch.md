@@ -113,3 +113,15 @@ collection, which *for the server process* still means no tool-driven fetch).
   was fresh (~1 min old) and the failure counter zero.
 - The Webshare / `YTT_PROXY_URL` fallback (docs/notes/proxy-egress.md) stays
   as designed-in insurance; nothing observed justifies enabling it.
+
+## Postscript — 2026-09-24 (bead `ytt-f77d1be4`)
+
+The latent gap identified in the analysis above is closed: `ytt.observability`
+now pre-registers a zero child per canonical outcome (`ok`, `ip_blocked`,
+`no_captions_asr_started`) at import, so `ytt_fetch_blocks_total` exports
+`0.0` from process startup on both the server and the canary — same shape as
+the sibling counters in the table above. From the release carrying this
+change, a missing series means "process predates the fix", never "metric not
+registered". The counter still has no increment site; wiring `ytt.fetch`
+outcomes into it remains the candidate follow-up named above. Everything else
+in this note is a 2026-09-18 evidence record for 0.2.20 and is unchanged.
