@@ -29,6 +29,15 @@ Prerequisites (everything else skips cleanly):
   * the ``cryptography`` package (already in the project's dependency graph —
     it signs the stub IdP's self-signed certificate)
 
+Network mode (``YTT_SMOKE_NETWORK``, default ``bridge``): the booted container
+must reach the stub IdP on the test host. ``bridge`` uses the documented
+``-p`` publish shape plus ``--add-host=host.docker.internal:host-gateway``.
+Hosts whose firewall blocks container→host traffic over the docker bridge
+(NixOS with a default nftables ruleset, among others) make that path time out;
+set ``YTT_SMOKE_NETWORK=host`` to share the host network namespace instead —
+the server's port is hardcoded to 8080 (``server.serve``), so host mode
+requires host port 8080 to be free.
+
 Run:  ``YTT_SMOKE_IMAGE=<ref> uv run pytest tests/image -m integration``
 """
 
@@ -57,6 +66,10 @@ BOOT_TIMEOUT_SEC = 90.0
 
 _DOCKER_TIMEOUT_SEC = 120
 
+#: The server's port is hardcoded in ``server.serve`` — in ``host`` network
+#: mode this is also the host port, so it must be free.
+_SERVER_PORT = 8080
+
 
 # ---------------------------------------------------------------------------
 # docker plumbing
@@ -81,6 +94,21 @@ def _docker(*args: str) -> subprocess.CompletedProcess[str]:
 def _container_logs(name: str) -> str:
     logs = _docker("logs", name)
     return (logs.stdout + logs.stderr)[-4000:]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def require_docker_daemon():
+    """Skip the whole module when no docker daemon is reachable.
+
+    The default unit gate (``-m "not integration"``) never collects this
+    module; this guard additionally keeps an explicit ``-m integration`` run
+    honest on hosts (kaniko builds, clean extractions) with no runtime.
+    """
+    info = _docker("info", "--format", "{{.ServerVersion}}")
+    if info.returncode != 0:
+        pytest.skip(
+            f"no reachable docker daemon — skipping smoke test: {info.stderr[-300:]}"
+        )
 
 
 @pytest.fixture(scope="module")
@@ -108,21 +136,6 @@ def image() -> str:
     return ref
 
 
-@pytest.fixture(scope="module", autouse=True)
-def require_docker_daemon():
-    """Skip the whole module when no docker daemon is reachable.
-
-    The default unit gate (``-m "not integration"``) never collects this
-    module; this guard additionally keeps an explicit ``-m integration`` run
-    honest on hosts (kaniko builds, clean extractions) with no runtime.
-    """
-    info = _docker("info", "--format", "{{.ServerVersion}}")
-    if info.returncode != 0:
-        pytest.skip(
-            f"no reachable docker daemon — skipping smoke test: {info.stderr[-300:]}"
-        )
-
-
 # ---------------------------------------------------------------------------
 # stub OIDC IdP (startup discovery only)
 # ---------------------------------------------------------------------------
@@ -137,7 +150,7 @@ class _StubIdp:
     startup (the HS256-by-client-secret verifier never touches the JWKS).
     """
 
-    def __init__(self, workdir: Path) -> None:
+    def __init__(self, workdir: Path, network_mode: str) -> None:
         self.cert = workdir / "idp-cert.pem"
         self.key = workdir / "idp-key.pem"
         self._generate_self_signed_cert()
@@ -149,9 +162,11 @@ class _StubIdp:
         with socket.socket() as s:
             s.bind(("0.0.0.0", 0))
             self.port = s.getsockname()[1]
+        # The issuer URL as the container itself resolves it, per network mode.
+        host = "127.0.0.1" if network_mode == "host" else "host.docker.internal"
+        self.issuer = f"https://{host}:{self.port}/"
         # https is mandatory: Settings rejects an http OIDC issuer outright
         # (OIDC Core §3.1.2.1), so the stub must serve TLS.
-        self.issuer = f"https://host.docker.internal:{self.port}/"
         self._srv = HTTPServer(("0.0.0.0", self.port), self._handler())
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(self.cert, self.key)
@@ -160,8 +175,8 @@ class _StubIdp:
         self._thread.start()
 
     def _generate_self_signed_cert(self) -> None:
-        """Sign a throwaway cert for host.docker.internal (the hostname the
-        container dials, see the --add-host flag below) + 127.0.0.1."""
+        """Sign a throwaway cert covering both dialable identities: the
+        host-gateway hostname (bridge mode) and 127.0.0.1 (host mode)."""
         # Imported lazily so a venv without the dep skips instead of erroring
         # at collection; cryptography ships with the project's dependency
         # graph (fastmcp/mcp), so real environments always have it.
@@ -176,8 +191,6 @@ class _StubIdp:
         except ImportError as exc:
             pytest.skip(f"cryptography unavailable — skipping smoke test: {exc}")
 
-        # The container dials the host via host.docker.internal; the SAN must
-        # match that hostname.
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name(
             [x509.NameAttribute(NameOID.COMMON_NAME, "ytt-smoke-stub-idp")]
@@ -212,16 +225,18 @@ class _StubIdp:
         )
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
-        doc = {
-            "issuer": self.issuer,
-            "authorization_endpoint": self.issuer + "authorize/",
-            "token_endpoint": self.issuer + "token/",
-            "jwks_uri": self.issuer + "jwks/",
-            "response_types_supported": ["code"],
-            "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["HS256"],
-        }
-        body = json.dumps(doc).encode()
+        doc = json.dumps(
+            {
+                "issuer": self.issuer,
+                "authorization_endpoint": self.issuer + "authorize/",
+                "token_endpoint": self.issuer + "token/",
+                "jwks_uri": self.issuer + "jwks/",
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["HS256"],
+            }
+        ).encode()
+        body = doc
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802 (http.server API)
@@ -255,15 +270,98 @@ class BootedContainer:
         self.client_secret = client_secret
 
 
-@pytest.fixture(scope="module")
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
+def _boot_container(
+    image: str,
+    network_mode: str,
+    idp: _StubIdp,
+    env: dict[str, str],
+    name: str,
+    publish_port: int,
+) -> tuple[bool, str, str]:
+    """`docker run` the minimal documented quick start and wait for health.
+
+    Returns ``(healthy, base_url, failure_logs)``. The container is left
+    running on success; on failure it is removed and its logs returned
+    (no ``--rm``: the daemon would eat the logs before we can read them).
+    """
+    if network_mode == "host":
+        base_url = f"http://127.0.0.1:{_SERVER_PORT}/ytt"
+        run_args: list[str] = ["--network", "host"]
+    else:
+        base_url = f"http://127.0.0.1:{publish_port}/ytt"
+        run_args = [
+            "-p",
+            f"127.0.0.1:{publish_port}:{_SERVER_PORT}",
+            "--add-host=host.docker.internal:host-gateway",
+        ]
+
+    run = _docker(
+        "run",
+        "-d",
+        "--name",
+        name,
+        *run_args,
+        "-v",
+        f"{idp.cert}:/ytt-smoke-idp-cert.pem:ro",
+        *[f"-e{k}={v}" for k, v in env.items()],
+        image,
+    )
+    if run.returncode != 0:
+        return False, base_url, f"docker run failed:\n{run.stderr[-1000:]}"
+
+    deadline = time.monotonic() + BOOT_TIMEOUT_SEC
+    last_err = ""
+    while time.monotonic() < deadline:
+        # Exit early if the container already died — with no --rm we can
+        # still read its logs below instead of staring at connection refusals.
+        state = _docker("inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name)
+        if state.returncode != 0 or state.stdout.strip().startswith("False"):
+            break
+        try:
+            r = httpx.get(f"{base_url}/ytt/health", timeout=2.0)
+            if r.status_code == 200:
+                return True, base_url, ""
+            last_err = f"health {r.status_code}"
+        except httpx.HTTPError as exc:
+            last_err = str(exc)[:300]
+        time.sleep(1.0)
+
+    logs = _container_logs(name)
+    _docker("rm", "-f", name)
+    return (
+        False,
+        base_url,
+        (
+            f"container did not become healthy within {BOOT_TIMEOUT_SEC:.0f}s "
+            f"(last error: {last_err})\ncontainer logs:\n{logs}"
+        ),
+    )
+
+
 @pytest.fixture(scope="module")
-def booted(image: str, _free_port: int, tmp_path_factory: pytest.TempPathFactory):
+def network_mode(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Bridge (default) or host — see the module docstring."""
+    mode = os.environ.get("YTT_SMOKE_NETWORK", "bridge")
+    if mode not in ("bridge", "host"):
+        pytest.fail(f"YTT_SMOKE_NETWORK must be 'bridge' or 'host', got {mode!r}")
+    if mode == "host":
+        # serve() binds 0.0.0.0:8080 unconditionally — fail loudly if taken.
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", _SERVER_PORT)) == 0:
+                pytest.fail(
+                    f"YTT_SMOKE_NETWORK=host needs host port {_SERVER_PORT} free"
+                )
+    return mode
+
+
+@pytest.fixture(scope="module")
+def booted(image: str, network_mode: str, tmp_path_factory: pytest.TempPathFactory):
     """Boot the built image with the minimal documented configuration.
 
     Mirrors the README quick start `docker run -e ...` list; the only
@@ -273,11 +371,14 @@ def booted(image: str, _free_port: int, tmp_path_factory: pytest.TempPathFactory
     enters the container solely via `-e` — runtime injection only.
     """
     workdir = tmp_path_factory.mktemp("ytt-image-smoke")
-    idp = _StubIdp(workdir)
+    idp = _StubIdp(workdir, network_mode)
     client_id = "smoke-client-" + secrets.token_hex(4)
     client_secret = secrets.token_urlsafe(24)
-    public_url = f"http://127.0.0.1:{_free_port}/ytt"
-    name = "ytt-smoke-" + secrets.token_hex(4)
+    public_url = (
+        f"http://127.0.0.1:{_SERVER_PORT}/ytt"
+        if network_mode == "host"
+        else f"http://127.0.0.1:{_free_port()}/ytt"
+    )
 
     env = {
         "YTT_PUBLIC_URL": public_url,
@@ -293,45 +394,27 @@ def booted(image: str, _free_port: int, tmp_path_factory: pytest.TempPathFactory
         "SSL_CERT_FILE": "/ytt-smoke-idp-cert.pem",
     }
 
-    run = _docker(
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        name,
-        "-p",
-        f"127.0.0.1:{_free_port}:8080",
-        "--add-host=host.docker.internal:host-gateway",
-        "-v",
-        f"{idp.cert}:/ytt-smoke-idp-cert.pem:ro",
-        *[f"-e{k}={v}" for k, v in env.items()],
+    name = "ytt-smoke-" + secrets.token_hex(4)
+    healthy, base_url, failure = _boot_container(
         image,
+        network_mode,
+        idp,
+        env,
+        name,
+        publish_port=int(public_url.rsplit(":", 1)[1].split("/", 1)[0]),
     )
-    if run.returncode != 0:
+    if not healthy:
         idp.stop()
-        pytest.fail(f"docker run failed:\n{run.stderr[-1000:]}")
+        hint = (
+            " — if this host firewalls container→host traffic over the docker "
+            "bridge, retry with YTT_SMOKE_NETWORK=host"
+            if network_mode == "bridge"
+            else ""
+        )
+        pytest.fail(failure + hint)
 
-    base_url = public_url
     booted_container = BootedContainer(base_url, name, client_secret)
     try:
-        deadline = time.monotonic() + BOOT_TIMEOUT_SEC
-        last_err = ""
-        while time.monotonic() < deadline:
-            try:
-                r = httpx.get(f"{base_url}/ytt/health", timeout=2.0)
-                if r.status_code == 200:
-                    break
-                last_err = f"health {r.status_code}"
-            except httpx.HTTPError as exc:
-                last_err = str(exc)[:300]
-            time.sleep(1.0)
-        else:
-            logs = _container_logs(name)
-            _docker("rm", "-f", name)
-            pytest.fail(
-                f"container did not become healthy within {BOOT_TIMEOUT_SEC:.0f}s "
-                f"(last error: {last_err})\ncontainer logs:\n{logs}"
-            )
         yield booted_container
     finally:
         _docker("rm", "-f", name)
