@@ -16,9 +16,53 @@
 #
 # All git operations use Forgejo (git.ardenone.com), not GitHub. GitHub is
 # a read-only mirror and receives changes only via Forgejo's server-side
-# push-mirror, never via direct CI writes.
+# push-mirror, never via CI writes.
 #
 # Triggered by Argo Events on git push (see ytt-sensor.yml).
+#
+# Release gate (anonymous pull, bead ytt-7656c3a2): after docker-build
+# publishes ronaldraygun/ytt:<version>, two further steps gate the release
+# on the exact promise the README quick start makes to self-hosters:
+#
+#   1. anonymous-pull-gate — an UNAUTHENTICATED registry manifest lookup and
+#      a full anonymous blob pull (skopeo --no-creds/--src-no-creds: token
+#      endpoint hit without credentials, manifest + config + every layer
+#      fetched anonymously), the pulled manifest verified against the
+#      advertised sha256, and the tested tag + digest recorded as workflow
+#      output parameters (status outlives podGC's pod deletion). A 401/403
+#      here means the Docker Hub repo is (again) private — the documented
+#      quick start 401s for every user — and fails the release by design;
+#      DEPLOY-CHECKLIST.md §3 is the operator fix. Rate limits (429) and
+#      network errors are classified as such in the log so an outage is not
+#      misread as a visibility regression.
+#
+#   2. quick-start-smoke — runs the just-published image as a pod sidecar
+#      with the documented quick-start environment (required OAuth client
+#      pair + public URL, no-Whisper mode, reference-IdP default) and
+#      asserts /ytt/health answers {"status":"ok"} and the MCP mount
+#      rejects an anonymous GET with the documented 401 + Bearer
+#      WWW-Authenticate challenge — the pulled image actually boots.
+#
+# Both gate pods run as the bare ytt-pull-gate ServiceAccount (first
+# document below): the workflow-level argo-workflow account carries
+# imagePullSecrets, which would authenticate the kubelet's pull and let the
+# smoke pass against a private repo — that would silently defeat the gate.
+# The bare account has no pull secrets (anonymity is structural, not
+# behavioral) and no RBAC (the emissary executor needs none; see
+# workflow-rbac.yml). Gate steps carry no OnFailure retry: a registry
+# authorization error must fail the release, not be retried into a pass.
+---
+# Bare service account for the two pull-gate pods. The anonymity of the
+# kubelet's image pull in quick-start-smoke rests on this account having NO
+# imagePullSecrets (argo-workflow, the workflow-level default, injects
+# docker-hub-registry + ghcr-jedarden-registry) and NO RBAC. If this account
+# ever needs a pull secret, the gate is void — move the gate off it instead.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ytt-pull-gate
+  namespace: argo-workflows
+automountServiceAccountToken: false
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -33,8 +77,9 @@ spec:
   # not cover that case: on 2026-08-07 five needle-ci runs sat Running for
   # 8h against a 3600s step limit. ttlStrategy only reaps COMPLETED runs, so
   # without a workflow-level cap they are never terminated and never GCd.
-  # Basis: sum of per-step deadlines x attempts = 5520s, +50% headroom.
-  activeDeadlineSeconds: 8400
+  # Basis: the pre-gate steps' sum x attempts = 5520s, + the two gate steps
+  # (600s x 3 attempts each) = 9120s total, +50% headroom.
+  activeDeadlineSeconds: 13800
   entrypoint: build
   serviceAccountName: argo-workflow
   arguments:
@@ -61,6 +106,29 @@ spec:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
+        - - name: anonymous-pull-gate
+            template: anonymous-pull-gate
+            arguments:
+              parameters:
+                - name: version
+                  value: "{{steps.resolve-version.outputs.parameters.version}}"
+        - - name: quick-start-smoke
+            template: quick-start-smoke
+            arguments:
+              parameters:
+                - name: version
+                  value: "{{steps.resolve-version.outputs.parameters.version}}"
+      # The release record: exactly what the gate tested. Survives podGC
+      # (podGC deletes pods at completion; parameters live on the Workflow
+      # object) — `kubectl get workflow <name> -o jsonpath='{.outputs...}'`.
+      outputs:
+        parameters:
+          - name: tested-tag
+            valueFrom:
+              parameter: "{{steps.anonymous-pull-gate.outputs.parameters.tag}}"
+          - name: tested-digest
+            valueFrom:
+              parameter: "{{steps.anonymous-pull-gate.outputs.parameters.digest}}"
 
     - name: resolve-version
       activeDeadlineSeconds: 120
@@ -158,3 +226,230 @@ spec:
           limits:
             cpu: 2000m
             memory: 4Gi
+
+    # ------------------------------------------------------------------
+    # Release gate 1/2 — anonymous manifest lookup + anonymous blob pull.
+    # Deliberately NOT the docker-config volume and NOT the argo-workflow
+    # account: every registry request below is credential-free. skopeo is
+    # used instead of raw curl so the anonymous token dance, content-type
+    # negotiation and blob fetch are the registry client's well-tested
+    # paths; the image is pinned (fleet rule: never :latest).
+    # ------------------------------------------------------------------
+    - name: anonymous-pull-gate
+      inputs:
+        parameters:
+          - name: version
+      activeDeadlineSeconds: 600
+      retryStrategy:
+        # OnError retries pod-level infrastructure failures only (node
+        # death, eviction) — a container exit 1 (every registry
+        # authorization error) is phase Failed and is NOT retried: the
+        # release must fail on the first real answer from the registry.
+        limit: "2"
+        retryPolicy: OnError
+        backoff:
+          duration: 30s
+          factor: "2"
+      serviceAccountName: ytt-pull-gate
+      script:
+        image: quay.io/skopeo/stable:v1.22.3
+        command: [sh]
+        source: |
+          set -eu
+          TAG="ronaldraygun/ytt:{{inputs.parameters.version}}"
+          IMAGE="docker://docker.io/ronaldraygun/ytt:{{inputs.parameters.version}}"
+          echo "$TAG" > /tmp/tested-tag
+
+          echo "gate 1/2: anonymous manifest lookup (no credentials): $TAG"
+          LOOKUP=0
+          INSPECT="$(skopeo inspect --no-creds "$IMAGE" 2>&1)" || LOOKUP=1
+          if [ "$LOOKUP" -ne 0 ]; then
+            echo "ANONYMOUS-PULL-GATE FAILURE: anonymous manifest lookup failed for $TAG"
+            printf '%s\n' "$INSPECT" | tail -6
+            case "$INSPECT" in
+              *unauthorized*|*UNAUTHORIZED*|*401*|*denied*|*DENIED*|*403*)
+                echo ""
+                echo "Registry authorization error: the tag is not anonymously"
+                echo "pullable. The README quick start (docker run"
+                echo "ronaldraygun/ytt:<version>) 401s for every self-hoster."
+                echo "Fix: deploy/DEPLOY-CHECKLIST.md section 3 (Docker Hub"
+                echo "visibility is a Hub-UI operator step), then re-run the"
+                echo "release.";;
+              *toomanyrequests*|*429*|*Throttled*|*throttl*)
+                echo ""
+                echo "Anonymous Docker Hub rate limit (429) — not an"
+                echo "authorization failure. Re-run the release once the"
+                echo "throttle window passes.";;
+              *)
+                echo ""
+                echo "Not an authorization error — registry/network outage;"
+                echo "inspect the log above.";;
+            esac
+            exit 1
+          fi
+          DIGEST="$(printf '%s\n' "$INSPECT" \
+            | grep -oE '"Digest": *"sha256:[a-f0-9]{64}"' \
+            | grep -oE 'sha256:[a-f0-9]{64}' | head -n1)"
+          if [ -z "$DIGEST" ]; then
+            echo "ANONYMOUS-PULL-GATE FAILURE: lookup answered but no manifest digest found in:"
+            printf '%s\n' "$INSPECT" | head -3
+            exit 1
+          fi
+          echo "lookup OK: $TAG -> $DIGEST"
+
+          echo "gate 2/2: anonymous pull of manifest + config + every layer"
+          rm -rf /tmp/pull && mkdir -p /tmp/pull
+          PULL=0
+          COPY_LOG="$(skopeo copy --src-no-creds "$IMAGE" dir:/tmp/pull 2>&1)" || PULL=1
+          if [ "$PULL" -ne 0 ]; then
+            echo "ANONYMOUS-PULL-GATE FAILURE: anonymous blob pull failed for $TAG"
+            printf '%s\n' "$COPY_LOG" | tail -6
+            case "$COPY_LOG" in
+              *unauthorized*|*UNAUTHORIZED*|*401*|*denied*|*DENIED*|*403*)
+                echo "Registry authorization error mid-pull —"
+                echo "deploy/DEPLOY-CHECKLIST.md section 3.";;
+              *toomanyrequests*|*429*)
+                echo "Anonymous Docker Hub rate limit (429) — re-run later.";;
+            esac
+            exit 1
+          fi
+          printf '%s\n' "$COPY_LOG" | tail -2
+          test -s /tmp/pull/manifest.json || {
+            echo "ANONYMOUS-PULL-GATE FAILURE: pull reported success but wrote no manifest"
+            exit 1
+          }
+          # The tested digest is only evidence if the fetched bytes hash to
+          # it: the dir transport stores the manifest verbatim.
+          printf '%s  %s\n' "$DIGEST" /tmp/pull/manifest.json | sha256sum -c - || {
+            echo "ANONYMOUS-PULL-GATE FAILURE: pulled manifest does not hash to the advertised $DIGEST"
+            exit 1
+          }
+          echo "$DIGEST" > /tmp/tested-digest
+          echo "ANONYMOUS-PULL-GATE OK: $TAG ($DIGEST, $(du -sh /tmp/pull | cut -f1) fetched anonymously)"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      outputs:
+        parameters:
+          - name: tag
+            valueFrom:
+              path: /tmp/tested-tag
+          - name: digest
+            valueFrom:
+              path: /tmp/tested-digest
+
+    # ------------------------------------------------------------------
+    # Release gate 2/2 — run the documented quick start against the
+    # published tag. The sidecar IS ronaldraygun/ytt:<version>, pulled by
+    # the kubelet under the bare ytt-pull-gate account (no pull secrets —
+    # an anonymous pull, and a second, independent proof of the one in
+    # anonymous-pull-gate). Env mirrors the README "Quick start
+    # (self-hosted)" block: the startup-required trio present (throwaway
+    # values — the gate never authenticates to anything), documented
+    # no-Whisper mode, and the documented default upstream IdP (no
+    # YTT_OIDC_ISSUER — the reference Authentik discovery fetch is part of
+    # what a self-hoster's first boot exercises).
+    # ------------------------------------------------------------------
+    - name: quick-start-smoke
+      inputs:
+        parameters:
+          - name: version
+      activeDeadlineSeconds: 600
+      retryStrategy:
+        limit: "2"
+        retryPolicy: OnError
+        backoff:
+          duration: 30s
+          factor: "2"
+      serviceAccountName: ytt-pull-gate
+      script:
+        image: alpine:3.20
+        command: [sh]
+        source: |
+          set -eu
+          BASE="http://127.0.0.1:8080/ytt"
+          TAG="ronaldraygun/ytt:{{inputs.parameters.version}}"
+
+          echo "quick-start smoke: waiting up to ~180s for $BASE/health"
+          i=0
+          while :; do
+            if wget -q -O - "$BASE/health" 2>/dev/null \
+                | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+              break
+            fi
+            i=$((i + 1))
+            if [ "$i" -gt 90 ]; then
+              echo "QUICK-START-SMOKE FAILURE: $TAG never answered $BASE/health within ~180s."
+              echo "Usual causes: (1) registry authorization — the pod cannot pull"
+              echo "the image anonymously (ImagePullBackOff; the gate serviceaccount"
+              echo "has no pull secrets by design), (2) startup fail-closed on the"
+              echo "required env, (3) the upstream OIDC discovery fetch failing."
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "health: {\"status\":\"ok\"} as documented"
+
+          # The MCP mount must reject anonymous callers exactly as
+          # documented (README "Auth required"; the 401 challenge shape the
+          # deployed-ingress smoke pins against the live deployment).
+          HEADERS="$(wget -S -O /dev/null "$BASE" 2>&1 || true)"
+          STATUS="$(printf '%s\n' "$HEADERS" \
+            | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | head -n1 | grep -oE '[0-9]{3}$')"
+          if [ "$STATUS" != "401" ]; then
+            echo "QUICK-START-SMOKE FAILURE: MCP mount answered '${STATUS:-nothing}' to an anonymous GET; documented behavior is 401"
+            printf '%s\n' "$HEADERS" | head -5
+            exit 1
+          fi
+          if ! printf '%s\n' "$HEADERS" | grep -qi 'WWW-Authenticate:.*Bearer'; then
+            echo "QUICK-START-SMOKE FAILURE: 401 without a Bearer WWW-Authenticate challenge"
+            printf '%s\n' "$HEADERS" | head -10
+            exit 1
+          fi
+          echo "$TAG" > /tmp/smoke-tag
+          echo "QUICK-START-SMOKE OK: $TAG booted from an anonymous pull;"
+          echo "  /ytt/health -> 200 ok, anonymous MCP GET -> 401 + Bearer challenge"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      outputs:
+        parameters:
+          - name: tag
+            valueFrom:
+              path: /tmp/smoke-tag
+      sidecars:
+        - name: quick-start
+          image: ronaldraygun/ytt:{{inputs.parameters.version}}
+          env:
+            - name: YTT_PUBLIC_URL
+              value: "http://127.0.0.1:8080/ytt"
+            - name: YTT_PATH_PREFIX
+              value: "/ytt/"
+            - name: YTT_ALLOWED_SUBJECTS
+              value: "pull-gate-smoke"
+            # Throwaway pair: startup-required by the server's fail-closed
+            # check, never used to authenticate anything in this smoke (no
+            # OAuth flow is driven). Plain literals on purpose — a Secret
+            # here would imply a real credential lives in the release gate.
+            - name: YTT_OAUTH_CLIENT_ID
+              value: "pull-gate-smoke-client"
+            - name: YTT_OAUTH_CLIENT_SECRET
+              value: "pull-gate-smoke-dummy-secret"
+            # Documented no-Whisper mode: an unreachable endpoint disables ASR.
+            - name: YTT_WHISPER_URL
+              value: "http://127.0.0.1:9"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

@@ -39,6 +39,19 @@ WorkflowTemplate in iad-ci:
 2. `docker-build` builds with kaniko; the Dockerfile's test stage runs
    `pytest -m "not integration"` and a red suite aborts the build; then
    pushes **`ronaldraygun/ytt:<version>`** to Docker Hub.
+3. `anonymous-pull-gate` verifies what a self-hoster hits next: an
+   unauthenticated registry manifest lookup and a full anonymous blob pull
+   (skopeo `--no-creds` / `--src-no-creds`) of **`ronaldraygun/ytt:<version>`**,
+   the pulled manifest hash-checked against the advertised sha256. A registry
+   authorization error (401/403 — the Hub repo private again) fails the
+   release right here; §3 is the operator fix. Rate limits (429) and outages
+   are classified as such in the log — they are real failures too, but they
+   are not the visibility regression, and neither is retried into a pass.
+4. `quick-start-smoke` boots the tag step 3 just pulled as a pod — under the
+   secret-free `ytt-pull-gate` ServiceAccount, so the kubelet's pull is
+   anonymous too — with the README quick-start environment, and requires
+   `/ytt/health` to answer `{"status":"ok"}` and an anonymous GET on the MCP
+   mount to get the documented `401` + Bearer `WWW-Authenticate` challenge.
 
 Watch: https://argo-ci.ardenone.com, or
 
@@ -54,12 +67,25 @@ kubernetes-reflector).  There is no GHCR push — `ghcr.io/jedarden/ytt` was
 the Phase-11 plan and was dropped; see `docs/plan/plan.md` ("Image
 publishing") for the decision.
 
+The gate records what it tested on the Workflow object itself — podGC
+deletes the pods the moment they finish, but output parameters outlive them:
+
+```bash
+kubectl --server=http://traefik-iad-ci:8001 get workflow <name> -n argo-workflows \
+  -o jsonpath='{range .outputs.parameters[*]}{.name}={.value}{"\n"}{end}'
+# tested-tag=ronaldraygun/ytt:<version>
+# tested-digest=sha256:<64 hex>
+```
+
 ### 3. Keep the Docker Hub repository PUBLIC (operator)
 
 The quick-start (`README.md` → `docker run ronaldraygun/ytt:<version>`) only
 works if the Docker Hub repo `ronaldraygun/ytt` is **public**.  New repos
 default to private, and this one was pushed private until 2026-09-16 — an
-anonymous `docker pull` got 401 the whole time.
+anonymous `docker pull` got 401 the whole time. The `anonymous-pull-gate`
+CI step now fails the release on exactly that regression (§2 step 3); this
+manual check is how you verify visibility *before* cutting a release,
+instead of finding out through a red release.
 
 - Where: Docker Hub → `ronaldraygun/ytt` → **Settings** → Visibility →
   **Public**.
