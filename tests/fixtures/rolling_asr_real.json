@@ -1,0 +1,381 @@
+{
+  "_provenance": {
+    "source": "live capture (real YouTube ASR json3 track)",
+    "video_id": "dQw4w9WgXcQ",
+    "track": "en automatic (kind=asr), fmt=json3",
+    "captured": "2026-09-24",
+    "tool": "yt-dlp (repo-pinned version), --write-auto-subs",
+    "shape": "modern line-roll: consecutive content events overlap in time (dDurationMs overhangs the next event's tStartMs) while carrying DISJOINT text; empty erase events ({\"utf8\": \"\\n\"}, some with aAppend) interleave; first event has no segs key at all",
+    "truncation": "events[0:17] of 104 — opening verse only; the remainder of the song is redacted (copyright), envelope keys pens/wsWinStyles/wpWinPositions omitted (ignored by the parser)"
+  },
+  "_reference_output": [
+    "[Music]",
+    "We're no strangers to",
+    "love. You know the rules and so do",
+    "I. I feel commitments from what I'm",
+    "thinking",
+    "of. You wouldn't get this from any other",
+    "guy. I just want to tell you how I'm",
+    "feeling. Got to make you understand."
+  ],
+  "_reference_joined": "[Music] We're no strangers to love. You know the rules and so do I. I feel commitments from what I'm thinking of. You wouldn't get this from any other guy. I just want to tell you how I'm feeling. Got to make you understand.",
+  "wireMagic": "pb3",
+  "events": [
+    {
+      "tStartMs": 0,
+      "dDurationMs": 211879,
+      "id": 1,
+      "wpWinPosId": 1,
+      "wsWinStyleId": 1
+    },
+    {
+      "tStartMs": 320,
+      "dDurationMs": 14260,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "[Music]"
+        }
+      ]
+    },
+    {
+      "tStartMs": 18790,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 18800,
+      "dDurationMs": 7160,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "We're",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " no",
+          "tOffsetMs": 239,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " strangers",
+          "tOffsetMs": 559,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " to",
+          "tOffsetMs": 1040,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 21790,
+      "dDurationMs": 4170,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 21800,
+      "dDurationMs": 7319,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "love.",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " You",
+          "tOffsetMs": 1000,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " know",
+          "tOffsetMs": 1239,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " the",
+          "tOffsetMs": 1479,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " rules",
+          "tOffsetMs": 1800,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " and",
+          "tOffsetMs": 2520,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " so",
+          "tOffsetMs": 2840,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " do",
+          "tOffsetMs": 3399,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 25950,
+      "dDurationMs": 3169,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 25960,
+      "dDurationMs": 4319,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "I.",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " I",
+          "tOffsetMs": 1079,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " feel",
+          "tOffsetMs": 1319,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " commitments",
+          "tOffsetMs": 1720,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " from what",
+          "tOffsetMs": 2440,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " I'm",
+          "tOffsetMs": 2680,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 29109,
+      "dDurationMs": 1170,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 29119,
+      "dDurationMs": 5241,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "thinking",
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 30269,
+      "dDurationMs": 4091,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 30279,
+      "dDurationMs": 9280,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "of.",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " You",
+          "tOffsetMs": 1000,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " wouldn't",
+          "tOffsetMs": 1320,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " get",
+          "tOffsetMs": 1800,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " this",
+          "tOffsetMs": 2041,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " from",
+          "tOffsetMs": 2201,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " any",
+          "tOffsetMs": 2921,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " other",
+          "tOffsetMs": 3401,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 34350,
+      "dDurationMs": 5209,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 34360,
+      "dDurationMs": 8760,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "guy.",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " I",
+          "tOffsetMs": 1120,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " just",
+          "tOffsetMs": 2120,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " want",
+          "tOffsetMs": 2440,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " to",
+          "tOffsetMs": 2680,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " tell",
+          "tOffsetMs": 2920,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " you",
+          "tOffsetMs": 3160,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " how",
+          "tOffsetMs": 3480,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " I'm",
+          "tOffsetMs": 3800,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 39549,
+      "dDurationMs": 3571,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    },
+    {
+      "tStartMs": 39559,
+      "dDurationMs": 6281,
+      "wWinId": 1,
+      "segs": [
+        {
+          "utf8": "feeling.",
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " Got",
+          "tOffsetMs": 1000,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " to",
+          "tOffsetMs": 1160,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " make",
+          "tOffsetMs": 1401,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " you",
+          "tOffsetMs": 1721,
+          "acAsrConf": 0
+        },
+        {
+          "utf8": " understand.",
+          "tOffsetMs": 2561,
+          "acAsrConf": 0
+        }
+      ]
+    },
+    {
+      "tStartMs": 43110,
+      "dDurationMs": 2730,
+      "wWinId": 1,
+      "aAppend": 1,
+      "segs": [
+        {
+          "utf8": "\n"
+        }
+      ]
+    }
+  ]
+}

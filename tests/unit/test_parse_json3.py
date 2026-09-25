@@ -2,11 +2,13 @@
 
 Coverage:
 - Manual (non-ASR) track: straight concat, no dedup.
-- Rolling ASR track: no doubling + matches pre-verified reference output.
+- Classic rolling ASR fixture: no doubling + pre-verified reference output.
+- Real captured ASR payload (rolling_asr_real.json): modern line-roll shape
+  passes through unchanged — disjoint text in overlapping windows is kept.
+- Text-subsumption dedup: suffix of previous, prefix of next, equal-text
+  re-emit inside an overlapping window.
 - aAppend / pAppend spacing rules.
 - Empty events filtered out.
-- Primary dedup (window coverage).
-- Prefix-check secondary dedup.
 - Formatting-only events (\\n) skipped.
 - Empty event dict handled gracefully.
 """
@@ -255,14 +257,44 @@ class TestPrimaryDedup:
         assert segs[0].text == "Hello"
         assert segs[1].text == "world"
 
-    def test_overlapping_second_skipped(self):
+    def test_overlapping_subsumed_text_skipped(self):
+        """An event whose text is subsumed by the previous line is dropped
+        even though its window merely overlaps."""
         events = [
             {"tStartMs": 0, "dDurationMs": 5000, "segs": [{"utf8": "Hello world"}]},
-            {"tStartMs": 2000, "dDurationMs": 3000, "segs": [{"utf8": "SHOULD NOT APPEAR"}]},
+            {"tStartMs": 2000, "dDurationMs": 3000, "segs": [{"utf8": "world"}]},
         ]
         segs = parse_json3(events, kind="asr")
         assert len(segs) == 1
         assert segs[0].text == "Hello world"
+
+    def test_overlapping_disjoint_text_kept(self):
+        """Overlapping windows with DISJOINT text are both kept.
+
+        This is the modern line-roll shape (verified on a live capture,
+        tests/fixtures/rolling_asr_real.json): an event's dDurationMs
+        overhangs the next event's tStartMs while the text is genuinely
+        new.  The pre-2026-09 window-coverage gate dropped such lines.
+        """
+        events = [
+            {"tStartMs": 0, "dDurationMs": 5000, "segs": [{"utf8": "Hello world"}]},
+            {"tStartMs": 2000, "dDurationMs": 3000, "segs": [{"utf8": "goodbye moon"}]},
+        ]
+        segs = parse_json3(events, kind="asr")
+        assert len(segs) == 2
+        assert segs[0].text == "Hello world"
+        assert segs[1].text == "goodbye moon"
+
+    def test_equal_text_overlapping_window_dropped(self):
+        """Identical line re-emitted inside the previous event's window is a
+        rolling artifact and is dropped."""
+        events = [
+            {"tStartMs": 0, "dDurationMs": 5000, "segs": [{"utf8": "Hello"}]},
+            {"tStartMs": 3000, "dDurationMs": 3000, "segs": [{"utf8": "Hello"}]},
+        ]
+        segs = parse_json3(events, kind="asr")
+        assert len(segs) == 1
+        assert segs[0].text == "Hello"
 
     def test_first_event_in_group_carries_full_text(self):
         """First non-overlapping event in a rolling group has the complete phrase."""
@@ -392,6 +424,84 @@ class TestPrefixCheck:
         # "Hi" is prefix of "Hi there" → discard "Hi"
         # "Hi there" is NOT prefix of "foo" → keep "Hi there"
         assert [s.text for s in segs] == ["Hi there", "foo"]
+
+
+# ---------------------------------------------------------------------------
+# Real captured payload — modern line-roll shape (bead ytt-08d4fd1f)
+# ---------------------------------------------------------------------------
+
+class TestRealPayloadAsr:
+    """Regression: rolling_asr_real.json — a live-captured YouTube ASR track.
+
+    Modern tracks roll caption *windows*: consecutive content events overlap
+    in time (dDurationMs overhangs the next tStartMs) while carrying disjoint
+    text, with empty erase events interleaved and a leading no-segs event.
+    Dedup must pass this shape through unchanged — the pre-2026-09
+    window-coverage gate silently dropped three of its eight lines.
+    """
+
+    def _fixture(self):
+        return json.loads((FIXTURES / "rolling_asr_real.json").read_text())
+
+    def _content_texts(self, data) -> list[str]:
+        """Expected transcript: every non-empty event text, in file order.
+
+        Independent of the parser — a straight join over the fixture's
+        content events, which is what the capture actually contains.
+        """
+        texts = []
+        for ev in data["events"]:
+            segs = ev.get("segs") or []
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if text:
+                texts.append(text)
+        return texts
+
+    def test_real_payload_passes_through_unchanged(self):
+        """Every content line survives, in order, exactly once."""
+        data = self._fixture()
+        expected = self._content_texts(data)
+        segments = parse_json3(data["events"], kind="asr")
+        assert [s.text for s in segments] == expected
+        assert [s.text for s in segments] == data["_reference_output"]
+
+    def test_real_payload_word_count_preserved(self):
+        """No words lost: output word sequence equals the content word
+        sequence (the old algorithm emitted 5 of 8 lines here)."""
+        data = self._fixture()
+        expected_words = " ".join(self._content_texts(data)).split()
+        segments = parse_json3(data["events"], kind="asr")
+        output_words = " ".join(s.text for s in segments).split()
+        assert output_words == expected_words
+
+    def test_real_payload_dropped_lines_present(self):
+        """The exact lines the window-coverage gate used to lose are served."""
+        data = self._fixture()
+        segments = parse_json3(data["events"], kind="asr")
+        texts = [s.text for s in segments]
+        for line in (
+            "love. You know the rules and so do",
+            "thinking",
+            "guy. I just want to tell you how I'm",
+        ):
+            assert line in texts, f"real line lost to over-dedup: {line!r}"
+
+    def test_real_payload_timings_are_event_timings(self):
+        """Kept segments carry their own event timing, unshifted."""
+        data = self._fixture()
+        segments = parse_json3(data["events"], kind="asr")
+        by_text = {s.text: s for s in segments}
+        assert by_text["thinking"].start == pytest.approx(29.119)
+        assert by_text["[Music]"].start == pytest.approx(0.32)
+
+    def test_real_payload_envelope_tolerated(self):
+        """The full capture envelope (wireMagic + events) parses via the
+        same raw['events'] extraction fetch.py performs."""
+        data = self._fixture()
+        assert data["wireMagic"] == "pb3"
+        segments = parse_json3(data["events"], kind="asr")
+        assert segments  # and equal to parsing the bare events list
+        assert parse_json3(data["events"], kind="asr") == segments
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from typing import Any
 
@@ -650,6 +651,78 @@ class TestDoFetch:
         opts = seen_opts[0]
         assert "cookiefile" in opts and opts["cookiefile"] is None
         assert "cookiesfrombrowser" in opts and opts["cookiesfrombrowser"] is None
+
+
+# ---------------------------------------------------------------------------
+# _do_fetch — caption-dedup wiring (bead ytt-08d4fd1f)
+# ---------------------------------------------------------------------------
+
+class TestDoFetchCaptionDedup:
+    """End-to-end kind wiring: _select_track's kind must reach parse_json3.
+
+    parse_json3 defaults to kind="asr"; if _do_fetch ever stopped forwarding
+    _select_track's kind, manual tracks would be deduped (data loss) and auto
+    tracks served from a "" kind would skip dedup (doubling on classic
+    re-emit tracks).  These tests pin the composition with real content.
+    """
+
+    FIXTURES = pathlib.Path(__file__).parent.parent / "fixtures"
+
+    def _fixture_bytes(self, name: str) -> bytes:
+        return (self.FIXTURES / name).read_bytes()
+
+    def _run_bytes(self, info: dict, body: bytes, lang=None):
+        """Patch YoutubeDL to serve *body* as the caption track; run _do_fetch."""
+        settings = _make_settings()
+        mock_ctx, _ = _stub_ydl(info, body)
+        with patch("ytt.fetch.yt_dlp.YoutubeDL", return_value=mock_ctx):
+            return _do_fetch("dQw4w9WgXcQ", lang, settings, proxy=None)
+
+    def test_auto_track_real_payload_not_over_deduped(self):
+        """The live-captured modern line-roll track keeps every content line.
+
+        The track is selected from automatic_captions (kind="asr"); dedup
+        must leave its disjoint-but-time-overlapping lines intact.  The
+        pre-2026-09 window-coverage gate dropped 3 of these 8 lines, and a
+        kind-wiring regression to "" would not reapply dedup at all — either
+        way this assertion fails.
+        """
+        info = _make_info(automatic_captions={"en": _auto(AUTO_EN_URL)})
+        result = self._run_bytes(info, self._fixture_bytes("rolling_asr_real.json"), lang="en")
+
+        assert result.source == "caption_auto"
+        fixture = json.loads(self._fixture_bytes("rolling_asr_real.json"))
+        assert [s.text for s in result.segments] == fixture["_reference_output"]
+
+    def test_auto_track_classic_rolling_payload_is_deduped(self):
+        """A classic re-emit rolling track collapses through the fetch path."""
+        info = _make_info(automatic_captions={"en": _auto(AUTO_EN_URL)})
+        result = self._run_bytes(info, self._fixture_bytes("rolling_asr.json"), lang="en")
+
+        assert result.source == "caption_auto"
+        fixture = json.loads(self._fixture_bytes("rolling_asr.json"))
+        assert [s.text for s in result.segments] == fixture["_reference_output"]
+
+    def test_manual_track_real_payload_passes_through(self):
+        """A manual (non-rolling) payload fetched through the fetch path is
+        served unchanged — one segment per content event, no dedup."""
+        info = _make_info(subtitles={"en": _manual(MANUAL_EN_URL)})
+        result = self._run_bytes(info, self._fixture_bytes("manual_track.json"), lang="en")
+
+        assert result.source == "caption_manual"
+        fixture = json.loads(self._fixture_bytes("manual_track.json"))
+        assert [s.text for s in result.segments] == fixture["_reference_output"]
+
+    def test_manual_track_never_deduped_even_when_rolling_shaped(self):
+        """A rolling-shaped payload served as a MANUAL track must NOT be
+        deduped — parse_json3's default kind="asr" must not leak into the
+        manual path (data loss, not just doubling)."""
+        info = _make_info(subtitles={"en": _manual(MANUAL_EN_URL)})
+        result = self._run_bytes(info, self._fixture_bytes("rolling_asr.json"), lang="en")
+
+        assert result.source == "caption_manual"
+        # naive passthrough: every non-empty event becomes a segment (10)
+        assert len(result.segments) == 10
 
 
 # ---------------------------------------------------------------------------

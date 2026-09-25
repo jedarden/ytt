@@ -213,19 +213,18 @@ async def test_s02_captioned_long_chunk_and_reassemble():
     # Reassembled text must not be empty
     assert all_text.strip(), "Reassembled text is empty"
 
-    # Check no segment-time gaps: each segment's start should be ≥ the previous end.
-    # (Allow tiny floating-point deltas with 0.1 s tolerance.)
+    # Segment starts must be non-decreasing (parse_json3 sorts by tStartMs).
+    # Overlap — curr.start < prev.end — is legitimate on modern rolling
+    # tracks: consecutive ASR windows overlap in time while carrying disjoint
+    # text (see tests/fixtures/rolling_asr_real.json), so only a backwards
+    # start is a failure.
     for i in range(1, len(all_segments)):
         prev = all_segments[i - 1]
         curr = all_segments[i]
-        prev_end = prev["start"] + prev.get("duration", 0)
-        if curr["start"] < prev_end - 0.1:
-            # Overlap — not ideal but can happen in rolling-caption videos; log.
-            # Hard fail only if there is a significant time reversal (>1 s).
-            assert curr["start"] >= prev_end - 1.0, (
-                f"Segment time reversal >1s at index {i}: "
-                f"prev_end={prev_end:.2f} curr_start={curr['start']:.2f}"
-            )
+        assert curr["start"] >= prev["start"] - 0.1, (
+            f"Segment starts not monotonic at index {i}: "
+            f"prev_start={prev['start']:.2f} curr_start={curr['start']:.2f}"
+        )
 
 
 # ---------------------------------------------------------------------------
