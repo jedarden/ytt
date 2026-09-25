@@ -479,6 +479,59 @@ def test_missing_oauth_client_secret_fails_closed(image: str):
     )
 
 
+#: Distinctive fake credential values for the blank-value cases (bead
+#: ytt-62be628f). A blank (empty string) variable is what a manifest ``env``
+#: line interpolating an unset Secret key produces — it must exit 1 exactly
+#: like a missing one. The *other* half of the pair carries the canary, so
+#: asserting its absence from the container's output proves the fail-closed
+#: path never echoes a working credential value into pod logs.
+_CANARY_CLIENT_SECRET = "canary-client-secret-leak-probe-7b29cd"
+_CANARY_CLIENT_ID = "canary-client-id-leak-probe-3f41a9"
+
+
+def test_blank_oauth_client_id_fails_closed(image: str):
+    """A blank YTT_OAUTH_CLIENT_ID must exit 1 like a missing one, printing
+    the documented error, and must not leak the configured secret value."""
+    run = _fail_closed_run(
+        image,
+        overrides={
+            "YTT_OAUTH_CLIENT_ID": "",
+            "YTT_OAUTH_CLIENT_SECRET": _CANARY_CLIENT_SECRET,
+        },
+    )
+    output = run.stdout + run.stderr
+    assert run.returncode == 1, (
+        f"expected exit 1, got {run.returncode}:\n{output[-2000:]}"
+    )
+    assert "YTT_OAUTH_CLIENT_ID is required" in output, (
+        f"exit was 1 but the documented missing-client-id error is absent:\n{output[-2000:]}"
+    )
+    assert _CANARY_CLIENT_SECRET not in output, (
+        f"blank client id rejected, but the configured secret value leaked "
+        f"into the container output:\n{output[-2000:]}"
+    )
+
+
+def test_blank_oauth_client_secret_fails_closed(image: str):
+    """A blank YTT_OAUTH_CLIENT_SECRET must exit 1 like a missing one, and
+    must not leak the configured client id value."""
+    run = _fail_closed_run(
+        image,
+        overrides={
+            "YTT_OAUTH_CLIENT_ID": _CANARY_CLIENT_ID,
+            "YTT_OAUTH_CLIENT_SECRET": "",
+        },
+    )
+    output = run.stdout + run.stderr
+    assert run.returncode == 1, (
+        f"expected exit 1, got {run.returncode}:\n{output[-2000:]}"
+    )
+    assert _CANARY_CLIENT_ID not in output, (
+        f"blank client secret rejected, but the configured client id value "
+        f"leaked into the container output:\n{output[-2000:]}"
+    )
+
+
 def test_missing_public_url_fails_closed(image: str):
     """Without YTT_PUBLIC_URL the server must exit 1 — there is no fallback
     to the reference deployment (bead ytt-a1fbc575): the OAuth
