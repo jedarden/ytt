@@ -36,10 +36,16 @@ route that ever called the allowlist check).
 
 from __future__ import annotations
 
+import base64
+import json
+import time
+from typing import Any
 from urllib.parse import urlparse
 
+import structlog
 from starlette.routing import Route
 
+from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 
@@ -48,6 +54,8 @@ from ytt.config import (
     DEFAULT_OIDC_ISSUER,
     Settings,
 )
+
+log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Claude connector redirect URIs — the only redirect URIs ytt's AS will issue
@@ -73,6 +81,89 @@ AUTHENTIK_OIDC_CONFIG_URL = DEFAULT_OIDC_CONFIG_URL
 
 # Same slug, without the discovery-doc suffix -- the ID token's iss claim.
 AUTHENTIK_ISSUER = DEFAULT_OIDC_ISSUER
+
+#: Clock-skew allowance applied to the ``nbf`` check in
+#: :class:`UpstreamIdTokenVerifier`. Both ytt and the upstream IdP run on
+#: NTP-synced cluster nodes, so real skew is sub-second; the leeway exists so
+#: a token validated within a second of issuance is never bounced for a
+#: rounding disagreement, not to tolerate a genuinely mis-set IdP clock.
+NBF_LEEWAY_SECONDS = 60
+
+
+def _unverified_claims(token: str) -> dict[str, Any]:
+    """Decode a JWT's payload **without** verifying the signature.
+
+    Strictly a pre-filter for :class:`UpstreamIdTokenVerifier`: it reads the
+    ``exp``/``nbf`` temporal claims so they can be enforced before the
+    verified decode runs. The result is never trusted for identity —
+    ``JWTVerifier.load_access_token`` still performs the signature-checked
+    decode afterwards, and anything this helper cannot parse yields ``{}``
+    here and a rejection there.
+    """
+    try:
+        _header_b64, payload_b64, _sig_b64 = token.split(".")
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded))
+    except (ValueError, TypeError):
+        # binascii.Error and json.JSONDecodeError are both ValueError
+        # subclasses; a non-str token is TypeError. The verified decode
+        # rejects all of these — no need to distinguish.
+        return {}
+
+
+class UpstreamIdTokenVerifier(JWTVerifier):
+    """``JWTVerifier`` plus the two temporal checks FastMCP's omits.
+
+    FastMCP 3.4.x ``JWTVerifier.load_access_token`` enforces ``exp`` **only
+    when present** and never looks at ``nbf`` (verified against the pinned
+    3.4.2 source and empirically: a signed token with ``exp`` stripped or
+    ``nbf`` an hour in the future verifies successfully). Both deviations
+    matter for the *upstream id_token* this verifier is used on, because
+    OAuthProxy re-validates the stored id_token on **every** request
+    (``oauth_proxy/proxy.py`` ``load_access_token`` step 3) — a token that
+    never expires is a session that never dies:
+
+    - OIDC Core §2 requires ``exp`` in an id_token; a signed token without
+      one is malformed and is rejected here rather than granted an implicit
+      infinite lifetime.
+    - RFC 7519 §4.1.5: before ``nbf`` the token MUST NOT be accepted. The
+      check allows :data:`NBF_LEEWAY_SECONDS` of clock skew.
+
+    Threat-model note (why these are hardening, not the primary boundary):
+    both checks only bite on a token whose HS256 signature is *valid* — i.e.
+    minted by the upstream IdP itself. A caller cannot forge one. They close
+    the "misbehaving or misconfigured IdP mints an immortal or time-shifted
+    token" hole; signature, issuer and audience checks remain the boundary
+    against everyone else.
+
+    JWKS key rotation does not apply to this verifier: the reference IdP
+    signs HS256 keyed by the client secret (see ``build_auth_provider`` for
+    why), so the "key set" is the single static secret — rotation is a
+    settings redeploy, not a JWKS fetch. The failure modes are specified and
+    pinned in ``tests/unit/test_oauth_conformance.py`` and documented in
+    ``docs/notes/auth.md`` (§ Key rotation and token-validation failures).
+    """
+
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        claims = _unverified_claims(token)
+
+        exp = claims.get("exp")
+        if exp is None:
+            log.info(
+                "upstream_id_token_rejected",
+                reason="no exp claim (OIDC Core §2 requires it)",
+            )
+            return None
+
+        nbf = claims.get("nbf")
+        if isinstance(nbf, (int, float)) and nbf > time.time() + NBF_LEEWAY_SECONDS:
+            log.info(
+                "upstream_id_token_rejected",
+                reason="not yet valid (nbf in the future, beyond leeway)",
+            )
+            return None
+
+        return await super().load_access_token(token)
 
 
 class YttOIDCProvider(OIDCProxy):
@@ -249,7 +340,10 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # Fix: build our own JWTVerifier -- it explicitly supports symmetric
     # algorithms via its `public_key` parameter (its own docstring: "PEM
     # public key OR shared secret") -- and pass it as token_verifier=,
-    # bypassing OIDCProxy's broken auto-construction. verify_id_token=True
+    # bypassing OIDCProxy's broken auto-construction. The instance is the
+    # UpstreamIdTokenVerifier subclass (exp required, nbf enforced -- the
+    # two temporal checks fastmcp's verifier omits; see its docstring and
+    # docs/notes/auth.md § "Key rotation and token-validation failures"). verify_id_token=True
     # is still required alongside this: it's what makes
     # _get_verification_token() hand the verifier the id_token (whose
     # `aud` is the client_id, OIDC Core §2 -- matched below) instead of
@@ -262,7 +356,7 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
     # verifier instead"), so that's set after construction below instead,
     # replicating exactly what OIDCProxy does internally when
     # verify_id_token strips scopes from an auto-built verifier.
-    token_verifier = JWTVerifier(
+    token_verifier = UpstreamIdTokenVerifier(
         public_key=settings.oauth_client_secret,
         algorithm="HS256",
         issuer=settings.oidc_issuer,

@@ -38,6 +38,17 @@ Coverage map (each class cites the requirement it pins):
 - :class:`TestDiscoveryChain` — the full client algorithm of research §2:
   401 challenge → fetch the challenged ``resource_metadata`` URL → PRM →
   authorization server → RFC 8414 path-inserted AS metadata → issuer match.
+- :class:`TestInvalidSignatureRejection`, :class:`TestTemporalClaimEnforcement`,
+  :class:`TestUpstreamSecretRotation`, :class:`TestYTTSignedTokenRotation`,
+  :class:`TestJWKSPathFailClosed` and :class:`TestDiscoveryOutageFailClosed` —
+  the token-validation failure modes (bead ytt-3da4d7d5, runbook in
+  ``docs/notes/auth.md`` § "Key rotation and token-validation failures"):
+  every signature failure fails closed, ``exp`` is mandatory and ``nbf`` is
+  honored on the upstream id_token, both signing keys rotate instantly with
+  no dual-key acceptance window, the JWKS path (the default for an RS256
+  IdP) fails closed on outages/empty key sets and serves cached keys for at
+  most its 1h TTL, and an IdP discovery outage at construction blocks
+  startup while post-startup validation stays fully offline.
 """
 
 from __future__ import annotations
@@ -749,6 +760,532 @@ class TestPathBearingAudienceBinding:
             self._hs256_token("test-client-secret", claims)
         )
         assert verified is None
+
+
+# ===========================================================================
+# Token-validation failures: signatures, temporal claims, key rotation,
+# discovery/JWKS outages (docs/notes/auth.md § "Key rotation and
+# token-validation failures")
+# ===========================================================================
+
+
+def _sign_hs256(secret: str, claims: dict) -> str:
+    """Sign *claims* as an HS256 token keyed by *secret* — the shape the
+    reference Authentik issues (see ytt/auth.py for why HS256 is correct)."""
+    from joserfc import jwk, jwt
+
+    key = jwk.import_key(secret, "oct")
+    return jwt.encode({"alg": "HS256"}, claims, key)
+
+
+def _id_token_claims(verifier, **overrides) -> dict:
+    """Well-formed upstream id_token claims bound to *verifier*'s own
+    iss/aud. An override of ``None`` removes the claim entirely (used to
+    build malformed tokens)."""
+    now = int(time.time())
+    claims: dict = {
+        "iss": verifier.issuer,
+        "aud": verifier.audience,
+        "sub": "me@example.com",
+        "email": "me@example.com",
+        "exp": now + 3600,
+        "iat": now,
+    }
+    for name, value in overrides.items():
+        if value is None:
+            claims.pop(name, None)
+        else:
+            claims[name] = value
+    return claims
+
+
+@pytest.fixture
+def upstream_pair():
+    """The provider built the production way plus its upstream id-token
+    verifier (the ytt-built HS256 one, ``provider._token_validator``)."""
+    from ytt.auth import build_auth_provider
+    from ytt.config import Settings
+
+    provider = build_auth_provider(
+        Settings(
+            public_url="https://mcp.example.com/ytt",
+            oauth_client_id="test-client-id",
+            oauth_client_secret="test-client-secret",
+        )
+    )
+    return provider, provider._token_validator
+
+
+class TestInvalidSignatureRejection:
+    """Any token whose signature does not verify is rejected — ``None``
+    (→ 401 invalid_token), never an exception escaping to the caller and
+    never a partial accept. The signature check is the boundary: everything
+    else in this section only bites on tokens that pass it."""
+
+    @pytest.fixture
+    def verifier(self, upstream_pair):
+        return upstream_pair[1]
+
+    @pytest.mark.asyncio
+    async def test_attacker_signed_token_rejected(self, verifier):
+        """Perfect claims, wrong key: a token signed with an attacker-chosen
+        secret fails the MAC check even though iss/aud/exp all match."""
+        assert (
+            await verifier.verify_token(
+                _sign_hs256("attacker-chosen-secret", _id_token_claims(verifier))
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_tampered_payload_rejected(self, verifier):
+        """Re-encoding the payload with a different subject but the original
+        signature is rejected — claims are not trusted without a re-sign."""
+        import base64 as b64
+        import json as jsonlib
+
+        token = _sign_hs256("test-client-secret", _id_token_claims(verifier))
+        header_b64, payload_b64, sig_b64 = token.split(".")
+        payload = jsonlib.loads(b64.urlsafe_b64decode(payload_b64 + "=="))
+        payload["sub"] = "attacker@example.com"
+        payload["email"] = "attacker@example.com"
+        forged_payload = (
+            b64.urlsafe_b64encode(jsonlib.dumps(payload).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        assert (
+            await verifier.verify_token(f"{header_b64}.{forged_payload}.{sig_b64}")
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_alg_none_rejected(self, verifier):
+        """``alg: none`` (unsigned JWT) is not accepted regardless of the
+        configured algorithm — the verifier's JWS registry pins HS256."""
+        import base64 as b64
+        import json as jsonlib
+
+        def seg(obj) -> str:
+            return (
+                b64.urlsafe_b64encode(jsonlib.dumps(obj).encode())
+                .rstrip(b"=")
+                .decode()
+            )
+
+        unsigned = f'{seg({"alg": "none", "typ": "JWT"})}.{seg(_id_token_claims(verifier))}.'
+        assert await verifier.verify_token(unsigned) is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_tokens_rejected_not_raised(self, verifier):
+        """Garbage inputs — not a JWT, empty string, missing signature
+        segment — return ``None`` like any other rejection instead of
+        raising through the auth middleware (a 500 on a malformed bearer
+        would itself be a failure mode)."""
+        for junk in ("not-a-jwt-at-all", "", "only.two"):
+            assert await verifier.verify_token(junk) is None, f"junk={junk!r}"
+
+
+class TestTemporalClaimEnforcement:
+    """``exp`` is mandatory and ``nbf`` is honored on the upstream
+    id_token. FastMCP's ``JWTVerifier`` checks ``exp`` only when present
+    and never looks at ``nbf`` (pinned against 3.4.2); ytt's
+    ``UpstreamIdTokenVerifier`` (ytt/auth.py) adds both checks (OIDC Core
+    §2, RFC 7519 §4.1.5). These pins are the fail-closed answer to "what
+    does ytt do with an expired, not-yet-valid, or never-expiring token":
+    the first two die at FastMCP/JWT level, and the last is rejected here
+    rather than granted an implicit infinite lifetime."""
+
+    @pytest.fixture
+    def verifier(self, upstream_pair):
+        return upstream_pair[1]
+
+    @pytest.mark.asyncio
+    async def test_missing_exp_rejected(self, verifier):
+        """A signed token with no ``exp`` claim is malformed (OIDC Core §2
+        requires exp) and must not verify — otherwise a misbehaving IdP
+        could mint a token ytt would honor forever."""
+        assert (
+            await verifier.verify_token(
+                _sign_hs256("test-client-secret", _id_token_claims(verifier, exp=None))
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_yet_valid_beyond_leeway_rejected(self, verifier):
+        """``nbf`` more than the leeway window in the future: not accepted."""
+        from ytt.auth import NBF_LEEWAY_SECONDS
+
+        now = int(time.time())
+        token = _sign_hs256(
+            "test-client-secret",
+            _id_token_claims(verifier, nbf=now + NBF_LEEWAY_SECONDS + 60),
+        )
+        assert await verifier.verify_token(token) is None
+
+    @pytest.mark.asyncio
+    async def test_not_yet_valid_at_leeway_boundary_accepted(self, verifier):
+        """The leeway boundary itself is inclusive (reject strictly beyond
+        ``now + NBF_LEEWAY_SECONDS``) — a token validated within a second of
+        issuance is never bounced for a rounding disagreement."""
+        from ytt.auth import NBF_LEEWAY_SECONDS
+
+        now = int(time.time())
+        token = _sign_hs256(
+            "test-client-secret", _id_token_claims(verifier, nbf=now + NBF_LEEWAY_SECONDS)
+        )
+        assert await verifier.verify_token(token) is not None
+
+    @pytest.mark.asyncio
+    async def test_past_nbf_and_absent_nbf_accepted(self, verifier):
+        """``nbf`` in the past, and its absence, are both ordinary valid
+        tokens — the check only refuses future-valid tokens."""
+        now = int(time.time())
+        with_past_nbf = _sign_hs256(
+            "test-client-secret", _id_token_claims(verifier, nbf=now - 3600)
+        )
+        without_nbf = _sign_hs256("test-client-secret", _id_token_claims(verifier))
+        assert await verifier.verify_token(with_past_nbf) is not None
+        assert await verifier.verify_token(without_nbf) is not None
+
+
+class TestUpstreamSecretRotation:
+    """Rotating the upstream IdP client secret is the symmetric analog of a
+    JWKS key rotation — and it is *immediate*. The verifier holds exactly
+    one key (the configured secret): once ytt is redeployed with the new
+    ``YTT_OAUTH_CLIENT_SECRET`` every old-signed token fails verification,
+    with no dual-key acceptance window and no cache to flush. Operational
+    consequences (sessions re-auth on their next upstream refresh) are in
+    docs/notes/auth.md § "Key rotation and token-validation failures"."""
+
+    @pytest.fixture
+    def verifier(self, upstream_pair):
+        return upstream_pair[1]
+
+    @staticmethod
+    def _rotated_verifier(verifier):
+        from ytt.auth import UpstreamIdTokenVerifier
+
+        return UpstreamIdTokenVerifier(
+            public_key="rotated-client-secret",
+            algorithm="HS256",
+            issuer=verifier.issuer,
+            audience=verifier.audience,
+        )
+
+    @pytest.mark.asyncio
+    async def test_old_secret_tokens_die_at_rotation(self, verifier):
+        """The same pre-rotation token verifies under the old secret's
+        verifier and is rejected once the verifier holds the new secret."""
+        token = _sign_hs256("test-client-secret", _id_token_claims(verifier))
+        assert await verifier.verify_token(token) is not None
+        assert await self._rotated_verifier(verifier).verify_token(token) is None
+
+    @pytest.mark.asyncio
+    async def test_new_secret_tokens_accepted_after_rotation(self, verifier):
+        """Tokens the IdP signs with the rotated secret verify under the
+        redeployed verifier — rotation is a flip, not a migration."""
+        post = _sign_hs256(
+            "rotated-client-secret", _id_token_claims(self._rotated_verifier(verifier))
+        )
+        assert await self._rotated_verifier(verifier).verify_token(post) is not None
+
+    def test_verifier_holds_exactly_one_static_key(self, verifier):
+        """The key is the settings value itself — static, offline, nothing
+        to refresh from the IdP — which is why rotation cannot leave a
+        stale-key window behind."""
+        from ytt.auth import UpstreamIdTokenVerifier
+
+        assert verifier.jwks_uri is None
+        assert verifier.public_key == "test-client-secret"
+        assert isinstance(verifier, UpstreamIdTokenVerifier)
+
+
+class TestYTTSignedTokenRotation:
+    """The tokens Claude actually presents are FastMCP-issued JWTs signed
+    with ``YTT_JWT_SIGNING_SECRET`` — an independent second key, held only
+    by ytt. Rotating it instantly invalidates every access AND refresh
+    token (the "log everyone out now" lever); upstream-secret rotation can
+    neither forge nor invalidate these tokens."""
+
+    @pytest.fixture
+    def issuer(self, upstream_pair):
+        provider = upstream_pair[0]
+        provider.get_routes(mcp_path="/ytt")  # materializes _jwt_issuer
+        return provider._jwt_issuer
+
+    def test_issued_token_verifies_locally(self, issuer):
+        token = issuer.issue_access_token(
+            client_id="test-client-id", scopes=["openid"], jti="jti-rotation-1"
+        )
+        payload = issuer.verify_token(token)  # raises JoseError if invalid
+        assert payload["iss"] == issuer.issuer
+
+    def test_rotated_signing_key_rejects_issued_tokens(self, issuer):
+        """A verifier holding the rotated key rejects every token the old
+        key signed — the whole fleet is logged out at once, fail closed."""
+        from fastmcp.server.auth.jwt_issuer import JWTIssuer
+        from joserfc.errors import JoseError
+
+        token = issuer.issue_access_token(
+            client_id="test-client-id", scopes=["openid"], jti="jti-rotation-2"
+        )
+        rotated = JWTIssuer(
+            issuer=issuer.issuer,
+            audience=issuer.audience,
+            signing_key="rotated-ytt-signing-secret",
+        )
+        with pytest.raises(JoseError):
+            rotated.verify_token(token)
+
+    def test_expired_and_malformed_bearers_raise_jose_error(self, issuer):
+        """Expired and malformed bearer tokens raise ``JoseError`` — the
+        request path converts that to 401 invalid_token, never a 500."""
+        from joserfc.errors import DecodeError, JoseError
+
+        expired = issuer.issue_access_token(
+            client_id="test-client-id", scopes=[], jti="jti-exp", expires_in=-10
+        )
+        with pytest.raises(JoseError):
+            issuer.verify_token(expired)
+        with pytest.raises(DecodeError):
+            issuer.verify_token("garbage-not-a-jwt")
+
+    def test_issued_tokens_carry_exp_and_no_nbf(self, issuer):
+        """FastMCP-issued tokens carry ``exp`` (they die naturally) and no
+        ``nbf`` — so the verifier's missing nbf check is moot on this leg;
+        the nbf-enforcing ``UpstreamIdTokenVerifier`` covers the upstream
+        id_token leg instead."""
+        token = issuer.issue_access_token(
+            client_id="test-client-id", scopes=["openid"], jti="jti-shape-1"
+        )
+        import base64 as b64
+        import json as jsonlib
+
+        payload_b64 = token.split(".")[1]
+        claims = jsonlib.loads(b64.urlsafe_b64decode(payload_b64 + "=="))
+        assert "exp" in claims
+        assert "nbf" not in claims
+
+    @pytest.mark.asyncio
+    async def test_client_secret_rotation_rotates_the_derived_signing_key_too(
+        self, upstream_pair
+    ):
+        """The reference deployment leaves ``YTT_JWT_SIGNING_SECRET``
+        unset, and OAuthProxy then derives the FastMCP signing key from
+        the upstream client secret (HKDF, fixed salt — deterministic
+        across restarts). Rotating ``YTT_OAUTH_CLIENT_SECRET`` therefore
+        rotates BOTH key families at once: every issued token dies at the
+        signature check, not just upstream-signed ones. Same secret →
+        interchangeable tokens (the property that makes restarts safe);
+        rotated secret → every pre-rotation token rejected."""
+        from joserfc.errors import JoseError
+
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        def build(secret: str):
+            provider = build_auth_provider(
+                Settings(
+                    public_url="https://mcp.example.com/ytt",
+                    oauth_client_id="test-client-id",
+                    oauth_client_secret=secret,
+                )
+            )
+            provider.get_routes(mcp_path="/ytt")
+            return provider._jwt_issuer
+
+        _, verifier = upstream_pair
+        same_secret_issuer = build("test-client-secret")
+        rotated_secret_issuer = build("rotated-client-secret")
+
+        token = same_secret_issuer.issue_access_token(
+            client_id="test-client-id", scopes=["openid"], jti="jti-derived-1"
+        )
+        # Same client secret → same derived key → token verifies on a
+        # freshly-built provider (restart stability).
+        assert same_secret_issuer.verify_token(token)["jti"] == "jti-derived-1"
+        # Rotated client secret → different derived key → the pre-rotation
+        # token is rejected at the signature check.
+        with pytest.raises(JoseError):
+            rotated_secret_issuer.verify_token(token)
+        # The upstream verifier is a different object with the same secret
+        # — the two key families are independent derivations, not one key.
+        assert verifier.public_key == "test-client-secret"
+        assert verifier.public_key != same_secret_issuer._jwt_key
+
+
+class TestJWKSPathFailClosed:
+    """The JWKS-based verifier — what ``OIDCProxy.get_token_verifier()``
+    auto-builds by default, and what any RS256 IdP would require — fails
+    closed at every step, and its one-hour cache is the *only* window in
+    which a rotated-out key keeps working. The reference Authentik
+    publishes an empty JWKS (that is why ytt overrides with symmetric
+    verification, see ytt/auth.py); these pins prove that losing that
+    override would 401 everything (fail closed), never accept an
+    unverifiable token."""
+
+    @staticmethod
+    def _jwks_verifier():
+        from fastmcp.server.auth.providers.jwt import JWTVerifier
+
+        return JWTVerifier(
+            jwks_uri="https://sso.ardenone.com/application/o/ytt/jwks/",
+            issuer="https://sso.ardenone.com/application/o/ytt/",
+            audience="test-client-id",
+            algorithm="RS256",
+        )
+
+    @staticmethod
+    def _material(kid: str, verifier) -> tuple[str, dict]:
+        """An RS256 token and the JWKS document publishing its key — one
+        generated key shared by both, the way a real IdP publishes the
+        public half of the key it signs with."""
+        import time as time_mod
+
+        from joserfc import jwk, jwt
+
+        key = jwk.RSAKey.generate_key(parameters={"kid": kid})
+        token = jwt.encode(
+            {"alg": "RS256", "kid": kid},
+            {
+                "iss": verifier.issuer,
+                "aud": verifier.audience,
+                "sub": "me@example.com",
+                "exp": int(time_mod.time()) + 3600,
+            },
+            key,
+        )
+        return token, {"keys": [key.as_dict(private=False)]}
+
+    @pytest.mark.asyncio
+    async def test_empty_jwks_rejects(self):
+        """The live reference-IdP shape — ``{}``, no keys — rejects every
+        token: the default JWKS path on this IdP is fail-closed-forever,
+        which is precisely why the symmetric override exists."""
+        from unittest.mock import AsyncMock, patch
+
+        verifier = self._jwks_verifier()
+        token, _ = self._material("kid-a", verifier)
+        with patch.object(
+            verifier, "_fetch_jwks", AsyncMock(return_value={"keys": []})
+        ):
+            assert await verifier.verify_token(token) is None
+
+    @pytest.mark.asyncio
+    async def test_jwks_outage_rejects_without_cache(self):
+        """A JWKS fetch outage with a cold cache rejects the token — a
+        verification key is never conjured from nothing."""
+        import httpx
+        from unittest.mock import AsyncMock, patch
+
+        verifier = self._jwks_verifier()
+        token, _ = self._material("kid-a", verifier)
+        with patch.object(
+            verifier,
+            "_fetch_jwks",
+            AsyncMock(side_effect=httpx.ConnectError("jwks down")),
+        ):
+            assert await verifier.verify_token(token) is None
+
+    @pytest.mark.asyncio
+    async def test_cached_key_served_within_ttl_through_outage(self):
+        """Once a key is cached, an IdP outage does NOT revoke it: tokens
+        under the cached kid keep verifying for the cache TTL. This is the
+        "uses cached keys" answer — bounded staleness, not immediate
+        lockout and not unbounded trust."""
+        import httpx
+        from unittest.mock import AsyncMock, patch
+
+        verifier = self._jwks_verifier()
+        token, doc_a = self._material("kid-a", verifier)
+
+        with patch.object(verifier, "_fetch_jwks", AsyncMock(return_value=doc_a)):
+            assert await verifier.verify_token(token) is not None  # warms cache
+
+        with patch.object(
+            verifier,
+            "_fetch_jwks",
+            AsyncMock(side_effect=httpx.ConnectError("jwks down")),
+        ):
+            # cached kid still verifies through the outage...
+            assert await verifier.verify_token(token) is not None
+            # ...but an unknown kid cannot be resolved and is rejected.
+            stranger, _ = self._material("kid-never-published", verifier)
+            assert await verifier.verify_token(stranger) is None
+
+    def test_cache_ttl_is_one_hour(self):
+        """The documented rotation-staleness bound: a key removed from the
+        live JWKS keeps validating for at most this long. If FastMCP ever
+        changes the TTL, this pin forces the runbook number to be revisited
+        (docs/notes/auth.md § Key rotation)."""
+        assert self._jwks_verifier()._cache_ttl == 3600
+
+    @pytest.mark.asyncio
+    async def test_rotated_out_key_rejected_once_cache_expires(self):
+        """After the JWKS rotates kid-a → kid-b: within the TTL the old key
+        still verifies (cached); once the cache expires the old kid's
+        tokens are rejected and the new kid's tokens verify."""
+        from unittest.mock import AsyncMock, patch
+
+        verifier = self._jwks_verifier()
+        old_token, doc_a = self._material("kid-a", verifier)
+        new_token, doc_b = self._material("kid-b", verifier)
+
+        with patch.object(verifier, "_fetch_jwks", AsyncMock(return_value=doc_a)):
+            assert await verifier.verify_token(old_token) is not None
+
+        # Cross the 1h TTL without sleeping it: reaching into the private
+        # cache timestamp is the honest way to test time here.
+        verifier._jwks_cache_time = 0.0
+
+        with patch.object(verifier, "_fetch_jwks", AsyncMock(return_value=doc_b)):
+            assert await verifier.verify_token(old_token) is None
+            assert await verifier.verify_token(new_token) is not None
+
+
+class TestDiscoveryOutageFailClosed:
+    """The IdP discovery document is fetched exactly once — eagerly, at
+    provider construction, i.e. at server startup. An outage there prevents
+    startup: no server comes up at all (fail closed — an unreachable IdP
+    can never produce an unauthenticated ytt). After startup, validation is
+    fully offline (symmetric keys from settings), so a *later* IdP outage
+    degrades only new logins; existing sessions keep validating."""
+
+    def test_unreachable_discovery_fails_startup(self):
+        """If the config URL cannot be fetched at construction, provider
+        construction raises and the server never binds."""
+        from unittest.mock import patch
+
+        from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        settings = Settings(
+            public_url="https://mcp.example.com/ytt",
+            oauth_client_id="test-client-id",
+            oauth_client_secret="test-client-secret",
+        )
+        with patch.object(
+            OIDCProxy,
+            "get_oidc_configuration",
+            side_effect=RuntimeError("simulated IdP discovery outage"),
+        ):
+            with pytest.raises(RuntimeError, match="discovery outage"):
+                build_auth_provider(settings)
+
+    def test_post_startup_validation_is_offline(self, upstream_pair):
+        """Structural pin for the no-runtime-discovery property: the
+        upstream verifier holds a static symmetric key (no ``jwks_uri``)
+        and the client-facing verifier signs/validates with a local key —
+        token validation performs zero network I/O against the IdP."""
+        provider, verifier = upstream_pair
+        assert verifier.jwks_uri is None
+        assert verifier.public_key == "test-client-secret"
+        provider.get_routes(mcp_path="/ytt")
+        assert provider._jwt_issuer is not None
 
 
 # ===========================================================================
