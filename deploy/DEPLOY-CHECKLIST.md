@@ -103,6 +103,13 @@ curl -s https://mcp.ardenone.com/ytt/health        # {"status": "ok"}
 kubectl --server=http://traefik-ardenone-cluster:8001 get pods -n ytt
 ```
 
+The probe wiring itself — probe path/prefix/port agreement between
+`deployment.yml`, the Dockerfile HEALTHCHECK, and the route the code
+registers, plus the unauthenticated GET surface the kubelet sends (and
+the HEAD one load-balancer uptime checks send) — is guarded by
+`tests/unit/test_deployment_health_probes.py`; drift fails the suite,
+not a deploy.
+
 Then run the **canary acceptance gate** in the new pod — required after any
 image or egress change (this checklist's §4 pin, or a `YTT_PROXY_URL`
 change):

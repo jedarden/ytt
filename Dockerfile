@@ -74,6 +74,20 @@ ENV YTT_CACHE_DIR=/cache \
     YTT_SCRATCH_DIR=/scratch
 CMD ["ytt", "serve"]
 
+# Container-level health probe — the docker run / compose counterpart of the
+# k8s liveness/readiness probes (deploy/k8s/ardenone-cluster/ytt/deployment.yml):
+# the same unauthenticated /ytt/health route, on the port `ytt serve` binds.
+# Prefix-aware (YTT_PATH_PREFIX with the documented /ytt/ default) because the
+# image is generic — a non-default prefix must still probe the right route.
+# Kubernetes ignores HEALTHCHECK; this is what makes `docker ps` report
+# health for self-hosters. urlopen returns on 2xx and raises otherwise, so
+# the command's exit code is the probe verdict.
+# Pinned by tests/unit/test_deployment_health_probes.py, which parses and
+# evaluates this URL against the manifest prefix; surfaced in
+# deploy/DEPLOY-CHECKLIST.md §5.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:8080' + os.environ.get('YTT_PATH_PREFIX', '/ytt/') + 'health', timeout=4)"
+
 # OCI labels link the published image back to the public repo.
 LABEL org.opencontainers.image.title="ytt" \
       org.opencontainers.image.description="Remote MCP server for YouTube transcripts (captions + Whisper ASR)." \
