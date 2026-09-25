@@ -11,6 +11,7 @@ Related docs:
 | Doc | Covers |
 |---|---|
 | [RUNBOOK.md](RUNBOOK.md) | Upgrade/rollback swaps, state-across-restart, the Recreate model, forbidden kubectl |
+| [TRANSCRIPT-DELETION-RUNBOOK.md](TRANSCRIPT-DELETION-RUNBOOK.md) | Per-video deletion of cached units — the surgical counterpart of §6's bulk cleanup |
 | [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) | Release SOP |
 | [docs/notes/retention-policy.md](../docs/notes/retention-policy.md) | Age-based retention (transcripts/audio/cache TTLs) — the *policy* this runbook's *recovery* procedures serve |
 | [docs/notes/single-replica.md](../docs/notes/single-replica.md) | Why all coordination (incl. the cache byte-counter) is in-process |
