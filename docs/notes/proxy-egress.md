@@ -67,7 +67,18 @@ observability (plan §Observability):
    Redaction strips the userinfo (`http://alice:s3cret@proxy:3128` →
    `http://proxy:3128`); host and port stay for diagnosability. Unit-tested in
    `tests/unit/test_proxy.py` (`TestRedactCredentials`,
-   `TestErrorRedactionBoundaries`).
+   `TestErrorRedactionBoundaries`, and the bead-`ytt-31ec1026` regression
+   classes: `TestCaptionRetryPathCredentialRedaction`,
+   `TestWhisperAudioPathCredentialRedaction`, `TestHttpxFailureRedaction`,
+   `TestStructuredLogRedaction` — the last proves layer 1 against rendered
+   JSON log lines; the caption and Whisper classes pin both retry legs of
+   layer 2).
+
+   Layer 1 and layer 2 share one sanitizer: the structlog processor applies
+   `redact_credentials()` to any string field value containing a
+   credential-bearing URL, so a log argument quoting the proxy verbatim
+   (e.g. `error=str(exc)` on the startup egress probe) renders clean even
+   where the call site has no explicit redaction.
 
 ## Failure behavior (`ytt.fetch.run_with_proxy_retry`)
 

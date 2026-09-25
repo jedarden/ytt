@@ -149,6 +149,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Proxy credentials can no longer reach structured logs through a
+  sentence-shaped field value** (bead `ytt-31ec1026`). The structlog
+  redaction processor sanitized only values that were a *bare* URL
+  (`urlparse` cannot find a URL embedded in a sentence), so a log argument
+  quoting the configured proxy verbatim — the `error=str(exc)` shapes on the
+  startup egress probe (`ytt.server`) and the Whisper cleanup paths
+  (`ytt.whisper`) — rendered the `user:pass@` userinfo verbatim into the
+  JSON log line. The processor now applies `redact_credentials()` (the same
+  free-text rule the fetch/whisper/canary boundaries use) to any string
+  value containing a credential-bearing URL; this also stops the old
+  `_sanitize_url` path from silently dropping the proxy's **port** on bare
+  URLs (`http://alice:s3cret@proxy:3128` used to sanitize to
+  `http://proxy` — host:port now survives for diagnosability, matching the
+  free-text contract in `docs/notes/proxy-egress.md`). Regression coverage
+  in `tests/unit/test_proxy.py` pins the full contract end to end: both
+  retry legs (direct + proxied) of the caption and Whisper audio paths,
+  httpx egress failures in the canary report, and rendered log lines;
+  processor-level unit pins for the sentence shape and port survival live
+  in `tests/unit/test_observability.py`.
+
 - **`YTT_MAX_CONCURRENT_WHISPER` is now actually enforced** (bead
   `ytt-7dc271a6`). The semaphore existed (`ConcurrencyState.whisper_sem`) and
   the knob was documented, but no code ever acquired it — any number of

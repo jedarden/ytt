@@ -3,7 +3,6 @@
 Covers:
 - Prometheus metrics existence + label names (no network required)
 - structlog redaction processor (sensitive field names + credential URLs)
-- ``_sanitize_url`` helper
 - ``DATACENTER_ASNS`` + ``DATACENTER_ORG_PATTERNS`` presence
 - ``derive_is_residential`` logic
 - ``/ytt/metrics`` endpoint returns 200 + Prometheus text
@@ -193,6 +192,36 @@ def test_redaction_credential_bearing_url():
     assert "user" not in sanitized
     # Host should still be present (for debugging)
     assert "proxy.example.com" in sanitized
+    # ... and the port too — the pre-ytt-31ec1026 sanitizer replaced the
+    # whole netloc with bare hostname, silently dropping it.
+    assert sanitized == "http://proxy.example.com:3128"
+
+
+def test_redaction_sentence_quoting_url_redacted():
+    """A sentence-shaped value quoting the proxy (the ``error=str(exc)``
+    log-argument shapes) must be redacted.
+
+    ``urlparse`` cannot find a URL embedded in leading text, so the
+    pre-ytt-31ec1026 processor returned these verbatim — the credential
+    leak this bead closes.
+    """
+    from ytt.observability import redaction_processor
+
+    event_dict: dict[str, Any] = {
+        "event": "Startup egress probe failed",
+        "error": (
+            "Unable to communicate with proxy "
+            "http://user:pass@proxy.example.com:3128 timed out"
+        ),
+    }
+    result = redaction_processor(None, "info", event_dict)
+    assert "user" not in result["error"]
+    assert "pass" not in result["error"]
+    # userinfo gone, host:port kept for diagnosability
+    assert result["error"] == (
+        "Unable to communicate with proxy "
+        "http://proxy.example.com:3128 timed out"
+    )
 
 
 def test_redaction_plain_url_untouched():
@@ -218,30 +247,6 @@ def test_redaction_email_in_url_untouched():
     result = redaction_processor(None, "info", event_dict)
     # The URL has no credential-bearing '@' pattern → untouched
     assert result["url"] == plain_url
-
-
-# ---------------------------------------------------------------------------
-# _sanitize_url helper
-# ---------------------------------------------------------------------------
-
-
-def test_sanitize_url_strips_credentials():
-    """_sanitize_url must strip user:password from a URL."""
-    from ytt.observability import _sanitize_url
-
-    url = "http://alice:secret@proxy.example.com:3128/path"
-    sanitized = _sanitize_url(url)
-    assert "alice" not in sanitized
-    assert "secret" not in sanitized
-    assert "proxy.example.com" in sanitized
-
-
-def test_sanitize_url_no_credentials_unchanged():
-    """_sanitize_url must return the value unchanged if there are no credentials."""
-    from ytt.observability import _sanitize_url
-
-    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    assert _sanitize_url(url) == url
 
 
 # ---------------------------------------------------------------------------

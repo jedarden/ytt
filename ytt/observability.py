@@ -24,8 +24,10 @@ a renderer:
 
     Blocked field names (case-insensitive): sub, email, token, secret, key,
         authorization, transcript, audio_path, proxy_url, allowed_subjects.
-    Blocked URL values: any field whose string value contains ``@`` (credential-
-        bearing URL — Webshare etc.) is sanitized to ``<redacted-url>``.
+    Blocked URL values: any field whose string value contains a credential-
+        bearing URL (``user:pass@host`` — Webshare etc.) is sanitized via
+        :func:`redact_credentials` — userinfo stripped, host:port kept —
+        whether the URL is the whole value or embedded in a sentence.
 
 Free-text error messages are NOT structured fields and bypass this processor —
 upstream exception strings that may quote the credentialed proxy URL must be
@@ -42,7 +44,6 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urlparse, urlunparse
 
 import structlog
 from prometheus_client import Counter, Gauge, Histogram
@@ -205,23 +206,6 @@ def redact_credentials(text: str) -> str:
     )
 
 
-def _sanitize_url(value: str) -> str:
-    """Strip credentials from a URL string.
-
-    ``http://user:pass@host:1234/path`` → ``http://host:1234/path``.
-    Returns the original value unchanged if it is not a credential-bearing URL.
-    """
-    if "@" not in value:
-        return value
-    try:
-        parsed = urlparse(value)
-        # Replace netloc with host only (drop username:password)
-        sanitized = urlunparse(parsed._replace(netloc=parsed.hostname or parsed.netloc))
-        return sanitized
-    except Exception:
-        return "<redacted-url>"
-
-
 def redaction_processor(
     logger: Any, method: str, event_dict: dict[str, Any]
 ) -> dict[str, Any]:
@@ -230,7 +214,13 @@ def redaction_processor(
     Plan §Observability / Diagnostic hygiene:
     - Blocked field names: sub, email, token, secret, key, authorization,
       transcript, audio_path, proxy_url, allowed_subjects.
-    - Any string value containing '@' is sanitized (credential-bearing URL).
+    - Any string value containing a credential-bearing URL is sanitized via
+      :func:`redact_credentials` — the same free-text rule the fetch/whisper/
+      canary boundaries apply, so a log argument quoting the configured
+      proxy verbatim (``error=str(exc)`` on the startup egress probe and
+      Whisper cleanup paths) renders with the userinfo stripped, whether the
+      URL is the whole value or embedded in a sentence. Host and port stay
+      for diagnosability.
     """
     for key in list(event_dict.keys()):
         if key.lower() in _REDACTED_FIELD_NAMES:
@@ -238,7 +228,7 @@ def redaction_processor(
             continue
         val = event_dict[key]
         if isinstance(val, str) and "@" in val and _CREDENTIAL_URL_RE.search(val):
-            event_dict[key] = _sanitize_url(val)
+            event_dict[key] = redact_credentials(val)
     return event_dict
 
 

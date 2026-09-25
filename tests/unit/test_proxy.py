@@ -15,6 +15,18 @@ Covers, end to end but fully mocked (no network):
 - redaction boundaries: yt-dlp error strings and the ``/admin/egress`` 502
   body are credential-free;
 - the CLI wiring of ``--via-proxy``.
+
+Regression coverage (bead ``ytt-31ec1026`` — the redaction contract end to
+end, on **both** retry legs and into **rendered log output**):
+
+- a credential-bearing yt-dlp failure on the direct attempt or the proxied
+  retry reaches the caller's ``YttError.message`` (captions) and the stored
+  Whisper job ``message`` (what ``get_transcript_job`` relays verbatim) with
+  the userinfo stripped and host:port kept;
+- the ``ExtractorError`` boundary redacts too;
+- an httpx failure quoting the proxy lands redacted in the canary report;
+- structlog-rendered JSON lines (the ``error=str(exc)`` log-argument shapes
+  of the startup egress probe and Whisper cleanup paths) carry no creds.
 """
 
 from __future__ import annotations
@@ -206,6 +218,11 @@ class TestRedactCredentials:
     )
     def test_credentialed_urls_are_stripped(self, dirty, expected):
         assert redact_credentials(dirty) == expected
+
+    def test_bare_credentialed_url_keeps_host_and_port(self):
+        """The exact value yt-dlp dials with (``opts["proxy"]``): userinfo
+        stripped, host:port kept for diagnosability."""
+        assert redact_credentials(_PROXY) == "http://proxy.example.com:3128"
 
     @pytest.mark.parametrize(
         "safe",
@@ -700,6 +717,338 @@ class TestErrorRedactionBoundaries:
         body = resp.json()
         assert "s3cret" not in body["error"]
         assert "proxy.example.com:3128" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# Regression (bead ytt-31ec1026): credentials never survive the direct or
+# proxied retry paths, in relayed errors or rendered log lines
+# ---------------------------------------------------------------------------
+
+#: A yt-dlp/httpx-style failure string quoting the configured proxy verbatim
+#: (creds included) — the shape every redaction boundary must sanitize.
+_DIRTY_PROXY_ERR = (
+    "Unable to communicate with proxy "
+    f"{_PROXY} timed out"
+)
+
+#: The host:port the contract promises to KEEP (docs/notes/proxy-egress.md:
+#: "Redaction strips the userinfo … host and port stay for diagnosability").
+_PROXY_HOSTPORT = "proxy.example.com:3128"
+
+
+def _assert_credential_free(text: str) -> None:
+    """No proxy userinfo anywhere in *text* — the relayed/logged form is clean."""
+    assert "alice" not in text
+    assert "s3cret" not in text
+    assert "@" not in text
+    assert _PROXY not in text
+
+
+class TestCaptionRetryPathCredentialRedaction:
+    """A credential-bearing yt-dlp failure on either leg of the caption
+    retry (direct first, one proxied retry on ``ip_blocked``) must reach the
+    caller as a redacted, verbatim-relayable ``YttError.message``."""
+
+    async def test_proxied_retry_failure_is_redacted_end_to_end(self):
+        """Direct attempt hits the bot check; the proxied retry fails with an
+        exception quoting the credentialed proxy — the raised message carries
+        "(proxy retry also failed)" and no credentials, host:port intact."""
+        from ytt.fetch import fetch_transcript
+
+        factory, captured = _capturing_ydl(
+            [
+                yt_dlp.utils.DownloadError(_BOT_CHECK),
+                yt_dlp.utils.DownloadError(_DIRTY_PROXY_ERR),
+            ]
+        )
+        settings = _make_fetch_settings(proxy_url=_PROXY)
+
+        with patch("ytt.fetch.yt_dlp.YoutubeDL", side_effect=factory):
+            with pytest.raises(YttError) as excinfo:
+                await fetch_transcript("dQw4w9WgXcQ", "en", settings)
+
+        message = excinfo.value.message
+        _assert_credential_free(message)
+        assert _PROXY_HOSTPORT in message, "host:port must survive for diagnosis"
+        assert "(proxy retry also failed)" in message
+        # Both legs ran, and only the retry dialed through the proxy.
+        assert len(captured) == 2
+        assert "proxy" not in captured[0]
+        assert captured[1].get("proxy") == _PROXY
+
+    async def test_direct_attempt_failure_is_redacted_and_never_retried(self):
+        """Direct-only run (no proxy configured): even a DownloadError quoting
+        a credentialed URL is stripped at the YttError boundary, and no retry
+        happens (a non-ip_blocked classification never justifies one)."""
+        from ytt.fetch import fetch_transcript
+
+        factory, captured = _capturing_ydl(
+            [yt_dlp.utils.DownloadError(_DIRTY_PROXY_ERR)]
+        )
+        settings = _make_fetch_settings()  # proxy_url=None — direct only
+
+        with patch("ytt.fetch.yt_dlp.YoutubeDL", side_effect=factory):
+            with pytest.raises(YttError) as excinfo:
+                await fetch_transcript("dQw4w9WgXcQ", "en", settings)
+
+        message = excinfo.value.message
+        _assert_credential_free(message)
+        assert "(proxy retry" not in message
+        assert len(captured) == 1, "a direct-only failure must not retry"
+
+    async def test_extractor_error_quoting_proxy_is_redacted(self):
+        """The ExtractorError boundary redacts too (only the DownloadError
+        branch was pinned before) — single proxied attempt, canary-style."""
+        dirty = f"Failed to extract player data from {_PROXY}"
+        factory, captured = _capturing_ydl([yt_dlp.utils.ExtractorError(dirty)])
+
+        with patch("ytt.fetch.yt_dlp.YoutubeDL", side_effect=factory):
+            with pytest.raises(YttError) as excinfo:
+                _do_fetch(
+                    "dQw4w9WgXcQ", "en", _make_fetch_settings(), proxy=_PROXY
+                )
+
+        message = excinfo.value.message
+        _assert_credential_free(message)
+        assert _PROXY_HOSTPORT in message
+        assert captured[0].get("proxy") == _PROXY
+
+
+class TestWhisperAudioPathCredentialRedaction:
+    """The Whisper audio download shares the retry machinery; a
+    credential-bearing failure on either leg must leave the job's stored
+    ``message`` — what ``get_transcript_job`` relays verbatim — clean."""
+
+    VIDEO_ID = "dQw4w9WgXcQ"
+
+    @staticmethod
+    def _settings(scratch: str, proxy_url: str | None):
+        s = MagicMock()
+        s.max_asr_duration_sec = 1200
+        s.whisper_realtime_factor = 2.0
+        s.job_ttl_sec = 3600
+        s.whisper_timeout_sec = 2880
+        s.max_audio_bytes = 500 * 1024 * 1024
+        s.scratch_dir = scratch
+        s.whisper_url = "http://whisper.local:8000"
+        s.whisper_model = "Systran/faster-whisper-small"
+        s.proxy_url = proxy_url
+        return s
+
+    @staticmethod
+    def _cache():
+        cache = MagicMock()
+        cache.get.return_value = None
+        cache.put = AsyncMock()  # TranscriptCache.put is async
+        return cache
+
+    async def _run_job(self, settings, outcomes):
+        """run_whisper_job with yt-dlp stubbed to *outcomes* per construction.
+
+        Returns (captured opts dicts, registry) — the registry holds the job.
+        """
+        import os
+        from pathlib import Path
+
+        from ytt.whisper import WhisperJobRegistry, run_whisper_job
+
+        scratch = settings.scratch_dir
+        os.makedirs(scratch, exist_ok=True)
+        # Pre-written file satisfies the post-download glob (yt-dlp is mocked).
+        (Path(scratch) / f"{self.VIDEO_ID}.mp4").write_bytes(b"fake audio")
+
+        factory, captured = _capturing_ydl(outcomes)
+        registry = WhisperJobRegistry()
+        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings)
+
+        whisper_resp = MagicMock(spec=httpx.Response)
+        whisper_resp.status_code = 200
+        whisper_resp.json.return_value = {
+            "text": "hello", "language": "en", "segments": [],
+        }
+        http_client = AsyncMock(spec=httpx.AsyncClient)
+        http_client.post = AsyncMock(return_value=whisper_resp)
+
+        with patch("ytt.whisper.yt_dlp.YoutubeDL", side_effect=factory):
+            await run_whisper_job(
+                job, registry, settings, self._cache(),
+                "Systran/faster-whisper-small",
+                http_client=http_client,
+            )
+        return captured, registry
+
+    async def test_proxied_retry_failure_message_is_redacted(self, tmp_path):
+        """Direct attempt blocked, proxied retry fails quoting the proxy —
+        the stored job message (relayed verbatim by get_transcript_job) is
+        credential-free with the retry suffix and host:port intact."""
+        captured, registry = await self._run_job(
+            self._settings(str(tmp_path / "scratch"), _PROXY),
+            [
+                yt_dlp.utils.DownloadError(_BOT_CHECK),
+                yt_dlp.utils.DownloadError(_DIRTY_PROXY_ERR),
+            ],
+        )
+        final = await registry.get(self.VIDEO_ID)
+        assert final is not None and final.status == "error"
+        message = final.message or ""
+        _assert_credential_free(message)
+        assert _PROXY_HOSTPORT in message
+        assert "(proxy retry also failed)" in message
+        assert len(captured) == 2
+        assert "proxy" not in captured[0]
+        assert captured[1].get("proxy") == _PROXY
+
+    async def test_direct_attempt_failure_message_is_redacted(self, tmp_path):
+        """A direct-only failure quoting the proxy never reaches the stored
+        job message, and no retry is attempted."""
+        captured, registry = await self._run_job(
+            self._settings(str(tmp_path / "scratch"), None),
+            [yt_dlp.utils.DownloadError(_DIRTY_PROXY_ERR)],
+        )
+        final = await registry.get(self.VIDEO_ID)
+        assert final is not None and final.status == "error"
+        message = final.message or ""
+        _assert_credential_free(message)
+        assert "(proxy retry" not in message
+        assert len(captured) == 1
+
+    def test_download_error_boundary_redacts_before_the_retry_layer(self, tmp_path):
+        """Unit leg: ``_do_download_audio`` strips proxy creds from the raised
+        YttError itself — run_with_proxy_retry only ever sees clean text."""
+        from ytt.whisper import _do_download_audio
+
+        factory, captured = _capturing_ydl(
+            [yt_dlp.utils.DownloadError(_DIRTY_PROXY_ERR)]
+        )
+        with patch("ytt.whisper.yt_dlp.YoutubeDL", side_effect=factory):
+            with pytest.raises(YttError) as excinfo:
+                _do_download_audio(
+                    self.VIDEO_ID,
+                    str(tmp_path),
+                    500 * 1024 * 1024,
+                    proxy=_PROXY,
+                    max_asr_duration_sec=1200,
+                )
+        message = excinfo.value.message
+        _assert_credential_free(message)
+        assert _PROXY_HOSTPORT in message
+        assert captured[0].get("proxy") == _PROXY
+
+
+class TestHttpxFailureRedaction:
+    """httpx failures quote the proxy too (the egress probe dials through
+    it, per the contract) — every relayed form must come out clean."""
+
+    def test_run_once_egress_probe_failure_error_is_redacted(self):
+        """The one-shot canary's egress half: an httpx ConnectError quoting
+        the credentialed proxy lands in the JSON report redacted (host:port
+        kept), and the caption fetch remains the verdict."""
+        from ytt.canary import run_once
+
+        settings = _make_fetch_settings(proxy_url=_PROXY)
+        factory, _ = _capturing_ydl([_make_info()])
+        probe_mock = MagicMock(side_effect=httpx.ConnectError(_DIRTY_PROXY_ERR))
+
+        with patch("ytt.config.get_settings", return_value=settings):
+            with patch("ytt.selftest.probe_egress", probe_mock):
+                with patch("yt_dlp.YoutubeDL", side_effect=factory):
+                    report = run_once()
+
+        egress = report["egress"]
+        _assert_credential_free(egress["error"])
+        assert _PROXY_HOSTPORT in egress["error"]
+        assert egress["via_proxy"] is True
+        assert report["verdict"] == "ok"  # egress failure is context, not verdict
+
+
+class TestStructuredLogRedaction:
+    """The contract's "structured logs" leg, proven against RENDERED output:
+    ``configure_logging()`` + ``get_logger()`` emitting the production
+    log-argument shapes must produce JSON lines carrying no proxy creds.
+
+    Drives the emissions that carry upstream exception text —
+    ``_log.error("Startup egress probe failed", error=str(exc))``
+    (``ytt.server``) and the ``log.warning(..., error=str(exc))`` Whisper
+    cleanup paths (``ytt.whisper``) — plus bare-URL and free-text values.
+    """
+
+    def _rendered_line(self, capsys, emit) -> str:
+        from ytt.observability import configure_logging, get_logger
+
+        configure_logging()
+        log = get_logger("ytt.test.proxy_redaction")
+        emit(log)
+        out = capsys.readouterr().out
+        lines = [line for line in out.splitlines() if line.strip()]
+        assert lines, "expected at least one rendered JSON log line"
+        return lines[-1]
+
+    def test_error_argument_quoting_proxy_renders_clean(self, capsys):
+        """The startup-egress-probe failure shape: ``error=str(exc)`` with a
+        sentence quoting the proxy must render credential-free."""
+        import json
+
+        def emit(log):
+            log.error("Startup egress probe failed", error=_DIRTY_PROXY_ERR)
+
+        line = self._rendered_line(capsys, emit)
+        _assert_credential_free(line)
+        assert _PROXY_HOSTPORT in line
+        event = json.loads(line)
+        assert event["event"] == "Startup egress probe failed"
+        assert "@" not in event["error"]
+
+    def test_whisper_cleanup_warning_shape_renders_clean(self, capsys):
+        """The ``whisper_audio_delete_failed`` shape: ``error=str(exc)`` on a
+        warning must render credential-free."""
+        import json
+
+        def emit(log):
+            log.warning(
+                "whisper_audio_delete_failed",
+                video_id="dQw4w9WgXcQ",
+                error=_DIRTY_PROXY_ERR,
+            )
+
+        event = json.loads(self._rendered_line(capsys, emit))
+        assert event["video_id"] == "dQw4w9WgXcQ"
+        _assert_credential_free(event["error"])
+        assert _PROXY_HOSTPORT in event["error"]
+
+    def test_bare_credentialed_url_value_renders_clean(self, capsys):
+        """A field whose whole value is the credentialed proxy URL."""
+        import json
+
+        def emit(log):
+            log.info("egress probe target", endpoint=_PROXY)
+
+        event = json.loads(self._rendered_line(capsys, emit))
+        _assert_credential_free(event["endpoint"])
+        assert _PROXY_HOSTPORT in event["endpoint"]
+
+    def test_proxy_url_field_name_is_dropped(self, capsys):
+        """``proxy_url`` is a blocked field name — value never renders."""
+        import json
+
+        def emit(log):
+            log.info("egress configured", proxy_url=_PROXY)
+
+        event = json.loads(self._rendered_line(capsys, emit))
+        assert event["proxy_url"] == "<redacted>"
+
+    def test_free_text_event_quoting_proxy_renders_clean(self, capsys):
+        """The canary logs its (pre-sanitized) probe error as the event text;
+        a regression that skips sanitization still must not render creds."""
+        import json
+
+        def emit(log):
+            log.error(
+                f"Canary probe error: {_DIRTY_PROXY_ERR} (outcome=empty_body)"
+            )
+
+        event = json.loads(self._rendered_line(capsys, emit))
+        _assert_credential_free(event["event"])
+        assert _PROXY_HOSTPORT in event["event"]
 
 
 # ---------------------------------------------------------------------------
