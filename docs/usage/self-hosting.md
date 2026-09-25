@@ -225,7 +225,7 @@ is what points it at yours.
 ```yaml
 services:
   ytt:
-    image: ronaldraygun/ytt:0.2.20
+    image: ronaldraygun/ytt:0.2.21
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"   # private — only the proxy talks to it

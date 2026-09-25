@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.21] — 2026-09-25
+
 ### Added
 
 - **Continuous canary freshness monitoring** (bead `ytt-2b3ca59e`). The
@@ -797,7 +799,8 @@ Initial release.
 - Integration test harness for 22 in-cluster scenarios.
 - Public GHCR image: `ghcr.io/jedarden/ytt:0.1.0`.
 
-[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.20...HEAD
+[Unreleased]: https://github.com/jedarden/ytt/compare/v0.2.21...HEAD
+[0.2.21]: https://github.com/jedarden/ytt/compare/v0.2.20...v0.2.21
 [0.2.20]: https://github.com/jedarden/ytt/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/jedarden/ytt/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/jedarden/ytt/compare/v0.2.17...v0.2.18
