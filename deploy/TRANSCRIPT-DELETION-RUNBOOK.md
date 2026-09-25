@@ -121,10 +121,10 @@ So: **every verification step in §7 runs through the proxy or the public
 endpoints — but the §3 listing and the §5 deletion need `exec`**, and exec
 needs a kubeconfig granting `pods/exec` on ns `ytt`. From `codinghome` no
 such kubeconfig is provisioned for `ardenone-cluster`; an agent working this
-runbook stops after §3 and hands the evidence to an operator. (RUNBOOK.md
-§3/§7 currently describe exec-through-proxy as allowed; that does not match
-live RBAC today — the same correction CACHE-RUNBOOK §6 step 4 documents,
-tracked as bead `ytt-4d76a316`.)
+runbook stops after §3 and hands the evidence to an operator. (The
+exec-through-proxy claim RUNBOOK.md §3/§7 used to make — the same correction
+CACHE-RUNBOOK §6 step 4 documents, tracked as bead `ytt-4d76a316` — was
+corrected to match live RBAC by `ytt-e78ad269`.)
 
 Two boundaries worth keeping distinct:
 

@@ -214,10 +214,10 @@ one.  In order:
 4. **Access boundary (say this before promising step 3).**  The
    credential-free read-only proxy **cannot exec** — its RBAC is
    `pods`/`pods/log` `get|list|watch` only; `kubectl exec` through it fails
-   with `unable to upgrade connection: Forbidden` (verified 2026-09-25; note
-   RUNBOOK.md §3/§7 currently describe exec as allowed through the proxy —
-   that claim does not match live RBAC today and is flagged on bead
-   `ytt-1ff7ef2e`).  In-pod cleanup needs a kubeconfig granting
+   with `unable to upgrade connection: Forbidden` (verified 2026-09-25;
+   RUNBOOK.md §3/§7 used to describe exec as allowed through the proxy —
+   flagged on bead `ytt-1ff7ef2e`, corrected to match live RBAC by
+   `ytt-e78ad269`).  In-pod cleanup needs a kubeconfig granting
    `pods/exec`/`create` in ns `ytt`.  From `codinghome` no such kubeconfig is
    provisioned for `ardenone-cluster` — an agent hitting a full volume should
    stop at detection (§5) and hand the evidence to an operator rather than

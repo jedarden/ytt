@@ -112,17 +112,22 @@ not a deploy.
 
 Then run the **canary acceptance gate** in the new pod — required after any
 image or egress change (this checklist's §4 pin, or a `YTT_PROXY_URL`
-change):
+change).  Like the other human-gated steps, this one needs a credential: the
+gate execs into the pod, and the credential-free read-only proxy cannot exec
+(`auth can-i create pods/exec` → `no`; RUNBOOK §3/§7):
 
 ```bash
-kubectl --server=http://traefik-ardenone-cluster:8001 exec -n ytt deploy/ytt \
-  -- ytt canary --gate
+KC=<a kubeconfig with pods/exec on ns ytt>   # the read-only proxy cannot exec — RUNBOOK §7
+kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt -c ytt -- ytt canary --gate \
+  | tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"
 ```
 
-Exit 0 + `outcome=ok` on every probe = release validated; retain the JSON
-(e.g. `| tee canary-gate-<ts>.json`) with the release record.  On failure the
-report's `remediation` names the rollback/escalation path — the decision
-table is [RUNBOOK.md](RUNBOOK.md) §3.1.
+Exit 0 + `outcome=ok` on every probe = release validated; the `tee` copy is
+the retained evidence for the release record.  On failure the report's
+`remediation` names the rollback/escalation path — the decision table is
+[RUNBOOK.md](RUNBOOK.md) §3.1.  An agent without a `pods/exec` kubeconfig
+collects the read-only corroboration instead (RUNBOOK §3 step 4) and hands
+this step to an operator.
 
 ### 6. Verify OAuth metadata (and ibkr — do-not-harm gate)
 

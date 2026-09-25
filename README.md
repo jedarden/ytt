@@ -77,8 +77,12 @@ the rollback/escalation directive on failure:
 ytt canary --gate    # release gate; exit 0 only on a full pass
 ```
 
-In Kubernetes: `kubectl exec -n <ns> deploy/ytt -- ytt canary --gate`
-(decision table: `deploy/RUNBOOK.md` §3.1).
+In Kubernetes the gate runs *inside* the server pod, so it needs a kubeconfig
+granting `pods/exec` on the namespace — the credential-free read-only
+`kubectl` proxy cannot exec (`auth can-i create pods/exec` → `no`; the gate
+is an operator step).  The exact command, the read-only evidence that can be
+collected without exec, and the decision table: `deploy/RUNBOOK.md` §3 and
+§3.1.
 
 ## Configuration
 

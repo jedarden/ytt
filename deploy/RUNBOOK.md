@@ -163,7 +163,13 @@ disk-exhaustion procedures for this volume live in
 
 ## 3. Post-deploy validation (run in order)
 
-All `kubectl` here is read-only through the credential-free proxy — allowed.
+All `kubectl` here is read-only through the credential-free proxy — allowed
+— **with one exception: step 4**.  Exec-ing into the pod is the write-shaped
+`create` on `pods/exec`, and the proxy's RBAC deliberately withholds it
+(verified live 2026-09-25: `auth can-i get pods|pods/log -n ytt` → `yes`,
+`auth can-i create pods/exec -n ytt` → `no`; an exec attempt through the
+proxy fails with `unable to upgrade connection: Forbidden`).  Step 4 is
+therefore an **operator** step; every other step runs through `$KS`.
 
 ```bash
 KS="kubectl --server=http://traefik-ardenone-cluster:8001"
@@ -181,9 +187,11 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    two metadata hashes must be byte-identical to pre-deploy.  Any ibkr hash
    change → revert the declarative-config commit and push.
 4. **Canary acceptance gate, in the new server pod** — the release gate after
-   any image or egress change:
+   any image or egress change.  **The gate execs into the pod, so it is an
+   operator step** — the credential-free proxy cannot exec (§3 intro, §7):
    ```bash
-   $KS exec -n ytt deploy/ytt -- ytt canary --gate \
+   KC=<a kubeconfig with pods/exec on ns ytt>   # the read-only proxy cannot exec — §7
+   kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt -c ytt -- ytt canary --gate \
      | tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"
    ```
    The gate runs `ytt canary --once` (direct) **and** `--via-proxy` when
@@ -198,6 +206,22 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    lock — only `serve()` does — so it is safe alongside the live server; the
    same is true of `ytt selftest`.  (A stray `ytt serve` exec'd into the pod
    *will* exit 1 on the lock — that's the tripwire working.)
+
+   **Read-only corroboration while the operator gate is pending** — an agent
+   (or any operator without a `pods/exec` kubeconfig) collects this through
+   `$KS` and hands the gate step over.  It corroborates the egress path but
+   **never substitutes for the gate**: only the gate exercises the *new*
+   image's fetch code end to end.
+   ```bash
+   # the new pod's own egress classification (the gate's egress half):
+   $KS logs -n ytt deploy/ytt --timestamps | grep -m1 'Startup egress probe'
+   #   → "is_residential": true for this pod
+   # the standing loop (same probe code, separately pinned image) kept
+   # succeeding through the swap — continuity, not the new image:
+   $KS logs -n ytt deploy/ytt-canary --timestamps | tail -5
+   # and the server-side egress gauge on the public endpoint:
+   curl -s https://mcp.ardenone.com/ytt/metrics | grep -E 'ytt_egress_is_residential'   # → 1.0
+   ```
 5. **Standing canary Deployment is healthy** — `ytt-canary` is a separate
    Deployment and does **not** restart when the server does; check its probe
    loop kept succeeding through the upgrade:
@@ -317,9 +341,17 @@ are forbidden, not just discouraged:
 | `kubectl delete pod` | An unsanctioned restart: same downtime and same in-flight-job loss as a real swap (§2), with no git history explaining it.  Pod deletions are not "cleanup" — the ReplicaSet wants that pod |
 | `kubectl delete pvc` (`ytt-cache`, `ytt-oauth-state`) | Destroys the transcript cache **and** every connected client's OAuth session (forced re-login everywhere).  There is no undo |
 
-Always allowed (read-only): `get`, `describe`, `logs`, and `exec` for
-diagnostics and the canary (`ytt canary --once`, `ytt selftest`) — through
-the credential-free proxy
+Always allowed (read-only): `get`, `describe`, and `logs` for diagnostics —
+through the credential-free proxy
 (`kubectl --server=http://traefik-ardenone-cluster:8001 …`) or any read-only
-kubeconfig.  The proxy's RBAC cannot write, so a denied write there is the
-boundary working, not an outage to route around.
+kubeconfig.  **`exec` is not in that set**: it is the write-shaped `create`
+on `pods/exec`, the proxy's RBAC withholds it (verified live 2026-09-25 —
+`auth can-i create pods/exec -n ytt` → `no`; an attempt fails with
+`unable to upgrade connection: Forbidden`), so every in-pod command — the
+canary gate and `--once` probes, `ytt selftest`, cache/OAuth-state surgery —
+needs a kubeconfig that grants `pods/exec` on ns `ytt`.  That is an operator
+credential; no such kubeconfig is provisioned on `codinghome`.  An agent
+collects the read-only evidence (§3 step 4's corroboration commands) and
+hands the exec step to an operator — same split as the cache, OAuth-state,
+and deletion runbooks.  The proxy's RBAC cannot write, so a denied write
+there is the boundary working, not an outage to route around.

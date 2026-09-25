@@ -144,9 +144,9 @@ window were non-`ok`.  Which outcome dominates says why — break
 
 ## 3. Triage commands
 
-All read-only, all through the credential-free proxy.  When an alert fires,
-establish **which path, which outcome, since when** before touching
-anything:
+Steps 1–3 are read-only, all through the credential-free proxy.  When an
+alert fires, establish **which path, which outcome, since when** before
+touching anything:
 
 ```bash
 KS="kubectl --server=http://traefik-ardenone-cluster:8001"
@@ -165,15 +165,22 @@ curl -sk "https://prometheus-ardenone-cluster-ts.ardenone.com:8444/api/v1/query"
   --data-urlencode 'query=sum by (probe, outcome) (increase(ytt_canary_probes_total[1h]))' \
   | jq -r '.data.result[] | "\(.metric.probe)/\(.metric.outcome): +\(.value[1])"'
 
-# 4. Ground truth, one probe each way, from the canary pod's own environment:
-$KS exec -n ytt deploy/ytt-canary -- ytt canary --once
-$KS exec -n ytt deploy/ytt-canary -- ytt canary --once --via-proxy   # only if YTT_PROXY_URL is set
+# 4. Ground truth, one probe each way, from the canary pod's own environment.
+#    An operator step: exec needs `create` on `pods/exec`, which the
+#    credential-free proxy's RBAC withholds (RUNBOOK §7).  Through $KS,
+#    steps 1–3 are the ground truth.
+KC=<a kubeconfig with pods/exec on ns ytt>
+kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt-canary -c ytt-canary -- ytt canary --once
+kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt-canary -c ytt-canary -- ytt canary --once --via-proxy   # only if YTT_PROXY_URL is set
 ```
 
-`kubectl exec` for canary diagnostics is explicitly allowed (RUNBOOK §7);
-the one-shot canary never touches the singleton lock.  The `--once` reports
-are JSON with credential-redacted error strings — retain them as evidence
-for the bead or incident record, exactly like gate evidence.
+In-pod ground truth needs a kubeconfig granting `pods/exec` on ns `ytt` —
+the credential-free proxy cannot exec (`unable to upgrade connection:
+Forbidden`; RUNBOOK §7), so the one-shot probes are an operator action and
+steps 1–3 are what an agent runs.  The one-shot canary never touches the
+singleton lock.  The `--once` reports are JSON with credential-redacted
+error strings — retain them as evidence for the bead or incident record,
+exactly like gate evidence.
 
 ## 4. Response — rollback vs. escalation
 
