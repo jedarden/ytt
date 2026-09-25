@@ -6,14 +6,37 @@ fixed internal video list, exposing ``ytt_canary_*`` metrics on a Prometheus
 ``/metrics`` endpoint.  Runs as its own Deployment (no K8s Jobs — plan
 §Infrastructure constraint).
 
-Metrics emitted (plan §Observability / Canary):
+Metrics emitted (plan §Observability / Canary; per-path pair per
+deploy/CANARY-MONITORING-RUNBOOK.md §1):
 
-    ytt_canary_last_success_timestamp_seconds  — Gauge (updated on each success)
-    ytt_canary_failures_total                  — Counter (incremented on failure)
+    ytt_canary_last_success_timestamp_seconds  — Gauge (set when ANY path succeeds)
+    ytt_canary_failures_total                  — Counter (incremented when NO path succeeds)
+    ytt_canary_probe_last_success_timestamp_seconds — Gauge{probe} (per path)
+    ytt_canary_probes_total                    — Counter{probe, outcome} (per path)
+
+The per-path pair is what makes a persistent failure *attributable*:
+``probe=direct|via_proxy`` (the same vocabulary as the gate,
+``ytt.canary_gate.PROBE_ORDER``) distinguishes "native egress blocked, users
+still served via the proxy fallback" (``YttCanaryDirectBlocked``) from "the
+fallback is broken while direct is healthy" (``YttCanaryFallbackBroken``);
+``YttCanaryProbeFlapping`` catches the case both staleness gauges miss — a
+path failing every other cycle while its gauge keeps refreshing.  The
+via_proxy series exists only while ``YTT_PROXY_URL`` is configured —
+its absence means "this canary does not probe via proxy", never "the proxy
+is broken".  Continuous monitoring and the alert-response procedure are
+defined in ``deploy/CANARY-MONITORING-RUNBOOK.md``; the canonical
+alert-rule definitions live in its §2 (drift-guarded against both this
+module's metrics and the applied ``prometheusrule.yml`` by
+``tests/unit/test_canary_monitoring.py``).
+
+Freshness gauges initialize to **loop-start time**, not 0: a pod restart
+cannot fire the staleness alerts before the first probe completes, and
+``time() - gauge`` is bounded by process age (a gauge older than the pod
+can never be observed).
 
 PrometheusRule: fire ``YttCanaryFailed`` if
     ``time() - ytt_canary_last_success_timestamp_seconds > 1800``
-(3 consecutive 10-min probes missed).
+(3 consecutive 10-min probes missed on every path — fetches down for users).
 
 The canary Deployment is separate from the main ytt server; it has its own
 ``/metrics`` port (8081 by default) scraped by a ``ServiceMonitor`` referencing
@@ -34,7 +57,7 @@ import logging
 import time
 from typing import Any
 
-from prometheus_client import REGISTRY, start_http_server
+from prometheus_client import REGISTRY, Counter, Gauge, start_http_server
 
 from ytt.observability import (
     redact_credentials,
@@ -53,6 +76,50 @@ log = logging.getLogger(__name__)
 CANARY_VIDEO_IDS: tuple[str, ...] = (
     "jNQXAC9IVRw",  # "Me at the zoo" — YouTube's first video (very stable)
     "dQw4w9WgXcQ",  # Rick Astley "Never Gonna Give You Up" (very stable)
+)
+
+# ---------------------------------------------------------------------------
+# Per-path probe metrics (CANARY-MONITORING-RUNBOOK §1 — continuous
+# freshness/failure monitoring)
+# ---------------------------------------------------------------------------
+
+#: Probe-path label values — one vocabulary across the one-shot canary, the
+#: gate and the continuous metrics, so an alert, a remediation directive and
+#: a log line always name a path the same way.  Pinned equal to
+#: ``ytt.canary_gate.PROBE_ORDER`` by tests/unit/test_canary_monitoring.py.
+PROBE_DIRECT = "direct"
+PROBE_VIA_PROXY = "via_proxy"
+PROBE_LABELS: tuple[str, ...] = (PROBE_DIRECT, PROBE_VIA_PROXY)
+
+# These two live here rather than in ytt.observability (the home of the
+# overall pair above) because only this module's probe loop emits them: the
+# canary process registers them, the server process never does, and a
+# missing series on the server scrape means exactly that.
+ytt_canary_probe_last_success_timestamp_seconds = Gauge(
+    "ytt_canary_probe_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful canary probe by path "
+    '(probe="direct"|"via_proxy"); initialized to probe-loop start time.',
+    ["probe"],
+)
+
+#: Canonical outcome labels for :data:`ytt_canary_probes_total`, pre-registered
+#: as zero children at loop start (same rationale as
+#: ``ytt.observability.FETCH_BLOCK_OUTCOMES``: an absent series must never be
+#: readable as "metric not registered").  Non-canonical outcomes still get
+#: their own child on first occurrence — Counter children auto-create.
+CANARY_PROBE_OUTCOMES: tuple[str, ...] = (
+    "ok",
+    "ip_blocked",
+    "empty_body",
+    "rate_limited",
+    "unavailable",
+)
+
+ytt_canary_probes_total = Counter(
+    "ytt_canary_probes_total",
+    "Canary probe-ladder terminations by path and outcome (one per path per "
+    'cycle; outcome="ok" or a stable ytt.errors error_code).',
+    ["probe", "outcome"],
 )
 
 # ---------------------------------------------------------------------------
@@ -151,13 +218,53 @@ def probe_once_detail(video_id: str, proxy: str | None = None) -> dict:
     }
 
 
-def _probe_one(video_id: str, settings: Any) -> bool:
-    """Run a single yt-dlp caption probe against ``video_id``.
+def _probe_ladder_once(proxy: str | None = None) -> dict:
+    """Walk the fixed video ladder once and return the terminating probe.
 
-    Returns ``True`` on success (captions extracted), ``False`` on any error.
-    Intentionally synchronous — called via ``asyncio.to_thread`` from the probe loop.
+    Probes :data:`CANARY_VIDEO_IDS` in order and stops at the first success
+    (the plan §Canary fallback ladder — one good fetch per cycle, no wasted
+    residential bandwidth).  Returns the terminating :func:`probe_once_detail`
+    report with the video that produced it added as ``video_id``, so the
+    ladder's result carries its own ``outcome`` for the per-path metrics and
+    the logs.  Never returns an empty dict: the ladder has at least one video.
+
+    ``proxy`` is the continuous counterpart of ``ytt canary --once
+    --via-proxy``: pass ``YTT_PROXY_URL`` to measure the fallback path from
+    the same process and cadence that measures the direct one.
     """
-    return bool(probe_once_detail(video_id)["ok"])
+    result: dict = {}
+    for video_id in CANARY_VIDEO_IDS:
+        result = dict(probe_once_detail(video_id, proxy=proxy), video_id=video_id)
+        if result["ok"]:
+            break
+    return result
+
+
+def _record_probe(probe: str, detail: dict) -> bool:
+    """Record one path's ladder result in the per-path metrics.
+
+    Every termination increments ``ytt_canary_probes_total{probe, outcome}``;
+    a success also stamps the per-path freshness gauge.  Returns the detail's
+    ``ok`` so the caller can fold paths into the overall cycle verdict.
+    """
+    ytt_canary_probes_total.labels(probe=probe, outcome=detail["outcome"]).inc()
+    if detail["ok"]:
+        ytt_canary_probe_last_success_timestamp_seconds.labels(probe=probe).set(
+            time.time()
+        )
+    return bool(detail["ok"])
+
+
+def _log_probe(probe: str, detail: dict) -> None:
+    if detail["ok"]:
+        log.info("Canary probe succeeded for %s (probe=%s)", detail["video_id"], probe)
+    else:
+        log.warning(
+            "Canary probe failed for %s (probe=%s, outcome=%s)",
+            detail["video_id"],
+            probe,
+            detail["outcome"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -168,33 +275,61 @@ def _probe_one(video_id: str, settings: Any) -> bool:
 async def run_probe_loop(interval_sec: int = 600) -> None:
     """Async probe loop — runs forever (plan: long-running Deployment).
 
-    Every ``interval_sec`` seconds, probe each video in ``CANARY_VIDEO_IDS``.
-    On any success: update ``ytt_canary_last_success_timestamp_seconds``.
-    On all failures: increment ``ytt_canary_failures_total``.
+    Every ``interval_sec`` seconds, walk the fallback ladder **directly**;
+    when ``YTT_PROXY_URL`` is configured, walk it **through the proxy** too —
+    the continuous counterpart of the gate's two probes (RUNBOOK §3.1,
+    CANARY-MONITORING-RUNBOOK §1), so a persistent failure is attributable
+    to a path, not just "the canary".
+
+    Metrics per cycle (CANARY-MONITORING-RUNBOOK §1):
+
+    * ``ytt_canary_probes_total{probe, outcome}`` — one increment per path
+    * ``ytt_canary_probe_last_success_timestamp_seconds{probe}`` — stamped
+      per path on success
+    * ``ytt_canary_last_success_timestamp_seconds`` — stamped when ANY path
+      succeeded; this is the gauge ``YttCanaryFailed`` watches, so stale
+      means *neither* path has worked for the window — fetches down
+    * ``ytt_canary_failures_total`` — incremented when NO path succeeded
     """
     from ytt.config import get_settings
 
     settings = get_settings()
+    proxy_url = settings.proxy_url
+
+    # Boot-initialize freshness to loop start (not 0) and pre-register the
+    # zero counter children for every path this loop will actually probe —
+    # see the module docstring and CANARY-MONITORING-RUNBOOK §1 for why.
+    boot = time.time()
+    ytt_canary_last_success_timestamp_seconds.set(boot)
+    probed_paths = [PROBE_DIRECT] + ([PROBE_VIA_PROXY] if proxy_url else [])
+    for probe in probed_paths:
+        ytt_canary_probe_last_success_timestamp_seconds.labels(probe=probe).set(boot)
+        for outcome in CANARY_PROBE_OUTCOMES:
+            ytt_canary_probes_total.labels(probe=probe, outcome=outcome)
 
     log.info(
-        "Canary probe loop starting (interval=%ds, videos=%s)",
+        "Canary probe loop starting (interval=%ds, videos=%s, proxy_probes=%s)",
         interval_sec,
         CANARY_VIDEO_IDS,
+        bool(proxy_url),
     )
 
     while True:
-        success = False
-        for video_id in CANARY_VIDEO_IDS:
-            ok = await asyncio.to_thread(_probe_one, video_id, settings)
-            if ok:
-                ytt_canary_last_success_timestamp_seconds.set(time.time())
-                success = True
-                log.info("Canary probe succeeded for %s", video_id)
-                break
+        direct = await asyncio.to_thread(_probe_ladder_once)
+        any_ok = _record_probe(PROBE_DIRECT, direct)
+        _log_probe(PROBE_DIRECT, direct)
+        if proxy_url:
+            via = await asyncio.to_thread(_probe_ladder_once, proxy_url)
+            any_ok = _record_probe(PROBE_VIA_PROXY, via) or any_ok
+            _log_probe(PROBE_VIA_PROXY, via)
 
-        if not success:
+        if any_ok:
+            ytt_canary_last_success_timestamp_seconds.set(time.time())
+        else:
             ytt_canary_failures_total.inc()
-            log.error("Canary probe failed for all videos: %s", CANARY_VIDEO_IDS)
+            log.error(
+                "Canary probe failed on every path (videos=%s)", CANARY_VIDEO_IDS
+            )
 
         await asyncio.sleep(interval_sec)
 

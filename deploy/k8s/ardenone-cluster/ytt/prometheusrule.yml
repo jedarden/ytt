@@ -7,7 +7,18 @@
 #   YttWhisperDown         — sustained Whisper errors → whisper-openai service is down
 #   YttCacheUndersized     — sustained evictions → YTT_CACHE_MAX_BYTES too small
 #   YttEgressNotResidential — egress IP classified as datacenter → residential assumption broken
-#   YttCanaryFailed        — canary probe missed 3 consecutive 10-min windows (1800 s)
+#   YttCanaryFailed        — NO canary path succeeded for 3 consecutive 10-min windows
+#                           (1800 s) → fetches down for users = incident
+#   YttCanaryDirectBlocked — direct path stale while proxy path fresh → degraded,
+#                           users served via the proxy fallback
+#   YttCanaryFallbackBroken — proxy path stale while direct fresh → fallback
+#                           unavailable, no user impact yet
+#   YttCanaryProbeFlapping — >50% of a path's probes failing over 30 min → the
+#                           intermittent pattern both staleness alerts miss
+#
+# The four YttCanary* rules, their expressions and severities are bound to
+# deploy/CANARY-MONITORING-RUNBOOK.md §2 and to ytt/canary.py's metrics by
+# tests/unit/test_canary_monitoring.py — edit the three together.
 #
 # Route: via the cluster's existing Alertmanager receiver (ardenone-cluster norm).
 apiVersion: monitoring.coreos.com/v1
@@ -84,18 +95,85 @@ spec:
               The egress probe reports is_residential=0.
               Fetch blocks may spike.  Check /admin/egress for details.
 
-        # --- Canary failed (3 consecutive 10-min probes missed = 1800 s) ---
+        # --- Canary failed: no path succeeded for 3 consecutive 10-min windows ---
+        # Expression is byte-identical to the pre-monitoring rule so old and new
+        # images satisfy it the same way (CANARY-MONITORING-RUNBOOK §2.1/§6).
         - alert: YttCanaryFailed
           expr: |
             time() - ytt_canary_last_success_timestamp_seconds > 1800
           for: 0m
           labels:
+            severity: critical
+            namespace: ytt
+          annotations:
+            summary: "ytt canary: no successful probe on any path for >30 min — fetches down"
+            description: >
+              Neither the direct nor the proxied canary probe has fetched a
+              caption from a known-stable video for > 1800 s (3 x 10-min probe
+              intervals).  Transcript fetches are down for users — treat as an
+              incident (decision table: deploy/CANARY-MONITORING-RUNBOOK.md
+              §4).  Check the canary pod logs in ns ytt, then a ground-truth
+              probe: kubectl exec -n ytt deploy/ytt-canary -- ytt canary --once.
+
+        # --- Direct egress blocked, proxy fallback carrying users (degraded) ---
+        # "and ignoring(probe)" is load-bearing: the two sides carry different
+        # probe labels and would match nothing without it (RUNBOOK §2.2 →
+        # CANARY-MONITORING-RUNBOOK §2.2).
+        - alert: YttCanaryDirectBlocked
+          expr: |
+            time() - ytt_canary_probe_last_success_timestamp_seconds{probe="direct"} > 1800
+              and ignoring(probe)
+              time() - ytt_canary_probe_last_success_timestamp_seconds{probe="via_proxy"} < 600
+          for: 0m
+          labels:
             severity: warning
             namespace: ytt
           annotations:
-            summary: "ytt canary: 3 consecutive probes missed (>30 min since last success)"
+            summary: "ytt canary: direct egress stale >30 min while the proxy path is fresh"
             description: >
-              The ytt canary Deployment has not successfully fetched a caption
-              from a known-stable video for > 1800 s (3 × 10-min probe intervals).
-              This usually means residential egress is blocked or yt-dlp broke.
-              Check the canary pod logs in ns ytt.
+              The direct probe has not succeeded for > 1800 s while the proxied
+              probe succeeded within one interval: native egress is blocked and
+              fetches are carried by the YTT_PROXY_URL fallback (bandwidth
+              cost, users still served).  Degraded, not down — a rollback will
+              not fix it; see deploy/CANARY-MONITORING-RUNBOOK.md §4.
+
+        # --- Proxy fallback broken while direct is healthy ---
+        # Cannot fire with no proxy configured or on an image without the
+        # per-path series: the left operand is absent, and an absent series
+        # never fires (CANARY-MONITORING-RUNBOOK §2.3).
+        - alert: YttCanaryFallbackBroken
+          expr: |
+            time() - ytt_canary_probe_last_success_timestamp_seconds{probe="via_proxy"} > 1800
+              and ignoring(probe)
+              time() - ytt_canary_probe_last_success_timestamp_seconds{probe="direct"} < 600
+          for: 0m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt canary: proxy path stale >30 min while direct is fresh"
+            description: >
+              The proxied probe has not succeeded for > 1800 s while the direct
+              probe is fresh: the fallback egress path is unavailable.  No user
+              impact yet — the exposure is having no fallback if the direct IP
+              burns.  Escalate to the proxy/egress owner; if a release just
+              changed YTT_PROXY_URL, roll that back instead (deploy/
+              CANARY-MONITORING-RUNBOOK.md §4).
+
+        # --- Flapping: intermittent failures both staleness alerts miss ---
+        - alert: YttCanaryProbeFlapping
+          expr: |
+            sum by (probe) (rate(ytt_canary_probes_total{outcome!="ok"}[30m]))
+              / sum by (probe) (rate(ytt_canary_probes_total[30m])) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt canary: >50% of a path's probes failing over 30 min (flapping)"
+            description: >
+              A probe path is failing more than half its cycles over the last
+              30 minutes while its freshness gauge keeps refreshing on the
+              alternating successes — the pattern both staleness alerts miss.
+              Break ytt_canary_probes_total down by outcome to see why, then
+              apply the matching row of deploy/CANARY-MONITORING-RUNBOOK.md §4.

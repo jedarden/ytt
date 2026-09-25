@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Continuous canary freshness monitoring** (bead `ytt-2b3ca59e`). The
+  standing canary Deployment now attributes persistent failures to a path
+  instead of just "the canary": `ytt/canary.py`'s probe loop walks the video
+  ladder **direct** and — when `YTT_PROXY_URL` is set — **via the proxy**,
+  emitting a per-path freshness gauge
+  (`ytt_canary_probe_last_success_timestamp_seconds{probe=direct|via_proxy}`,
+  boot-initialized to loop start so restarts cannot false-fire staleness)
+  and per-path termination counters
+  (`ytt_canary_probes_total{probe, outcome}`, zero children pre-registered).
+  Three new alerts join `YttCanaryFailed` (severity warning → **critical**;
+  expression byte-unchanged for old/new image compatibility) in
+  `prometheusrule.yml`: `YttCanaryDirectBlocked` (direct stale, proxy
+  carrying users — degraded), `YttCanaryFallbackBroken` (fallback
+  unavailable while direct serves; cannot fire on an absent `via_proxy`
+  series) and `YttCanaryProbeFlapping` (>50% of a path's probes failing
+  over 30 min — the pattern both staleness alerts miss). The response
+  procedure — triage commands plus a rollback-vs-escalation decision table
+  distinguishing direct and proxy failures — is
+  [`deploy/CANARY-MONITORING-RUNBOOK.md`](deploy/CANARY-MONITORING-RUNBOOK.md),
+  drift-guarded against the rules and the code by
+  `tests/unit/test_canary_monitoring.py`.
+
 - **Post-deploy canary acceptance gate** — `ytt canary --gate` (bead
   `ytt-026fdbb4`). The release gate after any image or egress change: runs
   the one-shot canary direct **and** `--via-proxy` when `YTT_PROXY_URL` is

@@ -1,27 +1,29 @@
-"""Unit tests for the one-shot canary (``ytt canary --once``).
+"""Unit tests for the one-shot canary (``ytt canary --once``) and the
+fallback-video ladder it shares with the probe loop.
 
 The one-shot mode is the lightweight Proof-Obligation canary (plan §Proof
 Obligations: residential egress): one known-good video, one caption fetch,
-verdict ``ok`` vs ``ip_blocked``.  All network I/O is mocked — these tests
-never touch YouTube or ipinfo.io (real-network paths are integration-gated).
+verdict ``ok`` vs ``ip_blocked``.  The ladder (``_probe_ladder_once``) walks
+the fixed internal video list for the loop; its per-path metric recording is
+tested in ``tests/unit/test_canary_monitoring.py``.  All network I/O is
+mocked — these tests never touch YouTube or ipinfo.io (real-network paths
+are integration-gated).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import yt_dlp
 
 from ytt.canary import (
     CANARY_VIDEO_IDS,
-    _probe_one,
+    _probe_ladder_once,
     probe_once_detail,
     run_once,
-    run_probe_loop,
 )
 from ytt.cli import main as cli_main
 from ytt.models import EgressReport
@@ -122,18 +124,72 @@ class TestProbeOnceDetail:
 
 
 # ---------------------------------------------------------------------------
-# _probe_one (loop path keeps its bool contract)
+# _probe_ladder_once (the loop's per-path probe: walk the ladder, stop at the
+# first success, report the terminating probe with its video attached)
 # ---------------------------------------------------------------------------
 
-class TestProbeOne:
-    def test_true_on_success(self):
-        with patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())):
-            assert _probe_one("jNQXAC9IVRw", settings=None) is True
 
-    def test_false_on_error(self):
-        ctx = _ydl_raising(yt_dlp.utils.DownloadError("HTTP Error 403"))
-        with patch("yt_dlp.YoutubeDL", return_value=ctx):
-            assert _probe_one("jNQXAC9IVRw", settings=None) is False
+def _detail(ok: bool, outcome: str | None = None) -> dict:
+    """A ``probe_once_detail``-shaped report for scripting ladder outcomes."""
+    return {
+        "ok": ok,
+        "outcome": outcome or ("ok" if ok else "ip_blocked"),
+        "langs": ["en"] if ok else [],
+        "duration_sec": 0.5,
+        "via_proxy": False,
+        "error": None if ok else "probe failed",
+    }
+
+
+class TestProbeLadderOnce:
+    def test_stops_at_first_success(self):
+        """The fallback video is only probed when the primary fails — one
+        good fetch per cycle, no wasted residential bandwidth."""
+        with patch(
+            "ytt.canary.probe_once_detail",
+            side_effect=[_detail(False), _detail(True)],
+        ) as probe:
+            result = _probe_ladder_once()
+        assert result["ok"] is True
+        assert result["video_id"] == CANARY_VIDEO_IDS[1]
+        assert probe.call_args_list == [
+            call(CANARY_VIDEO_IDS[0], proxy=None),
+            call(CANARY_VIDEO_IDS[1], proxy=None),
+        ]
+
+    def test_walks_full_ladder_when_every_video_fails(self):
+        outcomes = [_detail(False, "ip_blocked")] * len(CANARY_VIDEO_IDS)
+        with patch(
+            "ytt.canary.probe_once_detail", side_effect=outcomes
+        ) as probe:
+            result = _probe_ladder_once()
+        assert result["ok"] is False
+        assert result["outcome"] == "ip_blocked"
+        assert result["video_id"] == CANARY_VIDEO_IDS[-1]
+        assert probe.call_count == len(CANARY_VIDEO_IDS)
+
+    def test_proxy_is_passed_through_to_each_probe(self):
+        """The ladder measures the path it was asked to measure — a proxy
+        argument that silently dropped would probe direct twice."""
+        with patch(
+            "ytt.canary.probe_once_detail", side_effect=[_detail(True)]
+        ) as probe:
+            result = _probe_ladder_once(proxy="http://proxy.example:1")
+        assert probe.call_args_list == [
+            call(CANARY_VIDEO_IDS[0], proxy="http://proxy.example:1")
+        ]
+        assert result["ok"] is True
+
+    def test_returns_the_terminating_probe_report_plus_video(self):
+        """The result is the terminating probe's own report (schema shared
+        with ``probe_once_detail``) with ``video_id`` added — the loop's
+        metrics and logs key off both."""
+        with patch(
+            "ytt.canary.probe_once_detail", side_effect=[_detail(True)]
+        ):
+            result = _probe_ladder_once()
+        assert set(result) == {"ok", "outcome", "langs", "duration_sec",
+                               "via_proxy", "error", "video_id"}
 
 
 # ---------------------------------------------------------------------------
@@ -390,19 +446,12 @@ class TestReportSchema:
 # Fallback-video behavior — the fixed internal video ladder
 # ---------------------------------------------------------------------------
 
-class _StopLoop(Exception):
-    """Raised by the patched ``asyncio.sleep`` to end the probe loop after
-    exactly one full cycle."""
-
-
-def _stop_after_one_cycle(_interval_sec: int) -> None:
-    raise _StopLoop
-
-
 class TestFallbackVideo:
     """The fixed internal video list is a fallback ladder (plan §Canary):
     probe in order, stop at the first success, and count one failure only
-    when the whole ladder misses."""
+    when the whole ladder misses.  The walk itself is pinned by
+    ``TestProbeLadderOnce`` above; how the probe loop folds the two paths
+    into metrics is pinned by ``tests/unit/test_canary_monitoring.py``."""
 
     def test_ladder_is_nonempty_and_wellformed(self):
         # At least two entries, or there is no fallback to speak of; every
@@ -413,37 +462,3 @@ class TestFallbackVideo:
 
     def test_once_defaults_to_the_first_ladder_entry(self):
         assert _run_once_ok()["video_id"] == CANARY_VIDEO_IDS[0]
-
-    def _one_cycle(self, probe_results: list[bool]):
-        """Run one ``run_probe_loop`` cycle with per-video outcomes; return
-        (video ids probed in order, success-gauge mock, failures-counter mock)."""
-        probed: list[str] = []
-
-        def probe(video_id, settings):
-            probed.append(video_id)
-            return probe_results[len(probed) - 1]
-
-        gauge, counter = MagicMock(), MagicMock()
-        with (
-            patch("ytt.canary._probe_one", side_effect=probe),
-            patch("ytt.canary.ytt_canary_last_success_timestamp_seconds", gauge),
-            patch("ytt.canary.ytt_canary_failures_total", counter),
-            patch("asyncio.sleep", side_effect=_stop_after_one_cycle),
-        ):
-            with pytest.raises(_StopLoop):
-                asyncio.run(run_probe_loop(interval_sec=600))
-        return probed, gauge, counter
-
-    def test_full_ladder_walked_when_every_video_fails(self):
-        probed, gauge, counter = self._one_cycle([False] * len(CANARY_VIDEO_IDS))
-        assert probed == list(CANARY_VIDEO_IDS)
-        gauge.set.assert_not_called()
-        counter.inc.assert_called_once_with()
-
-    def test_ladder_stops_at_first_success(self):
-        """The fallback video is only probed when the primary fails — one
-        good fetch per cycle, no wasted residential bandwidth."""
-        probed, gauge, counter = self._one_cycle([True, True])
-        assert probed == [CANARY_VIDEO_IDS[0]]
-        gauge.set.assert_called_once()
-        counter.inc.assert_not_called()

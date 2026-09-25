@@ -5,11 +5,23 @@
 # calls yt-dlp directly against a fixed internal video list — bypassing OAuth —
 # and exposes ytt_canary_* metrics via prometheus_client on :8081.
 #   interval: every 10 min (YTT_CANARY_INTERVAL_SEC=600)
-#   alert:    YttCanaryFailed fires if time() - ytt_canary_last_success_timestamp_seconds
-#             > 1800 (3 consecutive probes missed) — prometheusrule.yml
+#   metrics:  overall pair (ytt_canary_last_success_timestamp_seconds /
+#             ytt_canary_failures_total) plus the per-path pair
+#             (ytt_canary_probe_last_success_timestamp_seconds{probe} /
+#             ytt_canary_probes_total{probe,outcome}, probe=direct|via_proxy —
+#             the via_proxy series exists only while YTT_PROXY_URL is set)
+#   alerts:   YttCanaryFailed (>1800 s since any path succeeded — critical),
+#             YttCanaryDirectBlocked / YttCanaryFallbackBroken (one path
+#             stale, the other fresh), YttCanaryProbeFlapping (intermittent
+#             failures) — prometheusrule.yml; response procedure:
+#             deploy/CANARY-MONITORING-RUNBOOK.md
 #   scrape:   service/ytt-canary port metrics, via servicemonitor.yml
 # Image: ronaldraygun/ytt:0.2.20 — canary-capable release (canary commit 5747658;
 # 0.2.18/0.2.19 were burnt, never published). Pinned semver, no :latest.
+#   Per-path metrics note: 0.2.20 predates them — until an image carrying the
+#   monitoring code is pinned, only the overall pair is exported and the three
+#   per-path alerts stay silent (absent series cannot fire); YttCanaryFailed's
+#   expression is unchanged, so it watches old and new images identically.
 #
 # No volumes: the probe is stateless (yt-dlp caption extraction writes nothing
 # durable) and shares no in-process state with the server. NetworkPolicy does
