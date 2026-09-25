@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import structlog
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, generate_latest
@@ -31,7 +32,7 @@ from starlette.responses import JSONResponse, Response
 import ytt
 from ytt import errors
 from ytt.auth import build_auth_provider
-from ytt.authz import check_subject_auth
+from ytt.authz import check_subject_auth, subject_allowed
 from ytt.cache import CacheHit, TranscriptCache
 from ytt.concurrency import ConcurrencyState
 from ytt.config import get_settings
@@ -179,6 +180,26 @@ async def _run_whisper_job_bounded(
     """
     async with _concurrency.whisper_sem:
         await ytt_whisper.run_whisper_job(job, registry, settings, cache, active_model)
+
+
+def _prm_url(public_url: str) -> str:
+    """Routable RFC 9728 protected-resource-metadata URL for *public_url*.
+
+    The PRM document lives at the host root with the resource's path
+    appended (``https://host/.well-known/oauth-protected-resource/ytt``) —
+    the route :mod:`ytt.auth` path-inserts and the IngressRoute exposes at
+    priority 1000. Prefixing instead (the shape this route emitted until
+    2026-09-24, ``.../ytt/.well-known/oauth-protected-resource``) produced a
+    URL nothing serves: a 401 challenge sending the client to a dead
+    metadata endpoint exactly when it needs re-auth instructions. Keep this
+    byte-identical with the shape the FastMCP transport challenge emits
+    (RFC 9728 §5.1) — see ``docs/notes/http-endpoints.md``.
+    """
+    parsed = urlparse(public_url)
+    return (
+        f"{parsed.scheme}://{parsed.netloc}"
+        f"/.well-known/oauth-protected-resource{parsed.path.rstrip('/')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -684,8 +705,9 @@ def _build_app():
         """Auth-gated egress diagnostic probe (plan §Security / §Observability).
 
         Returns the current egress IP, ASN, org, and residential flag.
-        Requires a valid Bearer token whose Google-verified email is in
-        YTT_ALLOWED_SUBJECTS — same check as ``check_subject_auth``, the
+        Requires a valid Bearer token whose ``email`` claim is admitted by
+        the ``YTT_ALLOWED_SUBJECTS`` allowlist via the **same predicate** as
+        ``check_subject_auth`` (:func:`ytt.authz.subject_allowed`) — the
         AuthMiddleware gate on the actual MCP tool calls.
 
         Plan: "``/admin/egress`` — requires a valid Bearer token with a subject
@@ -710,17 +732,23 @@ def _build_app():
                 status_code=401,
                 headers={
                     "WWW-Authenticate": (
-                        f'Bearer resource_metadata="{settings.public_url}/.well-known/'
-                        f'oauth-protected-resource"'
+                        f'Bearer resource_metadata="{_prm_url(settings.public_url)}"'
                     )
                 },
             )
 
         claims = token.claims or {}
         email = claims.get("email")
-        email_verified = claims.get("email_verified")
 
-        if not email or not email_verified or email not in settings.allowed_subjects_set:
+        # Same predicate as the tool-call gate (ytt.authz.check_subject_auth):
+        # case-insensitive, @domain-pattern aware, and with NO email_verified
+        # requirement — that claim is meaningless against the reference
+        # Authentik, whose default email scope mapping hardcodes it False for
+        # every account (see the ytt.authz module docstring). The previous
+        # inline check here (raw case-sensitive set membership + a truthy
+        # email_verified) denied every real production subject: the route
+        # could never return 200.
+        if not email or not subject_allowed(email, settings.allowed_subjects_set):
             subject_hash = hashlib.sha256((email or "").encode()).hexdigest()[:8]
             log.warning(
                 "AuthZ 403",

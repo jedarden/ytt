@@ -149,6 +149,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`/admin/egress` could never authorize a real subject, and its 401
+  challenge pointed at a dead URL** (bead `ytt-8b6df2bf`). The route's
+  inline check demanded a truthy `email_verified` plus raw case-sensitive
+  set membership, while the reference Authentik hardcodes `email_verified:
+  False` for every account — so every legitimately allowlisted caller got
+  403 and the route could never return 200. It now admits subjects through
+  `ytt.authz.subject_allowed` — the same predicate as the tool-call gate
+  (case-insensitive, `@domain` patterns honored, no `email_verified`
+  requirement). Separately, its 401 emitted
+  `{public_url}/.well-known/oauth-protected-resource` — a prefixed shape no
+  route serves (404), stranding clients exactly when they need re-auth
+  instructions; it now carries the routable RFC 9728 shape
+  (`{scheme}://{host}/.well-known/oauth-protected-resource{resource-path}`,
+  `ytt.server._prm_url`), byte-identical with the transport's challenge.
+  The operational HTTP endpoint contract these live under — endpoint
+  visibility, authentication, trailing-slash behavior, side effects, and
+  the invariant that no route but the transport can trigger transcript
+  work — is now specified in `docs/notes/http-endpoints.md` and pinned at
+  HTTP level by `tests/unit/test_endpoint_contract.py` (drives the real
+  ASGI app: route inventory, 401-before-protocol on the transport,
+  401/403/200 gating on `/admin/egress`, slash variants, method
+  discipline, public-safe metrics/health bodies, and a spy quadruple over
+  the transcript pipeline that must stay silent for every operational
+  route).
 - **Proxy credentials can no longer reach structured logs through a
   sentence-shaped field value** (bead `ytt-31ec1026`). The structlog
   redaction processor sanitized only values that were a *bare* URL
