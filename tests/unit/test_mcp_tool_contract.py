@@ -82,7 +82,8 @@ from ytt.errors import EMPTY_BODY, YttError
 from ytt.fetch import FetchResult
 from ytt.models import Segment, WhisperJob
 from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
-from ytt.server import _settings_singleton, build_asgi_app, mcp
+from ytt.config import get_settings
+from ytt.server import build_asgi_app, mcp
 from ytt.whisper import WhisperJobRegistry
 
 # ---------------------------------------------------------------------------
@@ -165,8 +166,19 @@ def _hermetic_egress(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _allowlist(monkeypatch):
-    """ SUBJECT is allowlisted for the whole module."""
-    monkeypatch.setattr(_settings_singleton, "allowed_subjects", SUBJECT)
+    """Allowlist SUBJECT for every reader in this module.
+
+    Both the tool path (``get_youtube_transcript``) and the allowlist gate
+    (``ytt.authz.check_subject_auth``) read ``get_settings()`` — an lru_cache
+    any earlier test module may have reset with a differently-configured
+    instance (test_auth, test_authz_tool_gate). Patching one instance's field
+    is therefore not enough: this follows the test_authz_tool_gate pattern —
+    set the env var and reset the cache so the next read reconstructs — and
+    clears again on the way out so the suite stays consistent."""
+    monkeypatch.setenv("YTT_ALLOWED_SUBJECTS", SUBJECT)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -454,6 +466,16 @@ def _strip_partial_prefix(text: str) -> str:
     return text
 
 
+def _shrink_page_budget(monkeypatch, inline: int, chunk: int) -> None:
+    """Shrink the pagination budget for a test.
+
+    Env + cache reset, not field-patching: the tool and ``build_page`` read
+    ``get_settings()`` (see the ``_allowlist`` fixture for why)."""
+    monkeypatch.setenv("YTT_INLINE_CHAR_LIMIT", str(inline))
+    monkeypatch.setenv("YTT_CHUNK_CHARS", str(chunk))
+    get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # tools/list — the README §Tools table
 # ---------------------------------------------------------------------------
@@ -578,7 +600,7 @@ def test_mode_chunk_always_paginates(session, cache, monkeypatch):
     mode."""
     calls: list = []
     monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, SHORT_WORDS))
-    monkeypatch.setattr(_settings_singleton, "chunk_chars", 8)
+    _shrink_page_budget(monkeypatch, inline=18000, chunk=8)
 
     first = session.call_payload(
         "get_youtube_transcript", {"url": VIDEO, "mode": "chunk", "lang": "en"}
@@ -605,8 +627,7 @@ def test_over_limit_transcript_paginates_in_full_mode(session, cache, monkeypatc
     README's 'long videos' case), served from the cache on every page."""
     calls: list = []
     monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, WORDLIST))
-    monkeypatch.setattr(_settings_singleton, "inline_char_limit", 100)
-    monkeypatch.setattr(_settings_singleton, "chunk_chars", 100)
+    _shrink_page_budget(monkeypatch, inline=100, chunk=100)
 
     full_text = " ".join(WORDLIST)
     payload = session.call_payload("get_youtube_transcript", {"url": VIDEO})
@@ -625,8 +646,7 @@ def test_cursor_continuation_walks_to_the_final_page(session, cache, monkeypatch
     the transcript byte-for-byte."""
     calls: list = []
     monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, WORDLIST))
-    monkeypatch.setattr(_settings_singleton, "inline_char_limit", 100)
-    monkeypatch.setattr(_settings_singleton, "chunk_chars", 100)
+    _shrink_page_budget(monkeypatch, inline=100, chunk=100)
 
     full_text = " ".join(WORDLIST)
     page = session.call_payload("get_youtube_transcript", {"url": VIDEO})
@@ -678,8 +698,7 @@ def test_stale_cursor_is_rejected_with_cursor_stale(
     content)."""
     calls: list = []
     monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, WORDLIST))
-    monkeypatch.setattr(_settings_singleton, "inline_char_limit", 100)
-    monkeypatch.setattr(_settings_singleton, "chunk_chars", 100)
+    _shrink_page_budget(monkeypatch, inline=100, chunk=100)
 
     page = session.call_payload("get_youtube_transcript", {"url": VIDEO})
     assert page["status"] == "partial"
@@ -701,8 +720,7 @@ def test_cursor_is_bound_to_content_and_video(session, cache, monkeypatch):
 
     def _install(words):
         monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, words))
-        monkeypatch.setattr(_settings_singleton, "inline_char_limit", 100)
-        monkeypatch.setattr(_settings_singleton, "chunk_chars", 100)
+        _shrink_page_budget(monkeypatch, inline=100, chunk=100)
 
     # Page 1 of VIDEO_A.
     _install(WORDLIST)
