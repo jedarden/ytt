@@ -11,6 +11,7 @@ Related docs:
 | Doc | Covers |
 |---|---|
 | [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) | Release SOP (VERSION bump → CI image → pin tag) + human-gated steps |
+| [CACHE-RUNBOOK.md](CACHE-RUNBOOK.md) | Cache PVC: backup/restore, disk exhaustion & ENOSPC recovery, scratch cleanup |
 | [README.md](README.md) | The `deploy/` ↔ `declarative-config` mirror and how to refresh it |
 | [docs/notes/single-replica.md](../docs/notes/single-replica.md) | Why `replicas: 1` is a correctness constraint, not a sizing choice |
 | [docs/usage/deploy-ardenone.md](../docs/usage/deploy-ardenone.md) | Architecture, routing, secrets, observability |
@@ -155,7 +156,9 @@ logs, and no call site in the package).  Practical effect of an upgrade:
 
 This is a code fix, not an operational workaround — see bead
 `ytt-4f1c45c2` in the ytt workspace.  Until it lands, "cache preserved" in the
-table above means *files preserved*, not *warm*.
+table above means *files preserved*, not *warm*.  Backup, restore, and
+disk-exhaustion procedures for this volume live in
+[CACHE-RUNBOOK.md](CACHE-RUNBOOK.md).
 
 ## 3. Post-deploy validation (run in order)
 
