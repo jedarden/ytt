@@ -386,6 +386,13 @@ class WhisperJobRegistry:
     ``video_id`` while a job is ``pending`` or ``running`` returns the existing
     job rather than starting a duplicate.
 
+    Terminal entries (``done``/``error``) are never joinable: ``get_or_create``
+    replaces one with a fresh ``pending`` job (log event
+    ``whisper_job_replaced_terminal``), so the documented retry — re-calling
+    ``get_youtube_transcript`` after a failure — restarts real work instead of
+    dead-ending on the old entry until TTL GC. Full contract:
+    ``docs/notes/whisper-lifecycle.md`` (§1).
+
     States: ``pending → running → done | error``
 
     TTL GC (plan §Whisper fallback):
@@ -424,6 +431,8 @@ class WhisperJobRegistry:
         (job, is_new)
             ``is_new=True`` when the job was freshly created; the caller is
             responsible for starting the background transcription Task.
+            Terminal entries (``done``/``error``) are **never** joinable — they
+            are replaced by a fresh pending job (``is_new=True``).
 
         Raises
         ------
@@ -444,8 +453,26 @@ class WhisperJobRegistry:
 
         async with self._lock:
             existing = self._jobs.get(video_id)
-            if existing is not None:
+            if (
+                existing is not None
+                and existing.status in ("pending", "running")
+            ):
+                # Invariant 2 — join the in-flight job; never start a second
+                # run or re-download audio.
                 return existing, False
+
+            # A terminal entry is never joinable.  An ``error`` job must not
+            # block the documented retry ("Re-call get_youtube_transcript with
+            # the video URL to retry") — joining it would return pending for a
+            # dead job until TTL GC, an error⟷pending loop the client cannot
+            # exit.  A ``done`` job is only reachable here when its cache unit
+            # was evicted before any poll removed it (a cached unit is answered
+            # by the cache-first lookup before this point), so re-running is
+            # the only way to serve it.  Both recover by replacing the dead
+            # entry with a fresh pending job; the caller starts a new Task.
+            replaced_status: str | None = (
+                existing.status if existing is not None else None
+            )
 
             eta_sec = (
                 duration_sec * settings.whisper_realtime_factor
@@ -460,6 +487,12 @@ class WhisperJobRegistry:
                 duration_sec=duration_sec,
             )
             self._jobs[video_id] = job
+            if replaced_status is not None:
+                log.info(
+                    "whisper_job_replaced_terminal",
+                    video_id=video_id,
+                    old_status=replaced_status,
+                )
             log.info(
                 "whisper_job_created",
                 video_id=video_id,

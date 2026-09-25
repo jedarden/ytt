@@ -880,7 +880,10 @@ def test_whisper_error_state_is_relayed(session, cache, registry, monkeypatch):
     poll = _poll_until(session, VIDEO, {"error"})
     assert poll["status"] == "error"
     assert poll["error_code"] == "asr_failed"
-    assert poll["message"] == "ASR service exploded"
+    # The job's own message is relayed (composition with the fixed re-call
+    # instruction is pinned by test_whisper_contract.py).
+    assert poll["message"].startswith("ASR service exploded")
+    assert "Re-call get_youtube_transcript" in poll["message"]
 
 
 def test_poll_unknown_video_is_not_found(session, cache, registry):

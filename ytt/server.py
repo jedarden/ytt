@@ -627,13 +627,18 @@ def _build_app():
             }
 
         if job.status == "error":
+            # The job's message is verbatim-relayable (redacted at the job
+            # boundary); the re-call instruction always rides with it, so the
+            # documented recovery travels with every terminal error instead of
+            # only the bare-message default.
             return {
                 "video_id": video_id,
                 "status": "error",
                 "error_code": job.error_code or errors.ASR_FAILED,
-                "message": job.message or (
-                    "Transcription failed. Re-call get_youtube_transcript "
-                    "with the video URL to retry."
+                "message": (
+                    (job.message or "Transcription failed.")
+                    + " Re-call get_youtube_transcript with the video URL "
+                    "to retry."
                 ),
             }
 
