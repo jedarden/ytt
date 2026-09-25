@@ -27,6 +27,19 @@ Integration tests hit real YouTube URLs and the in-cluster Whisper service.
 They will NOT pass from a datacenter IP (the server machine included).
 Do not chase integration test failures locally — verify in-cluster.
 
+```bash
+# Deployed-ingress smoke (drives the live public URL end to end; opt-in):
+YTT_DEPLOYED_SMOKE_URL=https://mcp.ardenone.com \
+  uv run pytest tests/deployed -m deployed -v
+```
+
+The deployed smoke replays the documented HTTP surface
+(`docs/notes/http-endpoints.md`) against the actual deployment — edge, Traefik
+`/ytt` prefix routing and app together — and needs no credentials (it asserts
+the unauthenticated 401 shape and that no transcript work is triggerable).
+Without `YTT_DEPLOYED_SMOKE_URL` it skips, so no default gate depends on the
+deployment.
+
 ## Submitting changes
 
 1. Fork the repo on Forgejo (`https://git.ardenone.com/jedarden/ytt`).

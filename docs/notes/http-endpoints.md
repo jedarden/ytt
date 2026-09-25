@@ -224,3 +224,19 @@ carries. The transport route is the only one accepting `POST`/`DELETE`
 - metrics/health public-safety: bounded label surface, no transcript or
   subject material in the exposition body, fixed liveness body;
 - slash/normalization/method behavior for every route class.
+
+The composed chain is smoked, not assumed:
+`tests/deployed/test_deployed_ingress_smoke.py` replays this document against
+the **live public route** — DNS/TLS/tunnel/Traefik (`YTT_PATH_PREFIX=/ytt/`)
+and the app together — covering the public health/metrics reads, both
+protected routes' unauthenticated 401 challenges with a routable PRM pointer,
+the three `/.well-known/*/ytt` documents, the `/ytt/mcp` 404, the
+`ytt-sse`/`ytt-cors` middleware headers, and a before/after metrics
+comparison proving unauthorized or unknown requests move no work-path series
+(no fetch, no ASR, no cache write, empty queue). It is opt-in (`YTT_DEPLOYED_SMOKE_URL`,
+marker `deployed`) so no default gate depends on the deployment being up, and
+it asserts the one known app-vs-chain divergence deliberately: the edge
+normalizes `//` upstream of the app, so the doubled spelling resolves onto the
+same canonical route in production where the in-process app 404s it — with the
+protected twin (`//admin/egress`) asserted still gated so normalization can
+never be a bypass.

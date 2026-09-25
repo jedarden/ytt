@@ -63,4 +63,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "integration: hits real YouTube / Whisper; only runs in ardenone-cluster (datacenter IPs are blocked elsewhere)",
+    "deployed: drives the real deployed public URL end to end (DNS/TLS/tunnel/Traefik/app); opt in by setting YTT_DEPLOYED_SMOKE_URL — skipped everywhere else",
 ]
