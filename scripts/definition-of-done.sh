@@ -34,6 +34,16 @@
 # paths record every egress under a socket-level tripwire — enforcing the
 # documented no-third-party, cookie-free promise (README intro,
 # docs/notes/proxy-egress.md).
+#
+# The configuration-documentation drift guard
+# (tests/unit/test_config_docs_drift.py) runs inside the suite too: it holds
+# the README/configuration-guide tables, the self-hosting quick-start and
+# compose examples, and the deploy/ manifests to the actual Settings schema —
+# documented defaults and required-variable markers, the documented
+# fail-closed validator claims, and the manifest image pins (the manifest
+# legs of the release-pin check above, which the Docker build gate's plain
+# pytest run would otherwise never see — the two markdown pins are enforced
+# inside the suite by the same module, for the same reason).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # --- release-metadata drift guard ------------------------------------------
