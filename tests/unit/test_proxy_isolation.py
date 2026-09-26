@@ -291,7 +291,7 @@ async def _drive_whisper_job(
     registry = WhisperJobRegistry()
     cache = MagicMock()
     cache.put = AsyncMock(return_value=True)
-    job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+    job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
     with patch("ytt.whisper._do_download_audio", return_value=str(audio)):
         await run_whisper_job(
             job, registry, settings, cache, settings.whisper_model

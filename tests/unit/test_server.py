@@ -605,7 +605,7 @@ async def test_whisper_quota_joined_job_is_not_charged(monkeypatch):
         video_id="dQw4w9WgXcQ", status="running", created_at=time.time(), eta_sec=30.0
     )
 
-    async def mock_get_or_create(video_id, duration_sec, settings):
+    async def mock_get_or_create(video_id, duration_sec, settings, owner):
         return existing, False  # joins — a job is already in flight
 
     monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
@@ -639,7 +639,7 @@ async def test_whisper_quota_charged_when_new_job_starts(monkeypatch):
         video_id="dQw4w9WgXcQ", status="pending", created_at=time.time(), eta_sec=60.0
     )
 
-    async def mock_get_or_create(video_id, duration_sec, settings):
+    async def mock_get_or_create(video_id, duration_sec, settings, owner):
         return new_job, True  # starts a new job
 
     async def noop_run(*a, **kw):
@@ -786,7 +786,7 @@ async def test_whisper_queue_full_allows_joining_existing_job(monkeypatch):
         video_id="dQw4w9WgXcQ", status="running", created_at=time.time(), eta_sec=30.0
     )
 
-    async def mock_get_or_create(video_id, duration_sec, settings):
+    async def mock_get_or_create(video_id, duration_sec, settings, owner):
         return existing, False
 
     monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
@@ -950,7 +950,7 @@ def _install_new_job_registry(monkeypatch):
     """Make get_or_create always report a freshly created job (is_new=True)."""
     from ytt import server
 
-    async def mock_get_or_create(video_id, duration_sec, settings):
+    async def mock_get_or_create(video_id, duration_sec, settings, owner):
         return _new_job(video_id), True
 
     monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)
@@ -1047,7 +1047,7 @@ async def test_whisper_concurrency_cap_released_when_job_fails(monkeypatch):
         job.status = "done"
         terminal.append(job.video_id)
 
-    async def mock_get_or_create(video_id, duration_sec, settings):
+    async def mock_get_or_create(video_id, duration_sec, settings, owner):
         return jobs[video_id], True
 
     monkeypatch.setattr(server.whisper_registry, "get_or_create", mock_get_or_create)

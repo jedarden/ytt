@@ -146,7 +146,7 @@ async def _run_job(
     audio = scratch / f"{video_id}.m4a"
     audio.write_bytes(b"\x89fake-audio")
 
-    job, is_new = await registry.get_or_create(video_id, 60.0, settings)
+    job, is_new = await registry.get_or_create(video_id, 60.0, settings, owner="anonymous")
     assert is_new  # fresh work, as every re-kick in the runbook is
     with patch("ytt.whisper._do_download_audio", return_value=str(audio)):
         await run_whisper_job(
@@ -384,7 +384,7 @@ async def test_rekick_after_failure_replaces_the_terminal_handle(
     await _run_job(registry, settings, _cache_mock(), _asr_client(refuse))
     assert (await registry.get(VIDEO_ID)).status == "error"
 
-    job, is_new = await registry.get_or_create(VIDEO_ID, 60.0, settings)
+    job, is_new = await registry.get_or_create(VIDEO_ID, 60.0, settings, owner="anonymous")
     assert is_new
     assert job.status == "pending"
     assert registry.size == 1  # replaced, not duplicated
@@ -482,7 +482,7 @@ async def test_full_backlog_denies_new_jobs_but_joins_and_free_polls(
 
     s = _settings("/tmp")  # only max_asr_duration/realtime_factor are read
     for i in range(16):
-        job, _ = await reg.get_or_create(_video_n(i), 60.0, s)
+        job, _ = await reg.get_or_create(_video_n(i), 60.0, s, owner="anonymous")
         await reg.update_status(_video_n(i), "running")
     assert await reg.active_count() == 16
 
@@ -502,7 +502,7 @@ async def test_full_backlog_denies_new_jobs_but_joins_and_free_polls(
     # join has a slot to charge (bucket 1 → 0) and refund (0 → 1); a leak —
     # charge kept on the join path — would leave 0 and fail the final probe.
     quota.refund("anonymous")
-    job, _ = await reg.get_or_create(VIDEO_ID, 60.0, s)
+    job, _ = await reg.get_or_create(VIDEO_ID, 60.0, s, owner="anonymous")
     await reg.update_status(VIDEO_ID, "running")
     result = await mcp.call_tool(
         "get_youtube_transcript", {"url": f"https://youtu.be/{VIDEO_ID}"}
@@ -540,12 +540,12 @@ async def test_ttl_gc_reaps_exactly_the_documented_entries(tmp_path: Path) -> No
     reg = WhisperJobRegistry()
     s = _settings(str(tmp_path))
 
-    old_done, _ = await reg.get_or_create("aaadone0001", 60.0, s)
+    old_done, _ = await reg.get_or_create("aaadone0001", 60.0, s, owner="anonymous")
     await reg.update_status("aaadone0001", "done", result_ref="aaadone0001.whisper")
     old_done.created_at = time.time() - 7200
-    fresh_error, _ = await reg.get_or_create("aaaerror001", 60.0, s)
+    fresh_error, _ = await reg.get_or_create("aaaerror001", 60.0, s, owner="anonymous")
     await reg.update_status("aaaerror001", "error", error_code="asr_failed")
-    aged_pending, _ = await reg.get_or_create("aaapend0001", 60.0, s)
+    aged_pending, _ = await reg.get_or_create("aaapend0001", 60.0, s, owner="anonymous")
     aged_pending.created_at = time.time() - 10**7
 
     removed = await reg.run_ttl_gc(_gc_settings())
@@ -566,10 +566,10 @@ async def test_stale_running_gc_threshold_is_timeout_plus_ttl(
     reg = WhisperJobRegistry()
     s = _settings(str(tmp_path))
 
-    zombie, _ = await reg.get_or_create("aaazomb0001", 60.0, s)
+    zombie, _ = await reg.get_or_create("aaazomb0001", 60.0, s, owner="anonymous")
     await reg.update_status("aaazomb0001", "running")
     zombie.started_at = time.time() - 7000  # > 2880 + 3600
-    long_but_legit, _ = await reg.get_or_create("aaalong0001", 60.0, s)
+    long_but_legit, _ = await reg.get_or_create("aaalong0001", 60.0, s, owner="anonymous")
     await reg.update_status("aaalong0001", "running")
     long_but_legit.started_at = time.time() - 6000  # under the threshold
 
@@ -589,12 +589,12 @@ async def test_restart_empties_the_registry_and_rekick_starts_fresh(
     (runbook §10)."""
     old_reg = WhisperJobRegistry()
     s = _settings(str(tmp_path))
-    await old_reg.get_or_create(VIDEO_ID, 60.0, s)
+    await old_reg.get_or_create(VIDEO_ID, 60.0, s, owner="anonymous")
 
     new_reg = WhisperJobRegistry()  # the process after the swap
     assert await new_reg.get(VIDEO_ID) is None  # → not_found on the poll path
 
-    job, is_new = await new_reg.get_or_create(VIDEO_ID, 60.0, s)
+    job, is_new = await new_reg.get_or_create(VIDEO_ID, 60.0, s, owner="anonymous")
     assert is_new
     assert job.status == "pending"
 

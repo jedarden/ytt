@@ -429,9 +429,9 @@ def _capture_created_jobs(monkeypatch, registry: WhisperJobRegistry) -> list:
     records: list[tuple[str, bool]] = []
     original = registry.get_or_create
 
-    async def _recording(video_id, duration_sec, settings):
+    async def _recording(video_id, duration_sec, settings, owner):
         job, is_new = await original(
-            video_id, duration_sec=duration_sec, settings=settings
+            video_id, duration_sec=duration_sec, settings=settings, owner=owner
         )
         records.append((video_id, is_new))
         return job, is_new

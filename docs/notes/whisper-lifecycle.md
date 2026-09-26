@@ -15,11 +15,14 @@ Sources: plan §Whisper fallback / §Tools / §Response shape, `docs/notes/singl
 A job is a `WhisperJob` (`ytt/models.py`) held in the process-local
 `WhisperJobRegistry` (`ytt/whisper.py`), keyed by the canonical 11-character
 `video_id`. One registry entry per video, ever; all reads and transitions run
-under one `asyncio.Lock`.
+under one `asyncio.Lock`. Each entry also records its `owner` — the
+authenticated subject (`ytt.server._request_subject`) of the call that
+created it — which the polling contract below binds the job handle to
+(ownership rule: [auth.md §Job ownership](auth.md#job-ownership--whisper-asr-handles-are-per-subject)).
 
 | Transition | Driven by | Side effect | Log event |
 |---|---|---|---|
-| *(absent) →* `pending` | `get_or_create` (tool: start or re-kick) | `created_at`, `eta_sec`, `duration_sec` recorded | `whisper_job_created` |
+| *(absent) →* `pending` | `get_or_create` (tool: start or re-kick) | `created_at`, `eta_sec`, `duration_sec`, `owner` recorded | `whisper_job_created` |
 | `pending` → `running` | `run_whisper_job` first act | `started_at` set | `whisper_job_status_change` |
 | `running` → `done` | successful cache write | `result_ref = "<id>.whisper"` | `whisper_job_status_change`, `whisper_job_done` |
 | `running` → `error` | any failure (download, POST, unexpected) | stable `error_code` + verbatim-relayable `message` | `whisper_job_error` / `whisper_job_unexpected_error` |
@@ -56,7 +59,10 @@ Gate order (all before any transcription work):
 4. **Get-or-create** under the registry lock. Joining (`is_new=False`)
    returns the existing in-flight job; only `is_new=True` starts one bounded
    background task (`_run_whisper_job_bounded`, holding one
-   `YTT_MAX_CONCURRENT_WHISPER` slot for the job's whole lifecycle).
+   `YTT_MAX_CONCURRENT_WHISPER` slot for the job's whole lifecycle). Created
+   jobs record the calling subject as `owner` (required keyword): the work is
+   shared with any later requester, but the pollable handle belongs to the
+   creator alone (§3).
 
 Start response (the only response shape that introduces a job):
 
@@ -72,11 +78,16 @@ the ETA budget can't outlive the timeout:
 
 ## 3. Polling contract — `get_transcript_job`
 
-One tool, one argument (`video_id`), read-only. State → response:
+One tool, one argument (`video_id`), read-only. **Ownership gate first**: the
+polling call's authenticated subject must match the job's recorded `owner` —
+a mismatch answers with the *same* `not_found` an absent job gets (byte-for-
+byte, so job ids are not enumerable across subjects; the denial is logged as
+`transcript_job_poll_denied` with hashed subjects only). Every row below is
+then reachable by the owner alone. State → response:
 
 | Registry state | Response |
 |---|---|
-| absent (`not_found`) | `status=error, error_code=not_found`, message instructs re-calling `get_youtube_transcript` |
+| absent, **or owned by another subject** (`not_found`) | `status=error, error_code=not_found`, message instructs re-calling `get_youtube_transcript` |
 | `pending` | `status=pending`, `eta_sec`, "queued" message |
 | `running` | `status=running`, `eta_sec`, "in progress" message |
 | `error` | `status=error`, `error_code=<job's stable code, default asr_failed>`, the job's verbatim-relayable `message` (a default when the job recorded none) **plus** the fixed re-call-to-retry instruction |
@@ -104,13 +115,19 @@ surface: `ok | partial | pending | running | error`.
 ## 4. not_found and expiration
 
 `not_found` is a logical error emitted by `get_transcript_job` only (never a
-yt-dlp taxonomy code). Three ways in, one recovery:
+yt-dlp taxonomy code). Four ways in, one recovery:
 
 1. **Unknown id** — never registered (or a different replica: the registry is
    process-local, see `docs/notes/single-replica.md`).
 2. **Expired** — TTL GC removed the entry (below).
 3. **Evicted result** — `done` job whose `<id>.whisper.*` cache unit was
    evicted between completion and the first poll.
+4. **Foreign owner** — the job exists but was started by a different
+   authenticated subject (ownership gate, §3). The payload is byte-identical
+   to way #1 — callers cannot probe which video ids have live jobs. The
+   recovery below is also exactly right for this case: a re-kick joins the
+   in-flight work or answers from the shared cache, and a re-kick after a
+   terminal job starts a fresh one *owned by the re-kicking subject*.
 
 Recovery is always the same **idempotent re-kick**: re-call
 `get_youtube_transcript` with the original URL. Cache-first answers instantly
@@ -199,3 +216,9 @@ mechanisms so the wiring bead can land against an already-specified contract.
   GC unit math, model guard, download guards, sweep globs).
 - `tests/unit/test_server.py` — individual tool shapes and the quota/queue
   gates in isolation.
+- `tests/unit/test_job_ownership.py` — the ownership gate end to end: owner
+  vs. stranger polls across pending, running, done, and error jobs, the
+  byte-identical `not_found` for cross-subject/unknown ids, normalized
+  subject keys, re-kick re-ownership, join-shares-work-not-handle, and the
+  owner-less scaffolding affordance (spec: `docs/notes/auth.md` §Job
+  ownership).

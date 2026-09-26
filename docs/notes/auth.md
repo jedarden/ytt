@@ -16,6 +16,7 @@ Authorization is therefore a separate, required control:
 - **Subject allowlist (`YTT_ALLOWED_SUBJECTS`)** checked on every tool call after token validation; non-allowlisted subject → `403`. **Empty allowlist = deny all** (fail-closed).
 - **Dynamic Client Registration disabled** for personal v1 (DCR lets anyone register). Authorize on the token **subject**, not the client name — the Claude apps register as `client_name: "claudeai"`, so never allowlist by an exact `"Claude"` string.
 - **Per-subject rate limiting** + Whisper quota so even an allowlisted caller can't exhaust the home IP / shared Whisper service.
+- **Job ownership** — a Whisper ASR job's poll handle is bound to the subject that started it; see [§Job ownership](#job-ownership--whisper-asr-handles-are-per-subject) below.
 
 ## What this means for the build
 
@@ -27,6 +28,42 @@ Authorization is therefore a separate, required control:
 See `docs/research/mcp-oauth-authentication.md` for the spec details and exactly what the server must expose.
 
 **Upstream IdP:** this doc is deliberately IdP-agnostic — the MCP-facing requirements above hold regardless of which upstream identity provider ytt federates to. The actual choice (currently the org's self-hosted Authentik, `sso.ardenone.com`; previously Google) is recorded as a decided ADR in `docs/plan/plan.md` (ADR-003, superseding an undocumented earlier pivot to Google) — check there for the current provider and the implementation in `ytt/auth.py`.
+
+## Job ownership — Whisper ASR handles are per-subject
+
+Starting a Whisper ASR job records the caller's authenticated subject — the
+same normalized key every per-subject control uses (lowercased token `email`,
+resolved by `ytt.server._request_subject`) — as the job's `owner`
+(`ytt/models.py`). `get_transcript_job` requires the polling call's subject to
+match before it reports anything about the job:
+
+- **The handle is private.** The owner's poll follows the polling contract
+  (`docs/notes/whisper-lifecycle.md` §3). A poll from any *other* subject
+  returns the byte-identical `not_found` payload an unknown video_id gets —
+  pending, running, done, and failed jobs are all equally invisible, and job
+  ids are not enumerable across subjects (no response distinguishes "exists
+  but not yours" from "does not exist").
+- **The denial is logged, not leaked.** A cross-subject poll logs
+  `transcript_job_poll_denied` (video id + sha256-prefix subject hashes only —
+  the same redaction rule as the rate-limiter metric); the caller sees
+  nothing but `not_found`.
+- **Work is shared; handles are not.** A second subject requesting the same
+  caption-less video still joins the in-flight job (Invariant 2 — no
+  duplicate Whisper run, quota refunded) but gains no poll handle. Their
+  recovery is the documented re-call of `get_youtube_transcript`, which the
+  shared cache answers the moment the job lands.
+- **Restarting re-owns.** A failed job is replaced by the documented re-kick
+  (`get_youtube_transcript` again), and the replacement belongs to the
+  subject that re-kicked it — the previous owner's handle died with the
+  failed entry.
+- **Every job has an owner.** `WhisperJobRegistry.get_or_create` takes
+  `owner` as a required keyword — no production path can create an unowned
+  job. Hand-built owner-less records exist only as unit-test scaffolding and
+  poll as unrestricted.
+
+The full behavior across pending, running, completed, failed, and restarted
+jobs — including the byte-identical-denial property and the join/re-kick
+ownership transfers — is pinned by `tests/unit/test_job_ownership.py`.
 
 ## Key rotation and token-validation failures
 

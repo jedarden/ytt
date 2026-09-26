@@ -321,7 +321,7 @@ async def _drive_job_to_error(
     *post_side_effect* as the transcription POST; return the terminal job."""
     registry = WhisperJobRegistry()
     settings = _whisper_settings(tmp_path)
-    job, _ = await registry.get_or_create(_VIDEO_ID, 50.0, settings)
+    job, _ = await registry.get_or_create(_VIDEO_ID, 50.0, settings, owner="anonymous")
 
     audio_file = Path(settings.scratch_dir) / f"{_VIDEO_ID}.mp3"
     audio_file.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +401,7 @@ class TestTranscriptJobToolResponse:
 
         registry = ytt.server.whisper_registry
         settings = _whisper_settings(tmp_path)
-        job, _ = await registry.get_or_create(_VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(_VIDEO_ID, 50.0, settings, owner="anonymous")
 
         audio_file = Path(settings.scratch_dir) / f"{_VIDEO_ID}.mp3"
         audio_file.parent.mkdir(parents=True, exist_ok=True)

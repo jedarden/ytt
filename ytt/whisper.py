@@ -407,6 +407,14 @@ class WhisperJobRegistry:
 
     States: ``pending → running → done | error``
 
+    Every job records its creator's authenticated subject (``owner``, from
+    ``ytt.server._request_subject``): the job handle is pollable only by that
+    subject — ``get_transcript_job`` answers a cross-subject poll with the same
+    ``not_found`` an unknown id gets, so registry entries are not enumerable
+    across callers. Starting (and joining, Invariant 2) the *work* stays shared:
+    a second subject requesting the same video rides the in-flight job instead
+    of duplicating a Whisper run; only the handle stays private.
+
     TTL GC (plan §Whisper fallback):
     - ``done``/``error`` jobs older than ``YTT_JOB_TTL_SEC`` are removed.
     - ``running`` jobs older than ``WHISPER_TIMEOUT_SEC + JOB_TTL_SEC`` are
@@ -425,6 +433,8 @@ class WhisperJobRegistry:
         video_id: str,
         duration_sec: float | None,
         settings: "Settings",
+        *,
+        owner: str,
     ) -> tuple[WhisperJob, bool]:
         """Get an existing job or create a new ``pending`` one.
 
@@ -437,6 +447,12 @@ class WhisperJobRegistry:
             computation and the ``MAX_ASR_DURATION_SEC`` duration cap check.
         settings:
             Runtime settings (``max_asr_duration_sec``, ``whisper_realtime_factor``).
+        owner:
+            Authenticated subject key (``ytt.server._request_subject``) of the
+            call creating/joining the job. Recorded on *created* jobs — the
+            pollable handle then belongs to that subject only. Joining an
+            in-flight job does not re-own it: the handle stays with the
+            original creator, per the ownership rule in the class docstring.
 
         Returns
         -------
@@ -444,7 +460,8 @@ class WhisperJobRegistry:
             ``is_new=True`` when the job was freshly created; the caller is
             responsible for starting the background transcription Task.
             Terminal entries (``done``/``error``) are **never** joinable — they
-            are replaced by a fresh pending job (``is_new=True``).
+            are replaced by a fresh pending job (``is_new=True``), which is
+            then owned by the re-kicking caller.
 
         Raises
         ------
@@ -497,6 +514,7 @@ class WhisperJobRegistry:
                 created_at=time.time(),
                 eta_sec=eta_sec,
                 duration_sec=duration_sec,
+                owner=owner,
             )
             self._jobs[video_id] = job
             if replaced_status is not None:

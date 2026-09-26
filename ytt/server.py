@@ -257,7 +257,8 @@ def _build_app():
             "e.g. 'en', 'es'); omit to use the original/English. "
             "If no captions exist, Whisper ASR starts automatically — the response "
             "has status='pending' with an ETA; relay the ETA to the user and stop. "
-            "Call get_transcript_job(video_id) later to retrieve the result. "
+            "Call get_transcript_job(video_id) later to retrieve the result — the "
+            "job is pollable only by your own OAuth subject. "
             "On status='partial', call again with cursor=next_cursor before answering. "
             "Use start/end (seconds) or query (case-insensitive substring) to filter "
             "the transcript; query is mutually exclusive with start/end. "
@@ -421,6 +422,13 @@ def _build_app():
                         # backstop still applies later.
                         duration_sec=getattr(exc, "duration_sec", None),
                         settings=settings,
+                        # Ownership (docs/notes/auth.md §Job ownership): the
+                        # pollable handle is bound to this call's authenticated
+                        # subject. Joining an in-flight job owned by someone
+                        # else shares the work but not the handle — that
+                        # caller's recovery is the cache-first re-call once the
+                        # job lands.
+                        owner=subject,
                     )
                     if quota_charged and not is_new:
                         # Joined an existing job — put the slot back.
@@ -559,6 +567,9 @@ def _build_app():
             "Poll the status of a Whisper ASR transcription job. "
             "Pass the video_id returned by a previous get_youtube_transcript call "
             "that came back with status='pending'. "
+            "Jobs are private to the OAuth subject that started them: polling "
+            "from any other subject — or with an unknown video_id — returns the "
+            "same not_found error. "
             "When the job is done, returns the full transcript (same shape as "
             "get_youtube_transcript). "
             "On status='pending' or 'running', relay the ETA and stop. "
@@ -577,13 +588,34 @@ def _build_app():
         - done: Phase 7 — deliver the transcript via build_page (same shape as
           get_youtube_transcript, mode=full). Replaces the Phase 6 stub.
         - not found: return not_found with re-call instruction.
+
+        Ownership (docs/notes/auth.md §Job ownership): the poller's
+        authenticated subject must match the job's recorded owner. A
+        cross-subject poll returns the byte-identical not_found payload an
+        unknown video_id gets — job handles are not enumerable across
+        subjects — and the denial is logged with hashed subjects only.
+        Hand-built owner-less records (unit-test scaffolding) are polled as
+        unrestricted; every registry-created job carries an owner.
         """
+        import hashlib
+
         from ytt import pagination
 
         settings = get_settings()
 
+        subject = _request_subject()
         job = await whisper_registry.get(video_id)
-        if job is None:
+        if job is not None and job.owner is not None and job.owner != subject:
+            # Cross-subject poll. The caller sees exactly what an unknown
+            # video_id sees (the payload below is shared) — the difference
+            # exists only for the operator, here, with hashed subjects.
+            log.warning(
+                "transcript_job_poll_denied",
+                video_id=video_id,
+                subject_hash=hashlib.sha256(subject.encode()).hexdigest()[:8],
+                job_owner_hash=hashlib.sha256(job.owner.encode()).hexdigest()[:8],
+            )
+        if job is None or (job.owner is not None and job.owner != subject):
             return {
                 "video_id": video_id,
                 "status": "error",

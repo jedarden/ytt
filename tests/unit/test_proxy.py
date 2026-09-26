@@ -438,7 +438,7 @@ class TestWhisperAudioPathProxiesTheRetry:
 
         factory, captured = _capturing_ydl(outcomes)
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings, owner="anonymous")
 
         whisper_resp = MagicMock(spec=httpx.Response)
         whisper_resp.status_code = 200
@@ -507,7 +507,7 @@ class TestWhisperAudioPathProxiesTheRetry:
         from ytt.whisper import WhisperJobRegistry, run_whisper_job
 
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings, owner="anonymous")
         cache = self._cache()
 
         with patch("ytt.whisper.yt_dlp.YoutubeDL", side_effect=slow_factory):
@@ -866,7 +866,7 @@ class TestWhisperAudioPathCredentialRedaction:
 
         factory, captured = _capturing_ydl(outcomes)
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(self.VIDEO_ID, None, settings, owner="anonymous")
 
         whisper_resp = MagicMock(spec=httpx.Response)
         whisper_resp.status_code = 200

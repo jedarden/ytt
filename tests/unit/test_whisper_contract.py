@@ -373,7 +373,7 @@ class TestPollingContract:
     async def test_poll_pending_shape(self, contract_env) -> None:
         """§3 — pending: status=pending with the job's ETA."""
         await contract_env.registry.get_or_create(
-            VIDEO_ID, 50.0, contract_env.settings
+            VIDEO_ID, 50.0, contract_env.settings, owner="anonymous"
         )
         sc = await _poll()
         assert sc["status"] == "pending"
@@ -386,7 +386,7 @@ class TestPollingContract:
         """§3 — running: status=running with the ETA (the FSM state the job
         task enters as its first act)."""
         await contract_env.registry.get_or_create(
-            VIDEO_ID, 50.0, contract_env.settings
+            VIDEO_ID, 50.0, contract_env.settings, owner="anonymous"
         )
         await contract_env.registry.update_status(VIDEO_ID, "running")
         sc = await _poll()
@@ -400,7 +400,7 @@ class TestPollingContract:
         """§3 — error: the job's stable error_code verbatim plus its
         relayable message with the re-call-to-retry instruction."""
         await contract_env.registry.get_or_create(
-            VIDEO_ID, 50.0, contract_env.settings
+            VIDEO_ID, 50.0, contract_env.settings, owner="anonymous"
         )
         await contract_env.registry.update_status(
             VIDEO_ID,
@@ -647,7 +647,7 @@ class TestExpirationContract:
         WHISPER_TIMEOUT + TTL) is removed; a pending entry has no TTL and
         survives the same GC pass (the queue cap bounds it instead)."""
         await contract_env.registry.get_or_create(
-            VIDEO_ID, 50.0, contract_env.settings
+            VIDEO_ID, 50.0, contract_env.settings, owner="anonymous"
         )
         await contract_env.registry.update_status(VIDEO_ID, "running")
         stale = await contract_env.registry.get(VIDEO_ID)
@@ -658,7 +658,7 @@ class TestExpirationContract:
         )
 
         await contract_env.registry.get_or_create(
-            OTHER_VIDEO_ID, 50.0, contract_env.settings
+            OTHER_VIDEO_ID, 50.0, contract_env.settings, owner="anonymous"
         )  # pending — never GC'd (§4 table, last row)
 
         removed = await contract_env.registry.run_ttl_gc(contract_env.settings)

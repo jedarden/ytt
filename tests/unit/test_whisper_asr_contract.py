@@ -191,7 +191,7 @@ async def _drive_job(
     audio_file = scratch / f"{VIDEO_ID}.mp4"
     audio_file.write_bytes(AUDIO_BYTES)
 
-    job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+    job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
     with patch(
         "ytt.whisper._do_download_audio", return_value=str(audio_file)
     ):

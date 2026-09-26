@@ -109,6 +109,14 @@ class WhisperJob(BaseModel):
     Mutable runtime state held in the in-memory registry. ``created_at`` is an
     epoch-seconds float; ``result_ref`` points at the cached ``<id>.whisper.txt``
     unit when ``status == "done"``.
+
+    ``owner`` is the authenticated subject key (``ytt.server._request_subject``:
+    lowercased token ``email``) of the call that created the job. It binds the
+    job handle to its creator — ``get_transcript_job`` answers a poll from any
+    other subject with the same ``not_found`` an unknown id gets, so job ids
+    are not enumerable across subjects. Every registry-created job carries an
+    owner; ``None`` only occurs on hand-built records (unit-test scaffolding)
+    and is polled as unrestricted.
     """
 
     model_config = ConfigDict(validate_assignment=True)
@@ -116,6 +124,7 @@ class WhisperJob(BaseModel):
     video_id: str
     status: WhisperJobStatus = "pending"
     created_at: float
+    owner: str | None = None
     started_at: float | None = None
     eta_sec: float | None = None
     duration_sec: float | None = None

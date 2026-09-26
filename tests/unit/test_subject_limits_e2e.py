@@ -113,12 +113,18 @@ def _job_registry(monkeypatch, jobs: dict) -> None:
     async def mock_active_count():
         return len(jobs)
 
-    async def mock_get_or_create(video_id, duration_sec=None, settings=None):
+    async def mock_get_or_create(video_id, duration_sec=None, settings=None, owner=None):
         job = jobs.get(video_id)
         if job is not None:
             return job, False
         job = WhisperJob(
-            video_id=video_id, status="pending", created_at=time.time(), eta_sec=60.0
+            video_id=video_id,
+            status="pending",
+            created_at=time.time(),
+            eta_sec=60.0,
+            # This file's tool calls run with no auth context — the same
+            # subject key the production start path records here.
+            owner=owner or "anonymous",
         )
         jobs[video_id] = job
         return job, True

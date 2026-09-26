@@ -740,7 +740,7 @@ class TestAsrPathEgress:
         registry = WhisperJobRegistry()
         cache = MagicMock()
         cache.put = AsyncMock(return_value=True)
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         with patch("ytt.whisper.yt_dlp.YoutubeDL", side_effect=audio_ydl_factory):
             async with httpx.AsyncClient(

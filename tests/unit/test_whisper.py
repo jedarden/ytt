@@ -331,7 +331,7 @@ class TestWhisperJobRegistryGet:
     async def test_get_existing_returns_job(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        job, is_new = await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        job, is_new = await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         retrieved = await reg.get(VIDEO_ID)
         assert retrieved is not None
         assert retrieved.video_id == VIDEO_ID
@@ -343,7 +343,7 @@ class TestWhisperJobRegistryGetOrCreate:
     async def test_creates_new_job(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        job, is_new = await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        job, is_new = await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         assert is_new is True
         assert job.video_id == VIDEO_ID
         assert job.status == "pending"
@@ -354,8 +354,8 @@ class TestWhisperJobRegistryGetOrCreate:
     async def test_duplicate_returns_existing(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        job1, is_new1 = await reg.get_or_create(VIDEO_ID, 100.0, settings)
-        job2, is_new2 = await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        job1, is_new1 = await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
+        job2, is_new2 = await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         assert is_new1 is True
         assert is_new2 is False
         assert job1 is job2
@@ -364,7 +364,7 @@ class TestWhisperJobRegistryGetOrCreate:
         reg = WhisperJobRegistry()
         settings = _make_settings(max_asr_duration_sec=600)
         with pytest.raises(YttError) as exc_info:
-            await reg.get_or_create(VIDEO_ID, 700.0, settings)
+            await reg.get_or_create(VIDEO_ID, 700.0, settings, owner="anonymous")
         assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
         # No registry entry created
         assert await reg.get(VIDEO_ID) is None
@@ -372,7 +372,7 @@ class TestWhisperJobRegistryGetOrCreate:
     async def test_none_duration_skips_duration_check(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings(max_asr_duration_sec=60)
-        job, is_new = await reg.get_or_create(VIDEO_ID, None, settings)
+        job, is_new = await reg.get_or_create(VIDEO_ID, None, settings, owner="anonymous")
         assert is_new is True
         assert job.eta_sec is None
         assert job.duration_sec is None
@@ -380,16 +380,16 @@ class TestWhisperJobRegistryGetOrCreate:
     async def test_eta_computed_from_duration(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings(whisper_realtime_factor=2.0)
-        job, _ = await reg.get_or_create(VIDEO_ID, 300.0, settings)
+        job, _ = await reg.get_or_create(VIDEO_ID, 300.0, settings, owner="anonymous")
         assert job.eta_sec == pytest.approx(600.0)
 
     async def test_registry_size_increments(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
         assert reg.size == 0
-        await reg.get_or_create(VIDEO_ID, 50.0, settings)
+        await reg.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
         assert reg.size == 1
-        await reg.get_or_create("anotherid123", 50.0, settings)
+        await reg.get_or_create("anotherid123", 50.0, settings, owner="anonymous")
         assert reg.size == 2
 
 
@@ -399,7 +399,7 @@ class TestWhisperJobRegistryUpdateStatus:
         reg = WhisperJobRegistry()
         settings = _make_settings()
         before = time.time()
-        job, _ = await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        job, _ = await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         assert job.started_at is None
 
         await reg.update_status(VIDEO_ID, "running")
@@ -410,7 +410,7 @@ class TestWhisperJobRegistryUpdateStatus:
     async def test_running_to_done_sets_result_ref(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         await reg.update_status(VIDEO_ID, "running")
         await reg.update_status(VIDEO_ID, "done", result_ref=f"{VIDEO_ID}.whisper")
 
@@ -422,7 +422,7 @@ class TestWhisperJobRegistryUpdateStatus:
     async def test_running_to_error_sets_error_fields(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        await reg.get_or_create(VIDEO_ID, 100.0, settings)
+        await reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous")
         await reg.update_status(VIDEO_ID, "running")
         await reg.update_status(
             VIDEO_ID,
@@ -448,7 +448,7 @@ class TestWhisperJobRegistryRemove:
     async def test_removes_existing_entry(self) -> None:
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        await reg.get_or_create(VIDEO_ID, 50.0, settings)
+        await reg.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
         assert reg.size == 1
         await reg.remove(VIDEO_ID)
         assert reg.size == 0
@@ -649,7 +649,7 @@ class TestRunWhisperJobHappyPath:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         whisper_resp = _make_whisper_response("Hello world", "en")
         http_client = AsyncMock(spec=httpx.AsyncClient)
@@ -691,7 +691,7 @@ class TestRunWhisperJobHappyPath:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         raw_segs = [
             {"start": 0.0, "end": 2.0, "text": "Hello"},
@@ -727,7 +727,7 @@ class TestRunWhisperJobHappyPath:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         http_client = AsyncMock(spec=httpx.AsyncClient)
         http_client.post = AsyncMock(return_value=_make_whisper_response())
@@ -751,7 +751,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=str(tmp_path / "scratch"))
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         http_client = AsyncMock(spec=httpx.AsyncClient)
 
@@ -784,7 +784,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         # Mock Whisper returning 500
         error_response = MagicMock(spec=httpx.Response)
@@ -825,7 +825,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         http_client = AsyncMock(spec=httpx.AsyncClient)
         http_client.post = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
@@ -854,7 +854,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         http_client = AsyncMock(spec=httpx.AsyncClient)
         http_client.post = AsyncMock(
@@ -877,7 +877,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=str(tmp_path / "scratch"))
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         with patch(
             "ytt.whisper._do_download_audio",
@@ -901,7 +901,7 @@ class TestRunWhisperJobErrors:
         settings = _make_settings(scratch_dir=str(tmp_path / "scratch"))
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         with patch(
             "ytt.whisper._do_download_audio",
@@ -931,7 +931,7 @@ class TestRunWhisperJobRunningTransition:
         settings = _make_settings(scratch_dir=scratch)
         registry = WhisperJobRegistry()
         cache = _make_cache_mock()
-        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, 50.0, settings, owner="anonymous")
 
         status_at_download: list[str] = []
 
@@ -967,9 +967,9 @@ class TestWhisperJobSingleFlight:
         settings = _make_settings()
 
         results = await asyncio.gather(
-            reg.get_or_create(VIDEO_ID, 100.0, settings),
-            reg.get_or_create(VIDEO_ID, 100.0, settings),
-            reg.get_or_create(VIDEO_ID, 100.0, settings),
+            reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous"),
+            reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous"),
+            reg.get_or_create(VIDEO_ID, 100.0, settings, owner="anonymous"),
         )
         # All three return the same job object
         job0 = results[0][0]
@@ -1130,12 +1130,12 @@ class TestWhisperJobRegistryActiveCount:
         backlog cap reads pending+running only."""
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        await reg.get_or_create("aaaaaaaaaaa", None, settings)  # pending
-        await reg.get_or_create("bbbbbbbbbbb", None, settings)
+        await reg.get_or_create("aaaaaaaaaaa", None, settings, owner="anonymous")  # pending
+        await reg.get_or_create("bbbbbbbbbbb", None, settings, owner="anonymous")
         await reg.update_status("bbbbbbbbbbb", "running")  # running
-        await reg.get_or_create("ccccccccccc", None, settings)
+        await reg.get_or_create("ccccccccccc", None, settings, owner="anonymous")
         await reg.update_status("ccccccccccc", "done", result_ref="c.whisper")
-        await reg.get_or_create("ddddddddddd", None, settings)
+        await reg.get_or_create("ddddddddddd", None, settings, owner="anonymous")
         await reg.update_status(
             "ddddddddddd", "error", error_code="asr_failed", message="boom"
         )
@@ -1150,8 +1150,8 @@ class TestWhisperJobRegistryActiveCount:
         """A finishing job frees its queue slot the moment it lands done."""
         reg = WhisperJobRegistry()
         settings = _make_settings()
-        await reg.get_or_create("aaaaaaaaaaa", None, settings)
-        await reg.get_or_create("bbbbbbbbbbb", None, settings)
+        await reg.get_or_create("aaaaaaaaaaa", None, settings, owner="anonymous")
+        await reg.get_or_create("bbbbbbbbbbb", None, settings, owner="anonymous")
         await reg.update_status("bbbbbbbbbbb", "running")
         assert await reg.active_count() == 2
 
@@ -1178,7 +1178,7 @@ class TestRunWhisperJobScratchHygiene:
 
         settings = _make_settings(scratch_dir=str(scratch))
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings, owner="anonymous")
 
         bot_check = yt_dlp.utils.DownloadError(
             "ERROR: Sign in to confirm you're not a bot"
@@ -1208,7 +1208,7 @@ class TestRunWhisperJobScratchHygiene:
 
         settings = _make_settings(scratch_dir=str(scratch))
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings, owner="anonymous")
 
         # The download blocks on an event we release after cancellation —
         # to_thread cannot be interrupted, so the zombie thread must be let
@@ -1251,7 +1251,7 @@ class TestRunWhisperJobScratchHygiene:
 
         settings = _make_settings()
         registry = WhisperJobRegistry()
-        job, _ = await registry.get_or_create(VIDEO_ID, None, settings)
+        job, _ = await registry.get_or_create(VIDEO_ID, None, settings, owner="anonymous")
 
         async def slow_job(*a, **kw):
             await asyncio.sleep(30)
