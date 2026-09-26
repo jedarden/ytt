@@ -66,6 +66,12 @@ The two temporal checks FastMCP's verifier omits (`exp` mandatory, `nbf` honored
 
 ### Operator recovery runbook
 
+The full step-by-step rotation procedure — the OpenBao write recipe, the
+two-pod restart sequencing, old/new token behavior in the window, outage
+triage, rollback of each half independently, and the conformance-test drills
+— is [deploy/AUTH-ROTATION-RUNBOOK.md](../../deploy/AUTH-ROTATION-RUNBOOK.md).
+The notes below are the mechanics each rotation step leans on.
+
 **Rotate the upstream client secret** (hygiene or suspected compromise):
 
 1. Write the new `client_secret` into the single shared OpenBao path `secret/ardenone-cluster/ytt/oauth` — the value travels by pipe/stdin, never as a command-line argument, with `-cas=<current version>`. Both consumers read this one path (ytt's `ytt-externalsecret.yml` and Authentik's `authentik-oidc-clients-externalsecret.yml`), so they cannot drift.

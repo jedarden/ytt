@@ -13,6 +13,7 @@ Related docs:
 |---|---|
 | [RUNBOOK.md](RUNBOOK.md) | Upgrade/rollback swaps, state-across-restart, the Recreate model, forbidden kubectl |
 | [CACHE-RUNBOOK.md](CACHE-RUNBOOK.md) | The other PVC: value model (nothing worth backing up), ENOSPC, scratch |
+| [AUTH-ROTATION-RUNBOOK.md](AUTH-ROTATION-RUNBOOK.md) | The rotations that orphan this state (client secret, signing key), their restart sequencing, rollback, and verification |
 | [docs/notes/auth.md](../docs/notes/auth.md) | The OAuth key families — including the client-secret rotation that orphans this state |
 | [docs/notes/retention-policy.md](../docs/notes/retention-policy.md) | Why a transcript cleanup must never reach this volume (§7.2) |
 

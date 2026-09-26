@@ -13,6 +13,7 @@ Related docs:
 | [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) | Release SOP (VERSION bump → CI image → pin tag) + human-gated steps |
 | [CACHE-RUNBOOK.md](CACHE-RUNBOOK.md) | Cache PVC: backup/restore, disk exhaustion & ENOSPC recovery, scratch cleanup |
 | [TRANSCRIPT-DELETION-RUNBOOK.md](TRANSCRIPT-DELETION-RUNBOOK.md) | Deleting one video's cached transcripts: scoping, blast radius, verification, what is unrecoverable |
+| [AUTH-ROTATION-RUNBOOK.md](AUTH-ROTATION-RUNBOOK.md) | Rotating the OAuth client secret, the signing key, and the allowlist: restart sequencing, old/new token behavior, rollback |
 | [README.md](README.md) | The `deploy/` ↔ `declarative-config` mirror and how to refresh it |
 | [docs/notes/single-replica.md](../docs/notes/single-replica.md) | Why `replicas: 1` is a correctness constraint, not a sizing choice |
 | [docs/usage/deploy-ardenone.md](../docs/usage/deploy-ardenone.md) | Architecture, routing, secrets, observability |

@@ -189,7 +189,10 @@ bao-as openbao-v2-provision bao kv put -cas=<current> secret/ardenone-cluster/yt
 The same path feeds Authentik's blueprint-declared expectation
 (`../authentik/authentik-oidc-clients-externalsecret.yml` in
 declarative-config), so both sides stay in agreement.  Shape:
-`ytt-secret.yml.template` (in this directory).
+`ytt-secret.yml.template` (in this directory).  The full rotation procedure —
+converging both ExternalSecrets, the two-pod restart sequencing, old/new
+token behavior, rollback of each half independently, secret-safe
+verification — is [AUTH-ROTATION-RUNBOOK.md](AUTH-ROTATION-RUNBOOK.md).
 
 ### Subject allowlist
 
