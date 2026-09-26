@@ -16,8 +16,8 @@
 #             failures) — prometheusrule.yml; response procedure:
 #             deploy/CANARY-MONITORING-RUNBOOK.md
 #   scrape:   service/ytt-canary port metrics, via servicemonitor.yml
-# Image: ronaldraygun/ytt:0.2.24 — first image carrying the derived-URL SSRF
-# allowlist (b65b494) that actually published (0.2.22/0.2.23 burned before any
+# Image: ronaldraygun/ytt:0.2.25 — first image carrying the derived-URL SSRF
+# allowlist (b65b494) that actually published (0.2.22-0.2.24 burned before any
 # tag landed); per-path metrics since 0.2.21 (6b1c3de). Pinned semver,
 # no :latest.
 #   Per-path metrics note: live since 0.2.21 — the
@@ -65,7 +65,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt-canary
-          image: ronaldraygun/ytt:0.2.24
+          image: ronaldraygun/ytt:0.2.25
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics

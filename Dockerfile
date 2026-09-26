@@ -47,7 +47,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- test: gate the build on the unit suite -------------------------------
 FROM builder AS test
-COPY tests ./tests
+# The WHOLE build context, not a hand-picked subset. The suite reads repo-root
+# files by path (VERSION, Dockerfile, LICENSE, NOTICE, CONTRIBUTING.md,
+# SECURITY.md, CHANGELOG.md, scripts/, notes/, deploy/, docs/ ...), and every
+# new guard that cites a file the image lacked failed the build: releases
+# 0.2.22-0.2.24 each burned on a different missing file (0.2.24: VERSION and
+# Dockerfile at collection, then the docs reference-drift guard wanting
+# scripts/ and the top-level docs — bead ytt-f6a13d31). Copying piecemeal
+# guaranteed the next burn; this stage is discarded (only the pass marker
+# reaches the runtime image), so a bigger context here costs nothing shipped.
+# .dockerignore still drops .git/.beads/.venv, so the bead-store and
+# declarative-config legs skip exactly as they do in a clean extraction.
+COPY . ./
 RUN uv run pytest -m "not integration" -q && touch /app/.pytest-passed
 
 # --- runtime: lean image, runtime deps only, non-root ---------------------

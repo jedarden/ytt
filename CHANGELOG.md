@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.25] — 2026-09-26
+
+> First release since 0.2.21 that actually publishes an image. 0.2.22 and
+> 0.2.23 burned on `deploy/` mirror pin drift (see 0.2.24); 0.2.24 then
+> burned on a *third*, unrelated cause: the Dockerfile's test stage copied
+> only `docs/`, `deploy/` and `README.md` into the image, so
+> `tests/unit/test_config_docs_drift.py` and
+> `tests/unit/test_deployment_health_probes.py` (which read `VERSION` and
+> `Dockerfile` at collection time) aborted pytest with exit 2 and kaniko never
+> pushed a tag (ytt-build-h86dv). Reproduced locally with the real Dockerfile
+> (`docker build --target test` on a `git archive` of HEAD) before this cut —
+> which also surfaced a second failure the collection errors had been
+> masking: the docs reference-drift guard wants `scripts/`, `LICENSE`,
+> `NOTICE`, `CONTRIBUTING.md` and `SECURITY.md`, none of which the image had.
+> Ships everything 0.2.22-0.2.24 would have: the derived-URL SSRF allowlist
+> (b65b494) and the yt-dlp bump below.
+
+### Fixed
+
+- **Image test stage gets the whole build context** (bead `ytt-f6a13d31`) —
+  `COPY . ./` in the (discarded) test stage instead of a hand-picked subset.
+  Every new guard that cites a repo file the image lacked failed the build,
+  and 0.2.22-0.2.24 each burned on a different one; piecemeal `COPY` lines
+  would only have scheduled the next burn. `.dockerignore` still drops
+  `.git`, `.beads` and `.venv`, so the bead-store and declarative-config legs
+  skip exactly as in a clean extraction, and only the pass marker reaches the
+  runtime image. The tests were not weakened.
+
 ### Added
 
 - **Documentation reference-drift guard** (bead `ytt-86634a21`).
