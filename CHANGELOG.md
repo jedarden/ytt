@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape as the parity guard). `deploy/*.md` joins the scan once the
   in-flight retention-policy doc it anticipates lands.
 
+### Changed
+
+- **yt-dlp pin 2026.7.4 → 2026.8.19** (bead `ytt-ea4dbd5d`). The exact pin
+  was ~7 weeks behind PyPI while the deployment logged a growing share of
+  HTTP 429s on the caption-track download (`ydl.urlopen(track_url)` in
+  `ytt/fetch.py`, after `extract_info` had succeeded). `uv.lock` changes for
+  yt-dlp alone. Verified offline against the new version: the player-client /
+  PoToken contract (`tests/unit/test_ytdlp_contract.py`), the derived-URL
+  gates' three pinned yt-dlp internals (`docs/notes/derived-url-policy.md`),
+  and the full unit suite. **Not verified:** that the bump clears the 429s —
+  the root cause is unconfirmed and a live extraction from a datacenter IP
+  is not representative (the old and new pin behave identically there), so
+  it needs an in-cluster check after the image ships.
+
 ## [0.2.24] — 2026-09-26
 
 > The 0.2.23 number was also consumed by a failed release attempt, and this

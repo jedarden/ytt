@@ -126,7 +126,7 @@ All three delegate to one function, `ytt.derived_url.validate_derived_url`.
 ## Pinned yt-dlp internals (maintenance point)
 
 Like `SEED_MAP`, the gates reach into yt-dlp internals and are pinned to the
-`yt-dlp` version in `pyproject.toml` (currently `2026.7.4`):
+`yt-dlp` version in `pyproject.toml` (currently `2026.8.19`):
 
 - `yt_dlp.YoutubeDL.urlopen` (public, stable signature: `str | networking.Request`);
 - `yt_dlp.networking._urllib.RedirectHandler.redirect_request`;

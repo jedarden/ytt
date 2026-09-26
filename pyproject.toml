@@ -20,10 +20,10 @@ classifiers = [
 # fixes every couple weeks. An exact pin left stale WILL stop extracting (the
 # 2025.5.22 pin broke against 2026 YouTube: every fetch returned "video
 # unavailable", faking "no captions" and forcing doomed Whisper fallbacks).
-# Bump this to a current release regularly. Last bumped 2026-07-16 → 2026.7.4.
+# Bump this to a current release regularly. Last bumped 2026-09-26 → 2026.8.19.
 dependencies = [
     "fastmcp>=2.11.1",
-    "yt-dlp==2026.7.4",
+    "yt-dlp==2026.8.19",
     "uvicorn>=0.34.0",
     "httpx>=0.28.0",
     "pydantic-settings>=2.7.0",

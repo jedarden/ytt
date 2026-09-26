@@ -31,7 +31,7 @@ and the bgutil provider alternative we deliberately do not ship, lives in
 
 yt-dlp tries the listed clients in order and merges what they yield:
 
-| Position | Client | Role | Policy in pinned yt-dlp (2026.07.04) |
+| Position | Client | Role | Policy in pinned yt-dlp (2026.08.19) |
 |---|---|---|---|
 | 1 | `tv` | **Primary extractor — the media donor.** Its formats feed the Whisper `bestaudio` download. | clean: no GVS/Subs PO gate, no sign-in |
 | 2 | `web_embedded` | First fallback; fully clean | clean: no PO gate of any context |
