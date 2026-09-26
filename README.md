@@ -111,6 +111,7 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |
 | `YTT_SCRATCH_DIR` | `/scratch` | Scratch directory for temporary Whisper audio. Must be a dedicated volume (emptyDir recommended) — see the warning below. |
 | `YTT_PROXY_URL` | *(unset)* | Optional residential proxy URL (e.g. `http://user:pass@proxy.example.com:port`). |
+| `YTT_CANARY_INTERVAL_SEC` | `600` | Seconds between canary probe-loop cycles. Consumed by the canary Deployment only — the main server never probes. The loop reuses `YTT_PROXY_URL`: a `via_proxy` path is probed only while a proxy is set. |
 
 Per-subject limits apply **after** the allowlist: `YTT_ALLOWED_SUBJECTS`
 decides who may call at all, and the limiters then bound what each allowlisted
@@ -130,6 +131,14 @@ layer).
 > directory ytt owns alone (a dedicated emptyDir in Kubernetes, or an
 > otherwise-empty directory), never at a shared path like `/tmp`. Rationale:
 > [docs/notes/single-replica.md](docs/notes/single-replica.md).
+
+Two canary knobs are compile-time constants in `ytt/canary.py`, not
+environment variables: the probe ladder (`CANARY_VIDEO_IDS` — `jNQXAC9IVRw`
+then `dQw4w9WgXcQ`, probed in order per cycle until one succeeds) and the
+canary's dedicated metrics port :8081 (the server's own `/metrics` stays on
+:8080). Changing either is a code change, not config; the `ytt_canary_*`
+series they feed and their alerts:
+[deploy/CANARY-MONITORING-RUNBOOK.md](deploy/CANARY-MONITORING-RUNBOOK.md).
 
 Full reference: [docs/usage/configuration.md](docs/usage/configuration.md)
 

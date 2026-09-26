@@ -13,7 +13,7 @@ stale image pin in manifests the suite never looked at; the DoD shell script
 checks only the two markdown pins and does not run inside the Docker build
 gate, whose test stage runs plain pytest).
 
-Five legs:
+Six legs:
 
 1. **Defaults** — every documentation table row that states a literal default
    states the ``Settings`` default (byte-for-byte, so a default change in
@@ -46,6 +46,14 @@ Five legs:
    a ``Settings`` construction, and honor the documented public-URL/prefix
    pairing rule (``YTT_PUBLIC_URL`` ends with the ``YTT_PATH_PREFIX``
    prefix); both documents pin the release image.
+6. **Canary surface** — the canary's single ``Settings`` knob
+   (``YTT_CANARY_INTERVAL_SEC``) keeps a row in both documents stating the
+   model default, and the compile-time knobs the ``Settings`` legs cannot
+   see — the fixed probe-video ladder and the dedicated metrics port — are
+   pinned across ``ytt/canary.py``, the README's canary note, the
+   configuration guide's canary section and the canary Deployment/Service
+   manifests (bead ytt-7ff3501a: those tunables previously lived only in an
+   evidence note and the manifests, and drifted out of every table).
 """
 
 from __future__ import annotations
@@ -57,6 +65,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from ytt.canary import CANARY_VIDEO_IDS
 from ytt.config import DEFAULT_OIDC_CONFIG_URL, DEFAULT_OIDC_ISSUER, Settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -435,15 +444,20 @@ def test_proxy_contract_matches_proxy_egress_doc(monkeypatch):
 _MANIFEST_ENV_ALLOWLIST = frozenset({"FASTMCP_HOME"})
 
 
-def _deployments():
-    """Every Deployment document under deploy/k8s (same scan as
+def _manifest_docs(kind: str):
+    """Every manifest document of *kind* under deploy/k8s (same scan as
     test_single_replica — both .yml and .yaml)."""
     for path in sorted(DEPLOY_K8S.rglob("*")):
         if path.suffix not in {".yml", ".yaml"}:
             continue
         for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
-            if isinstance(doc, dict) and doc.get("kind") == "Deployment":
+            if isinstance(doc, dict) and doc.get("kind") == kind:
                 yield path, doc
+
+
+def _deployments():
+    """Every Deployment document under deploy/k8s."""
+    return _manifest_docs("Deployment")
 
 
 def _container_envs(doc: dict) -> list[dict[str, str | None]]:
@@ -611,4 +625,100 @@ def test_selfhosting_docs_pin_the_release_image(doc_name):
     assert pins == {VERSION}, (
         f"{doc_name} pins {sorted(pins)}, VERSION is {VERSION} — bump every "
         "copy in the same release commit"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Leg 6 — canary surface: the Settings row plus the compile-time knobs
+# ---------------------------------------------------------------------------
+
+#: The canary's knobs outside the ``Settings`` schema — the fixed probe-video
+#: ladder and the dedicated metrics port are constants in ``ytt/canary.py``,
+#: not env vars, so the Settings-derived legs above never see them.  This leg
+#: holds every surface that restates them to the source instead.
+_CANARY_SOURCE = (REPO_ROOT / "ytt" / "canary.py").read_text(encoding="utf-8")
+
+
+def _readme_canary_note() -> str:
+    """The README's compile-time canary note (below the Configuration table).
+
+    Its presence is part of the contract: without it the probe ladder and the
+    metrics port are back to being documented only incidentally — in an
+    evidence note and the manifests — which is the drift this leg exists for
+    (bead ytt-7ff3501a).
+    """
+    m = re.search(r"Two canary knobs are compile-time.*?(?=\n\n)", _README, re.DOTALL)
+    assert m, (
+        "README lost its compile-time canary note (the CANARY_VIDEO_IDS "
+        "ladder and the metrics port) — restore it under §Configuration"
+    )
+    return m.group(0)
+
+
+def test_both_documents_carry_the_canary_interval_row():
+    """``YTT_CANARY_INTERVAL_SEC`` — the canary's only Settings knob — keeps
+    a row in both tables stating the model default.  The literal-default leg
+    only checks rows that exist, so without this presence pin the README's
+    curated table could silently drop the row again."""
+    for doc_name, doc in _DOCS.items():
+        cell = _default_cell(doc, "YTT_CANARY_INTERVAL_SEC")
+        assert cell is not None, f"{doc_name} lost its YTT_CANARY_INTERVAL_SEC row"
+        expected = f"`{_expected_default_literal('YTT_CANARY_INTERVAL_SEC')}`"
+        assert expected in cell, (
+            f"{doc_name} states default {cell!r} for YTT_CANARY_INTERVAL_SEC; "
+            f"Settings says {expected}"
+        )
+
+
+def test_readme_canary_note_names_the_probe_ladder_in_order():
+    """The backticked 11-character video ids in the README's canary note are
+    exactly :data:`ytt.canary.CANARY_VIDEO_IDS`, in ladder order — a probe
+    video added, removed or reordered in ``ytt/canary.py`` must update the
+    README in the same commit."""
+    ids = re.findall(r"`([A-Za-z0-9_-]{11})`", _readme_canary_note())
+    assert ids == list(CANARY_VIDEO_IDS), (
+        f"README canary note names {ids}; ytt/canary.py's ladder is "
+        f"{list(CANARY_VIDEO_IDS)}"
+    )
+
+
+def test_canary_metrics_port_agrees_across_source_docs_and_manifests():
+    """One metrics port everywhere: the ``start_http_server`` literal in
+    ``ytt/canary.py``, the README's canary note, the configuration guide's
+    canary section, and the canary Deployment's containerPort + Service
+    port/targetPort."""
+    m = re.search(r"start_http_server\((\d+)", _CANARY_SOURCE)
+    assert m, "ytt/canary.py no longer states its metrics port as a literal"
+    port = m.group(1)
+    assert f":{port}" in _readme_canary_note(), (
+        f"README canary note does not name the metrics port :{port}"
+    )
+    assert re.search(rf"on\s+:{port}\b", _GUIDE), (
+        f"configuration.md's canary section no longer serves metrics on :{port}"
+    )
+    deployments = [
+        doc
+        for _, doc in _manifest_docs("Deployment")
+        if doc.get("metadata", {}).get("name") == "ytt-canary"
+    ]
+    assert len(deployments) == 1, "expected exactly one ytt-canary Deployment"
+    ports = [
+        str(container_port["containerPort"])
+        for container in deployments[0]["spec"]["template"]["spec"]["containers"]
+        for container_port in container.get("ports", [])
+    ]
+    assert ports == [port], (
+        f"ytt-canary containerPorts {ports} != metrics port {port}"
+    )
+    services = [
+        doc
+        for _, doc in _manifest_docs("Service")
+        if doc.get("metadata", {}).get("name") == "ytt-canary"
+    ]
+    assert len(services) == 1, "expected exactly one ytt-canary Service"
+    service_ports = [
+        (str(p["port"]), str(p["targetPort"])) for p in services[0]["spec"]["ports"]
+    ]
+    assert service_ports == [(port, port)], (
+        f"ytt-canary Service ports {service_ports} != metrics port {port}"
     )
