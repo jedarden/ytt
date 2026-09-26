@@ -20,7 +20,7 @@ docker run --rm \
   -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
   -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
-  ronaldraygun/ytt:0.2.22
+  ronaldraygun/ytt:0.2.23
 ```
 
 The OAuth client pair and `YTT_PUBLIC_URL` are startup-required — the server

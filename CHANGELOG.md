@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape as the parity guard). `deploy/*.md` joins the scan once the
   in-flight retention-policy doc it anticipates lands.
 
-## [0.2.22] — 2026-09-26
+## [0.2.23] — 2026-09-26
+
+> The 0.2.22 number was consumed by a failed release attempt: the ytt-build
+> docker-build step died on iad-ci (exit 2) before pushing anything, so no
+> 0.2.22 image ever existed. This is the same content re-cut as 0.2.23.
 
 ### Security
 
