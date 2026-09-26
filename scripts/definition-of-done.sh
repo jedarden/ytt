@@ -44,6 +44,15 @@
 # legs of the release-pin check above, which the Docker build gate's plain
 # pytest run would otherwise never see — the two markdown pins are enforced
 # inside the suite by the same module, for the same reason).
+#
+# The documentation-reference drift guard
+# (tests/unit/test_docs_reference_drift.py) also runs inside the suite:
+# relative links and GitHub heading anchors across README, CONTRIBUTING,
+# SECURITY, CHANGELOG and docs/ must resolve; backticked tests/ scripts/
+# deploy/ ytt/ docs/ citations must exist as paths (the wrong-extension and
+# renamed-test class); and — on hosts with a live bead store, same skip
+# shape as the parity guard — every ytt-XXXXXXXX bead ID cited in curated
+# docs must exist in the store.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # --- release-metadata drift guard ------------------------------------------

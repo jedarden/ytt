@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Documentation reference-drift guard** (bead `ytt-86634a21`).
+  `tests/unit/test_docs_reference_drift.py` holds curated docs (README,
+  CONTRIBUTING, SECURITY, CHANGELOG, `docs/`) to the artifacts they cite:
+  relative links must resolve and `#fragment` links must match a real
+  heading under GitHub's slug algorithm; backticked `tests/`, `scripts/`,
+  `deploy/`, `ytt/` and `docs/` paths must exist — catching wrong-extension
+  or renamed test citations; and every `ytt-XXXXXXXX` bead cited in docs
+  must exist in the live bead store (skipped in clean extractions, same
+  shape as the parity guard). `deploy/*.md` joins the scan once the
+  in-flight retention-policy doc it anticipates lands.
+
 ## [0.2.21] — 2026-09-25
 
 ### Added
