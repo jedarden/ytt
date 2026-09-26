@@ -20,6 +20,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape as the parity guard). `deploy/*.md` joins the scan once the
   in-flight retention-policy doc it anticipates lands.
 
+## [0.2.22] — 2026-09-26
+
+### Security
+
+- **yt-dlp-derived URLs are constrained behind an allowlist** (bead
+  `ytt-823e0469`, commit `b65b494`; spec:
+  `docs/notes/derived-url-policy.md`). The caller-input surface was already
+  closed (canonicalize parses, never dials), but the transcript paths went on
+  to follow URLs yt-dlp extracts from the video's metadata — the json3
+  timedtext URL, the googlevideo format/manifest/fragment URLs, and every
+  redirect target reached from either. A compromised or lying metadata
+  response could point this service's egress at localhost, the private
+  network, or a cloud-metadata endpoint. `ytt/derived_url.py` now enforces
+  the policy in three layers: caption-path pre-dial validation, an
+  audio-path pre-download audit of every URL the downloader resolves
+  (protocol-relative fragments included), and process-wide network gates
+  installed at `ytt.fetch` import — `YoutubeDL.urlopen` plus both request
+  backends' redirect decision points — so the second metadata extraction
+  `ydl.download` performs internally and every redirect hop are gated too.
+  A URL is dialable only when it parses, is exactly `https`, carries no
+  userinfo and no explicit port, and its host is on the YouTube-controlled
+  allowlist (suffix-anchored `youtube.com`, `youtube-nocookie.com`,
+  `googlevideo.com`, `ytimg.com`, plus exact `youtubei.googleapis.com`);
+  validation never rewrites — what was checked is what gets dialed, and
+  there is deliberately no environment knob.
+- **Rejections carry the new stable `bad_metadata_url` error code**
+  (`ytt.errors.BAD_METADATA_URL`) — never `bad_url` (the caller's input was
+  fine) and never `empty_body`, the one code that triggers the Whisper ASR
+  fallback: downloading audio from the very video whose metadata misbehaved
+  is the one response that must never happen. A violation surfacing through
+  yt-dlp as a network error carries the `metadata URL rejected` marker,
+  pinned first in `SEED_MAP` so `classify_ydl_error` maps it back; the
+  canary classifies it as `outcome: "bad_metadata_url"` instead of a
+  misleading `empty_body`. Pinned by `tests/unit/test_derived_url.py`.
+- **`canonicalize` fails closed when the stdlib parser refuses the URL**
+  (commit `34a918b`). The stdlib rejects some shapes outright (unbalanced
+  `[`, NFKC-normalizing host delimiters, unparseable/out-of-range ports);
+  that refusal now translates to the normal rejection instead of a leaked
+  `ValueError`.
+
+### Added
+
+- **Anonymous-pull + quick-start release gates** (bead `ytt-7656c3a2`,
+  commit `74f9fb3`). After `ytt-build` publishes `ronaldraygun/ytt:<version>`,
+  two gate steps verify the one promise the README quick start makes that
+  nothing had checked: an unauthenticated registry lookup and full anonymous
+  blob pull hash-checked against the advertised digest, then the just-pulled
+  tag booted as a pod with the documented quick-start environment, asserted
+  on `/ytt/health` and the documented anonymous-401 challenge. The tested
+  tag + digest are recorded as workflow output parameters. A 401/403 — the
+  Hub repo private again — fails the release by design
+  (`deploy/DEPLOY-CHECKLIST.md` §3 is the operator fix).
+
+### Documentation
+
+- ASR failure and queue-exhaustion runbook (`ytt-e372b1cd`), OAuth
+  credential and signing-key rotation runbook (`ytt-bcd4f302`), scoped
+  transcript-cache deletion runbook (`ytt-8f8356de`), OAuth-state PVC
+  backup/restore runbook (`ytt-c53a2f56`), and the correction of the canary
+  acceptance gate's access path — `pods/exec` needs an operator kubeconfig;
+  the credential-free read-only proxy cannot exec (`ytt-e78ad269`).
+
 ## [0.2.21] — 2026-09-25
 
 ### Added
