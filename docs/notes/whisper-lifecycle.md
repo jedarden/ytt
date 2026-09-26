@@ -173,7 +173,7 @@ components, unit-tested, and not yet wired into `serve()`**:
 | Audio deletion + per-video scratch sweep | `run_whisper_job` `finally` | ✅ live |
 | Polling (all six shapes), evicted-result removal | `get_transcript_job` | ✅ live |
 | `startup_sweep` | `serve()` | ❌ not called — stale scratch survives restarts in production |
-| TTL GC loop (`run_ttl_gc`, stale-running GC) | registry task started at boot | ❌ never started — terminal handles accumulate (each `error` handle pins a queue slot until process end), `running` handles are never reaped |
+| TTL GC loop (`run_ttl_gc`, stale-running GC) | registry task started at boot | ❌ never started — terminal handles accumulate in memory only (a terminal handle holds no queue capacity — `active_count` totals `pending`+`running`, see deploy/ASR-RUNBOOK.md §9 — it just stays in the registry until the process ends), `running` handles are never reaped |
 | `check_model_guard` | `serve()` | ❌ not called — configured model is never self-corrected |
 | cache `startup_scan` / `start_reconcile_task` | `serve()` | ❌ not called — pre-restart cache units are invisible to the in-memory index after a restart (cache-first then misses until a `put` re-adds the unit) |
 
