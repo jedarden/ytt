@@ -140,6 +140,26 @@ canary's dedicated metrics port :8081 (the server's own `/metrics` stays on
 series they feed and their alerts:
 [deploy/CANARY-MONITORING-RUNBOOK.md](deploy/CANARY-MONITORING-RUNBOOK.md).
 
+### Startup egress probe and `ytt_egress_is_residential`
+
+Before the HTTP listener binds, `ytt serve` runs **one** egress probe: an
+HTTP GET of `https://ipinfo.io/json` with a hard 10 s timeout
+(`ytt.selftest._PROBE_TIMEOUT_SEC`, a compile-time constant, not an
+environment variable), dialed **through `YTT_PROXY_URL` when set** — so the
+classified IP is the effective fetch path's egress, not the pod's native
+one. The verdict is exported as the label-free gauge
+`ytt_egress_is_residential` on `/ytt/metrics`: `1` = residential, `0` = not
+classified residential (datacenter, or a probe that produced no answer at
+all). The probe is one-shot per process — it does not refresh on a timer;
+the classification is re-probed only by an authenticated
+`GET /ytt/admin/egress` call or by a restart. An unreachable or failing
+probe is **not** fatal: the server logs `Startup egress probe failed` and
+finishes booting with the gauge at `0`. Because the gauge is registered at
+import time, every scrape carries exactly one `ytt_egress_is_residential`
+series valued 0 or 1 — never absent — so a missing series can only mean a
+scrape or routing problem, never "the probe has not run yet". Pinning
+tests: [tests/unit/test_startup_egress_probe.py](tests/unit/test_startup_egress_probe.py).
+
 Full reference: [docs/usage/configuration.md](docs/usage/configuration.md)
 
 ## Add as a Claude connector

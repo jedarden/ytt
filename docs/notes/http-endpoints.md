@@ -114,6 +114,13 @@ comment.
   label key (video id, subject, job id, URL), and on label values wider than a
   bounded vocabulary — or anything but the 8-hex `subject_hash` where a
   subject appears at all.
+- The `ytt_egress_is_residential` gauge is written by the server's one-shot
+  startup egress probe (target `https://ipinfo.io/json`, hard 10 s timeout,
+  dialed through `YTT_PROXY_URL` when set, fail-soft on error — the full
+  contract: [README §Configuration](../../README.md#configuration)) and
+  re-probed by each authenticated `/ytt/admin/egress` call (next section) —
+  never by a scrape. It is registered at import time, so the series is
+  always present at 0 or 1.
 - **Side effects: none.** A scrape is a read-only snapshot of counters that
   the fetch/ASR path increments; it never starts work (a monitor scraping
   more often cannot speed up — or break — the pipeline).
