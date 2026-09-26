@@ -4,8 +4,10 @@ Every HTTP surface ytt exposes — what it is reachable as, who can call it, how
 path variants resolve, and what it may touch. This is the normative spec the
 rest of the docs reference (`/metrics`, `/admin/egress`, canary metrics, the
 path-prefixed deployment); the behavior is pinned by
-`tests/unit/test_endpoint_contract.py` (HTTP-level, against the real ASGI app)
-and, for the OAuth flow itself, `tests/unit/test_oauth_conformance.py`.
+`tests/unit/test_endpoint_contract.py` (HTTP-level, against the real ASGI app),
+the metrics label/cardinality bound by
+`tests/unit/test_metrics_cardinality.py`, and, for the OAuth flow itself,
+`tests/unit/test_oauth_conformance.py`.
 
 Related: `docs/notes/auth.md` (identity, allowlist, rate limits),
 `docs/notes/proxy-egress.md` (egress paths and credential redaction),
@@ -105,7 +107,13 @@ comment.
   the process that renders this body. (The reserved *structural* labels the
   exposition format itself attaches — `le` on histogram buckets, `quantile`
   on summaries — are library-owned numeric bucket boundaries, not part of
-  the application surface; the tests exempt exactly those two.)
+  the application surface; the tests exempt exactly those two.) The bound is
+  a regression test, not a convention:
+  `tests/unit/test_metrics_cardinality.py` scrapes this body and fails on any
+  family or label key outside the documented surface, on any identifier-shaped
+  label key (video id, subject, job id, URL), and on label values wider than a
+  bounded vocabulary — or anything but the 8-hex `subject_hash` where a
+  subject appears at all.
 - **Side effects: none.** A scrape is a read-only snapshot of counters that
   the fetch/ASR path increments; it never starts work (a monitor scraping
   more often cannot speed up — or break — the pipeline).
@@ -173,7 +181,10 @@ nothing outside the cluster can reach it. Two properties matter:
 - That registry is process-wide: because the canary imports
   `ytt.observability`, :8081 serves every registered `ytt_*` series (the
   `ytt_canary_*` gauges the alert fires on, plus the library's counters) —
-  all aggregate-only, so the public-safe invariant holds there too. Its
+  all aggregate-only, so the public-safe invariant holds there too (pinned by
+  the same module: a fresh canary-shaped registry — `import ytt.canary` and
+  nothing else, the exact import surface of the Deployment's process — must
+  expose exactly the documented family set). Its
   Kubernetes liveness probe deliberately targets `/metrics` (always-200
   while the process serves HTTP).
 
@@ -223,6 +234,11 @@ carries. The transport route is the only one accepting `POST`/`DELETE`
   operational route, slash variant, 404, and OAuth metadata route is driven;
 - metrics/health public-safety: bounded label surface, no transcript or
   subject material in the exposition body, fixed liveness body;
+- the **cardinality bound** behind that first clause:
+  `tests/unit/test_metrics_cardinality.py` holds the real app's public
+  exposition *and* the canary Deployment's fresh-process registry to the
+  documented family set with per-family exact label keys and bounded label
+  values (the `/ytt/metrics` and canary sections above);
 - slash/normalization/method behavior for every route class.
 
 The composed chain is smoked, not assumed:
