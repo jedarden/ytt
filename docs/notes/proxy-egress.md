@@ -24,6 +24,20 @@ The proxy value is threaded as yt-dlp's `proxy` option (per-`YoutubeDL`
 construction), never via process environment (`HTTP_PROXY` etc.) — that would
 sweep the ASR POST and OAuth traffic into the proxy.
 
+Both halves of this table are unit-tested. `tests/unit/test_proxy.py` pins the
+positive half — the caption and audio-download direct-first + one-shot
+`ip_blocked` proxied retry — plus redaction. `tests/unit/test_proxy_isolation.py`
+pins the negative half: with `YTT_PROXY_URL` configured and the standard proxy
+environment variables stripped, it instruments every `httpx.AsyncClient`
+construction (and fastmcp's discovery `httpx.get`) to prove OIDC discovery,
+the token exchange and transparent upstream refresh, and the Whisper
+transcription POST (plus the startup model guard) construct proxy-free
+clients and make exactly one dial on their failure paths — and, statically,
+that the package never exports the proxy into the process environment where
+`trust_env` would sweep identity/ASR traffic in. JWKS is pinned at its
+strongest level: the verifier is symmetric-local (`ytt/auth.py`), so token
+validation performs no HTTP at all and a proxied fetch cannot exist.
+
 ## URL validation (`ytt.config.Settings._proxy_url_valid`)
 
 Validated at `Settings` construction — a typo'd URL must fail startup, not sit
