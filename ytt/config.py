@@ -43,6 +43,13 @@ parsing it enforces:
   ``cache_max_bytes`` (fail fast); for ``emptydir`` a warning is emitted instead
   (statvfs reports node disk, not the kubelet ``sizeLimit``). This filesystem
   check runs at startup via :meth:`Settings.validate_storage`, not at import.
+- **No credential in a validation error**: pydantic echoes the offending
+  input in every rendered validation error — for a model-level (``mode=
+  "after"``) failure that is the whole input mapping, ``YTT_OAUTH_CLIENT_SECRET``
+  included. Construction wraps that echo with secret-name and credential-URL
+  redaction (:func:`_redacted_validation_error`) — the same value-never-logs
+  posture ``ytt.observability`` enforces at runtime, since the rendered
+  ``ValidationError`` is what a CrashLooping pod prints.
 
 Human-readable sizes (``2Gi``, ``500Mi``) are accepted everywhere a byte count
 is expected.
@@ -56,8 +63,11 @@ from functools import lru_cache
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import BeforeValidator, field_validator, model_validator
+from pydantic import BeforeValidator, ValidationError, field_validator, model_validator
+from pydantic_core import InitErrorDetails
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from ytt.observability import redact_credentials
 
 # --- human-readable size parsing -------------------------------------------
 
@@ -185,6 +195,82 @@ def join_path(prefix: str, route: str) -> str:
     return prefix + route.lstrip("/")
 
 
+# --- secret hygiene on construction errors -----------------------------------
+
+#: Substrings that mark an input field as a credential: its value is replaced
+#: with ``<redacted>`` everywhere pydantic would echo it in a validation error.
+#: Case-insensitive, matched against the field name.
+_SECRET_NAME_MARKERS: tuple[str, ...] = (
+    "secret",
+    "password",
+    "passphrase",
+    "api_key",
+    "signing_key",
+)
+
+#: Placeholder pydantic renders instead of a redacted credential value.
+_REDACTED_INPUT = "<redacted>"
+
+
+def _is_secret_field(name: str) -> bool:
+    """True when *name* (a field or dict key) identifies a credential value."""
+    lowered = name.lower()
+    return any(marker in lowered for marker in _SECRET_NAME_MARKERS)
+
+
+def _redact_error_input(value: object, loc: tuple[int | str, ...] = ()) -> object:
+    """Sanitize one ``input_value`` pydantic would echo in a validation error.
+
+    - a value under a secret-named key/field becomes ``<redacted>``;
+    - any string is passed through :func:`ytt.observability.redact_credentials`
+      so a credential-bearing URL (``user:pass@host`` — a ``YTT_WHISPER_URL``
+      with embedded basic-auth, a ``YTT_PROXY_URL``) survives only as
+      ``scheme://host:port``;
+    - dicts and lists are sanitized recursively; anything else is inert.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED_INPUT
+            if isinstance(key, str) and _is_secret_field(key)
+            else _redact_error_input(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_error_input(item) for item in value]
+    if isinstance(value, str):
+        if loc and isinstance(loc[-1], str) and _is_secret_field(loc[-1]):
+            return _REDACTED_INPUT
+        return redact_credentials(value)
+    return value
+
+
+def _redacted_validation_error(exc: ValidationError) -> ValidationError:
+    """Rebuild *exc* with every echoed ``input_value`` sanitized.
+
+    ``pydantic`` renders each validation error with the offending input — for
+    a ``mode="after"`` **model** validator failure that is the whole input
+    mapping, secrets included (``ValidationError`` is the exception a
+    CrashLooping pod prints at startup, i.e. exactly the surface plan
+    §Observability forbids leaking credentials onto). The rebuild keeps the
+    exception type, title, per-field locations, messages (so operators still
+    see which variable is at fault) and ``ctx`` — only the echoed values are
+    sanitized via :func:`_redact_error_input`.
+    """
+    line_errors: list[InitErrorDetails] = []
+    for err in exc.errors(include_url=False):
+        loc: tuple[int | str, ...] = err.get("loc", ())
+        detail: InitErrorDetails = {
+            "type": err["type"],
+            "loc": loc,
+            "input": _redact_error_input(err.get("input"), loc),
+        }
+        ctx = err.get("ctx")
+        if ctx is not None:
+            detail["ctx"] = ctx  # type: ignore[typeddict-item]
+        line_errors.append(detail)
+    return ValidationError.from_exception_data(exc.title, line_errors)
+
+
 class Settings(BaseSettings):
     """Runtime configuration (plan: Configuration table). Env prefix ``YTT_``."""
 
@@ -194,6 +280,21 @@ class Settings(BaseSettings):
         extra="ignore",
         validate_default=True,
     )
+
+    def __init__(self, **data: object) -> None:
+        """Construct with credential-safe validation errors.
+
+        Wraps pydantic's construction so a failure never echoes a credential
+        value: ``OAUTH_CLIENT_SECRET`` / ``JWT_SIGNING_SECRET`` (and any
+        secret-named input) render as ``<redacted>`` and credential-bearing
+        URL values lose their userinfo — see :func:`_redacted_validation_error`.
+        The raised exception is still a ``ValidationError`` carrying the same
+        locations and messages, so callers matching on either are unaffected.
+        """
+        try:
+            super().__init__(**data)
+        except ValidationError as exc:
+            raise _redacted_validation_error(exc) from None
 
     # --- authz / rate limits ---
     # Comma-separated Google account emails (the "sub" is the Google-verified

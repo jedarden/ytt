@@ -743,20 +743,27 @@ async def run_whisper_job(
             whisper_data: dict = resp.json()
 
         except httpx.TimeoutException as exc:
+            # The job message is verbatim-relayable (get_transcript_job returns
+            # it to the MCP client) — exception strings can quote the
+            # configured YTT_WHISPER_URL verbatim (creds included, same class
+            # of leak as the yt-dlp proxy quoting below), so sanitize before
+            # it lands on the job.
             raise YttError(
                 errors.ASR_FAILED,
-                f"Whisper service timed out: {exc}",
+                redact_credentials(f"Whisper service timed out: {exc}"),
             ) from exc
         except httpx.HTTPStatusError as exc:
             raise YttError(
                 errors.ASR_FAILED,
-                f"Whisper service error {exc.response.status_code}: "
-                f"{exc.response.text[:200]}",
+                redact_credentials(
+                    f"Whisper service error {exc.response.status_code}: "
+                    f"{exc.response.text[:200]}"
+                ),
             ) from exc
         except httpx.RequestError as exc:
             raise YttError(
                 errors.ASR_FAILED,
-                f"Whisper service request failed: {exc}",
+                redact_credentials(f"Whisper service request failed: {exc}"),
             ) from exc
         finally:
             if own_client:
@@ -818,7 +825,13 @@ async def run_whisper_job(
             video_id,
             "error",
             error_code=errors.ASR_FAILED,
-            message=f"Unexpected error during transcription: {exc}",
+            # Catch-all: any exception string lands on the verbatim-relayable
+            # job message (httpx.InvalidURL variants quote the request URL —
+            # creds included — and are ValueErrors, not RequestErrors, so
+            # they reach exactly this handler). Redact it.
+            message=redact_credentials(
+                f"Unexpected error during transcription: {exc}"
+            ),
         )
         log.exception("whisper_job_unexpected_error", video_id=video_id)
 

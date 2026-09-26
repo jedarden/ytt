@@ -23,7 +23,9 @@ The ``RedactionProcessor`` removes sensitive fields before any log record reache
 a renderer:
 
     Blocked field names (case-insensitive): sub, email, token, secret, key,
-        authorization, transcript, audio_path, proxy_url, allowed_subjects.
+        authorization, transcript, audio_path, proxy_url, allowed_subjects,
+        client_secret, oauth_client_secret, jwt_signing_secret,
+        jwt_signing_key.
     Blocked URL values: any field whose string value contains a credential-
         bearing URL (``user:pass@host`` — Webshare etc.) is sanitized via
         :func:`redact_credentials` — userinfo stripped, host:port kept —
@@ -149,7 +151,12 @@ ytt_canary_failures_total = Counter(
 # Structlog redaction filter
 # ---------------------------------------------------------------------------
 
-#: Field names (lowercase) whose values are always redacted.
+#: Field names (lowercase) whose values are always redacted. The secret-named
+#: entries cover the OAuth configuration credential pair's shapes
+#: (``client_secret``/``oauth_client_secret`` — ``YTT_OAUTH_CLIENT_SECRET`` —
+#: plus the FastMCP signing key under ``jwt_signing_secret``/``jwt_signing_key``):
+#: a plain secret string matches no URL pattern, so only the *name* rule can
+#: stop it from reaching a rendered log event.
 _REDACTED_FIELD_NAMES: frozenset[str] = frozenset(
     {
         "sub",
@@ -162,6 +169,10 @@ _REDACTED_FIELD_NAMES: frozenset[str] = frozenset(
         "audio_path",
         "proxy_url",
         "allowed_subjects",
+        "client_secret",
+        "oauth_client_secret",
+        "jwt_signing_secret",
+        "jwt_signing_key",
     }
 )
 
@@ -247,14 +258,21 @@ def configure_logging() -> None:
     ``structlog.stdlib.add_logger_name`` is intentionally excluded — it expects
     a stdlib ``logging.Logger`` and would fail with ``PrintLogger``.  The
     logger name is instead bound at get-logger time via ``structlog.get_logger(name)``.
+
+    ``redaction_processor`` runs **last** among the value-shaping processors —
+    after ``format_exc_info``/``StackInfoRenderer`` — so the ``exception`` and
+    ``stack_trace`` fields those produce (raw formatted tracebacks, whose
+    exception lines can quote a credential-bearing ``YTT_WHISPER_URL`` or
+    proxy verbatim) are scanned and sanitized too. Ahead of them it would
+    only ever see the not-yet-rendered ``exc_info`` object and miss the leak.
     """
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            redaction_processor,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            redaction_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(0),  # pass all levels

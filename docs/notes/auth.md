@@ -84,3 +84,29 @@ The notes below are the mechanics each rotation step leans on.
 **IdP outage at startup**: the pod exits and restarts into the same failure until the IdP answers (CrashLoopBackOff is the *correct* posture here). Recovery is restoring the IdP; no ytt change.
 
 **IdP outage mid-run**: nothing to do — sessions keep working; logins fail until the IdP returns. If the outage outlasts Authentik's refresh-token validity, users re-authenticate once it's back.
+
+## Credential redaction guarantee
+
+Two configuration inputs can carry a credential: `YTT_OAUTH_CLIENT_SECRET` (a
+plain secret string keying the upstream id-token verifier, plus
+`YTT_JWT_SIGNING_SECRET` alongside it) and `YTT_WHISPER_URL`, which may embed
+basic-auth userinfo (`http://user:pass@whisper.internal:8000`) the same way
+`YTT_PROXY_URL` can (the proxy's own redaction contract lives in
+[proxy-egress.md](proxy-egress.md) and `tests/unit/test_proxy.py`; this is the
+config-secret layer on top). Neither value may appear in any surface an
+operator or MCP client can see. The guarantee, and the mechanism enforcing it
+per surface — regression-pinned in `tests/unit/test_config_secret_redaction.py`:
+
+| Surface | Mechanism |
+|---|---|
+| Startup validation errors | `Settings.__init__` rebuilds every construction `ValidationError` with secret-named inputs rendered `<redacted>` and credential-bearing URL values userinfo-stripped (host:port kept) — pydantic echoes the offending input in each rendered error, and a model-level (`mode="after"`) failure echoes the *whole input mapping*, so without this a poisoned secret would print in the pod's CrashLoop log |
+| Logs | The structlog pipeline blocks secret-named fields (`client_secret`, `oauth_client_secret`, `jwt_signing_secret`, `jwt_signing_key`, …) by name and sanitizes any string value containing a credential-bearing URL — including the `exception`/`stack_trace` fields `format_exc_info` renders, which is why redaction runs *after* those processors |
+| Transcript-job failures | Every exception string that becomes a `WhisperJob.message` passes `redact_credentials` first — the whisper-service httpx handlers and the job's catch-all included (`httpx.InvalidURL` is a plain `ValueError`, so URL-quoting parse errors reach the catch-all) |
+| Exception responses | `get_transcript_job` relays the job message verbatim; the redaction above is what makes that relayable, and the tool response is scanned for canary values in the regression suite |
+| Metrics | Error paths bump counters with static taxonomy labels only (`error_code`, `reason`) — no config value ever becomes a label value; the exposition is scanned after each driven failure |
+| OAuth failures | Every upstream id-token rejection (bad signature, expired, `exp`-less, `nbf`-future, garbage) returns `None` and never echoes the verifying key in a return value, an exception, or a log line; `build_auth_provider`'s gate errors name the *variable*, never the *value* |
+
+The scan rule is deliberately host-preserving: `http://user:pass@host:port`
+renders as `http://host:port` everywhere, so a misconfigured URL stays
+diagnosable while its credential is unrecoverable from any rendered surface.
+
