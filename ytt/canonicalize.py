@@ -51,7 +51,15 @@ def canonicalize(url_or_id: str) -> str:
         return raw
 
     # Ensure urlparse sees a netloc even for scheme-less inputs like "youtu.be/ID".
-    parsed = urlparse(raw if "//" in raw else "https://" + raw)
+    try:
+        parsed = urlparse(raw if "//" in raw else "https://" + raw)
+    except ValueError:
+        # Fail closed: urlsplit raises ValueError on unbalanced ']' ("Invalid
+        # IPv6 URL") and on netloc characters that NFKC-normalize into URL
+        # delimiters. Both are malformed-input classes, not crashes — turn
+        # them into the stable taxonomy so no raw ValueError escapes the
+        # gate (docs/notes/input-security.md §Malformed input).
+        raise _fail(url_or_id, "malformed URL structure") from None
     host = parsed.netloc.lower()
     # Defensive: never trust embedded credentials in the host.
     host = host.rsplit("@", 1)[-1].split(":", 1)[0]
