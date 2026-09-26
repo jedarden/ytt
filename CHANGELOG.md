@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape as the parity guard). `deploy/*.md` joins the scan once the
   in-flight retention-policy doc it anticipates lands.
 
+## [0.2.24] — 2026-09-26
+
+> The 0.2.23 number was also consumed by a failed release attempt, and this
+> one was self-inflicted by exactly the drift class the release-metadata
+> guards enforce: the release commit bumped VERSION but left the `deploy/`
+> mirror at the burned 0.2.22 pin, and the ytt-build docker-build step runs
+> the unit suite with `deploy/` in the image context —
+> `test_manifests_pin_the_release_image` failed before kaniko pushed any
+> tag, so no 0.2.23 image ever existed (Docker Hub confirms: newest
+> published tag 0.2.21). declarative-config meanwhile rolled back to the
+> 0.2.21 pin to keep the cluster healthy, which drifted the mirror from the
+> applied manifests and opened the a68fd7c build circuit. This re-cut pins
+> the `deploy/` mirror in the same commit as everything else, so the build
+> gate and the mirror-parity guard agree for the first time since 0.2.22
+> burned. Same content as 0.2.23 would have shipped.
+
 ## [0.2.23] — 2026-09-26
 
 > The 0.2.22 number was consumed by a failed release attempt: the ytt-build
