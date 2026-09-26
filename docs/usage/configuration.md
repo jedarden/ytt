@@ -13,7 +13,7 @@ Every other variable has a working default.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `YTT_PUBLIC_URL` | *(required — no fallback)* | The public base URL of the server. Used as the OAuth resource/audience and in emitted metadata. Startup exits 1 if unset or empty, and validates shape when set: http(s) scheme, hostname present, no whitespace/query/fragment (a trailing slash is normalized away). **Set this to your own domain** before exposing the server — Anthropic's connector backend requires https in production (http is accepted for localhost/dev boots). |
-| `YTT_PATH_PREFIX` | `/ytt/` | The path prefix the server is mounted under. Must end with `/`. Startup exits 1 if the slash is missing. Must match the IngressRoute / reverse-proxy config. |
+| `YTT_PATH_PREFIX` | `/ytt/` | The path prefix the server is mounted under. Must end with `/` (and start with one). Startup exits 1 if the slash is missing — the join is plain concatenation, so a bad prefix would silently misroute every route. Unset resolves to this default; explicitly empty is a startup error, not a root mount. Must match the IngressRoute / reverse-proxy config. |
 
 ## OAuth provider (upstream IdP)
 

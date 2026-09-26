@@ -6,7 +6,9 @@ rest of the docs reference (`/metrics`, `/admin/egress`, canary metrics, the
 path-prefixed deployment); the behavior is pinned by
 `tests/unit/test_endpoint_contract.py` (HTTP-level, against the real ASGI app),
 the metrics label/cardinality bound by
-`tests/unit/test_metrics_cardinality.py`, and, for the OAuth flow itself,
+`tests/unit/test_metrics_cardinality.py`, the `YTT_PATH_PREFIX` startup
+validation and route-joining contract by
+`tests/unit/test_path_prefix_contract.py`, and, for the OAuth flow itself,
 `tests/unit/test_oauth_conformance.py`.
 
 Related: `docs/notes/auth.md` (identity, allowlist, rate limits),
@@ -16,8 +18,19 @@ Related: `docs/notes/auth.md` (identity, allowlist, rate limits),
 ## Route inventory
 
 All ytt-owned routes, as mounted by `mcp.http_app(path=prefix)` with
-`YTT_PATH_PREFIX=/ytt/` (the prefix must end with `/` — validated at startup;
-`Settings.route()` joins it with each custom-route segment):
+`YTT_PATH_PREFIX=/ytt/`. The prefix must start **and** end with `/`, validated
+at startup (fail-closed — `Settings` construction fails, so the server exits
+before binding): a prefix missing its trailing slash would glue each segment
+onto the mount path's last word (`/ytt` + `health` → `/ytthealth`), since the
+join is plain concatenation, so it is rejected rather than normalized. Unset
+resolves to the default `/ytt/`; an explicitly **empty** value is a startup
+error, not a root mount. `Settings.route()` joins the prefix with each
+custom-route segment without doubling or dropping the boundary slash, and the
+transport mounts at the bare prefix — the single trailing slash stripped
+exactly once (`/ytt/` → `/ytt`) — which is what keeps `POST /ytt` the
+transport and `/ytt/mcp` a 404 under any prefix. All of this is pinned by
+`tests/unit/test_path_prefix_contract.py`, including a full app rebuild under
+a non-default prefix:
 
 | Path | Method(s) | Auth | Purpose |
 |---|---|---|---|
