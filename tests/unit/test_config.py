@@ -358,6 +358,27 @@ def test_oidc_env_config_url_override(monkeypatch):
     assert s.oidc_config_url == "https://env.example.com/disc"
 
 
+def test_oidc_env_malformed_issuer_fails_startup(monkeypatch):
+    """The documented surface is the env var, not the kwarg: a malformed
+    YTT_OIDC_ISSUER fails Settings construction — i.e. startup, where the
+    error names the variable (self-hosting.md: it "refuses to boot"). The
+    kwarg-level parametrics below prove the rule; this proves it holds on
+    the path a real deployment takes."""
+    monkeypatch.setenv("YTT_OIDC_ISSUER", "http://idp.example.com/realms/ytt")
+    with pytest.raises(ValidationError, match="YTT_OIDC_ISSUER"):
+        Settings()
+
+
+def test_oidc_env_malformed_config_url_fails_startup(monkeypatch):
+    """Same startup gate for YTT_OIDC_CONFIG_URL — and the explicit value
+    survives the derivation validator (a derived URL would be well-formed,
+    so reaching the rejection proves the override was honored verbatim)."""
+    monkeypatch.setenv("YTT_OIDC_ISSUER", "https://idp.example.com/realms/ytt")
+    monkeypatch.setenv("YTT_OIDC_CONFIG_URL", "https://idp.example.com/d?x=1")
+    with pytest.raises(ValidationError, match="YTT_OIDC_CONFIG_URL"):
+        Settings()
+
+
 @pytest.mark.parametrize(
     "bad",
     [

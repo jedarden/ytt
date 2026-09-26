@@ -1,4 +1,5 @@
-"""Startup fail-closed gates for the OAuth client credential pair (bead ytt-62be628f).
+"""Startup fail-closed gates for the OAuth client credential pair (bead
+ytt-62be628f) and for the BYO-IdP issuer validation (bead ytt-c4205423).
 
 ``YTT_OAUTH_CLIENT_ID`` / ``YTT_OAUTH_CLIENT_SECRET`` are startup-required
 (docs/notes/auth.md): ytt must federate to a real upstream IdP and must never
@@ -167,6 +168,10 @@ _UVICORN_SERVED_MARKERS = ("Uvicorn running", "Application startup complete")
 #: is at fault.  The secret cases' message is fastmcp's (the verifier
 #: constructor's), so only the exit code is pinned there — it does not name
 #: ``YTT_OAUTH_CLIENT_SECRET``, a known rough edge recorded on the bead.
+#: The issuer case pins the documented startup validation of the BYO-IdP
+#: surface (bead ytt-c4205423): self-hosting.md promises a malformed
+#: ``YTT_OIDC_ISSUER`` (scheme, hostname, whitespace, query, fragment)
+#: "refuses to boot", and ``http://`` here is the scheme leg of that table.
 _FAIL_CLOSED_CASES = [
     (
         "missing-oauth-client-id",
@@ -176,6 +181,11 @@ _FAIL_CLOSED_CASES = [
     ("blank-oauth-client-id", {"YTT_OAUTH_CLIENT_ID": ""}, "YTT_OAUTH_CLIENT_ID is required"),
     ("missing-oauth-client-secret", {"YTT_OAUTH_CLIENT_SECRET": None}, None),
     ("blank-oauth-client-secret", {"YTT_OAUTH_CLIENT_SECRET": ""}, None),
+    (
+        "malformed-oidc-issuer",
+        {"YTT_OIDC_ISSUER": "http://idp.example.com/realms/ytt"},
+        "YTT_OIDC_ISSUER must use https://",
+    ),
 ]
 
 

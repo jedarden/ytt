@@ -748,3 +748,118 @@ class TestOidcEndpointConfiguration:
         provider = build_auth_provider(Settings(**self.BASE_SETTINGS))
         assert provider._token_validator.issuer == auth.AUTHENTIK_ISSUER
         assert captured["config_url"] == auth.AUTHENTIK_OIDC_CONFIG_URL
+
+    # -- the document served AT the configured URL is the one consumed ----
+    #
+    # _capture_discovery_url above passes every config_url through to the
+    # conftest stub, which ignores it and returns one fixed Authentik
+    # document — so those pins prove the URL *reaches* discovery, not that
+    # the discovery *document at that URL* drives the provider. A BYO-IdP
+    # self-hoster's document carries their endpoints; if the override
+    # stopped reflecting into what the proxy consumes, every test above
+    # would still pass while logins silently went to the reference IdP.
+    # The helper below dereferences config_url against a table so each
+    # test can serve a distinct document per URL (and a decoy at the
+    # non-selected path); an unexpected URL is a KeyError, i.e. a loud
+    # failure, never a silent fallback.
+
+    @staticmethod
+    def _serve_documents_per_url(monkeypatch, documents: dict) -> dict:
+        from fastmcp.server.auth.oidc_proxy import OIDCProxy
+
+        dereferenced: dict = {}
+
+        def serving(self, config_url, strict, timeout_seconds):
+            url = str(config_url)
+            dereferenced["config_url"] = url
+            return documents[url]
+
+        monkeypatch.setattr(OIDCProxy, "get_oidc_configuration", serving)
+        return dereferenced
+
+    @staticmethod
+    def _discovery_document(
+        authorization_endpoint: str, token_endpoint: str
+    ):
+        """A structurally valid OIDC discovery document (same shape the
+        conftest stub returns) whose endpoint pair differs per test."""
+        from fastmcp.server.auth.oidc_proxy import OIDCConfiguration
+
+        return OIDCConfiguration(
+            issuer="https://idp.example.com/realms/ytt",
+            authorization_endpoint=authorization_endpoint,
+            token_endpoint=token_endpoint,
+            jwks_uri="https://idp.example.com/realms/ytt/jwks",
+            response_types_supported=["code"],
+            subject_types_supported=["public"],
+            id_token_signing_alg_values_supported=["RS256"],
+        )
+
+    def test_override_document_flows_into_upstream_endpoints(self, monkeypatch):
+        """The RFC 8414/OIDC discovery document served AT the
+        YTT_OIDC_CONFIG_URL override is the one consumed: its
+        authorization/token endpoints become the upstream endpoints the
+        proxy redirects to and exchanges codes at — not the reference
+        Authentik's, and not a decoy document parked at the issuer-derived
+        standard path."""
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        override_url = "https://idp.example.com/static/discovery.json"
+        derived_url = (
+            "https://idp.example.com/realms/ytt/.well-known/openid-configuration"
+        )
+        override_auth = "https://idp.example.com/custom/as/authorization.endpoint"
+        override_token = "https://idp.example.com/custom/as/token.endpoint"
+        captured = self._serve_documents_per_url(
+            monkeypatch,
+            {
+                override_url: self._discovery_document(
+                    override_auth, override_token
+                ),
+                derived_url: self._discovery_document(
+                    "https://idp.example.com/decoy/authorize",
+                    "https://idp.example.com/decoy/token",
+                ),
+            },
+        )
+        provider = build_auth_provider(
+            Settings(
+                **self.BASE_SETTINGS,
+                oidc_issuer="https://idp.example.com/realms/ytt",
+                oidc_config_url=override_url,
+            )
+        )
+        assert captured["config_url"] == override_url
+        assert provider._upstream_authorization_endpoint == str(override_auth)
+        assert provider._upstream_token_endpoint == str(override_token)
+
+    def test_derived_document_flows_into_upstream_endpoints(self, monkeypatch):
+        """No override: the document at the issuer-derived standard path is
+        the one consumed (BYO-IdP with a standards-conformant IdP needs
+        only YTT_OIDC_ISSUER). Only the derived URL is in the table, so a
+        regression that dereferenced anything else fails loudly instead of
+        falling back to the reference Authentik."""
+        from ytt.auth import build_auth_provider
+        from ytt.config import Settings
+
+        derived_url = (
+            "https://idp.example.com/realms/ytt/.well-known/openid-configuration"
+        )
+        derived_auth = "https://idp.example.com/realms/ytt/protocol/auth"
+        derived_token = "https://idp.example.com/realms/ytt/protocol/token"
+        captured = self._serve_documents_per_url(
+            monkeypatch,
+            {
+                derived_url: self._discovery_document(derived_auth, derived_token),
+            },
+        )
+        provider = build_auth_provider(
+            Settings(
+                **self.BASE_SETTINGS,
+                oidc_issuer="https://idp.example.com/realms/ytt",
+            )
+        )
+        assert captured["config_url"] == derived_url
+        assert provider._upstream_authorization_endpoint == str(derived_auth)
+        assert provider._upstream_token_endpoint == str(derived_token)
