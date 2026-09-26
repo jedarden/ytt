@@ -83,7 +83,14 @@ def _make_info(subtitles: dict | None = None) -> dict:
         "upload_date": "20240101",
         "language": "en",
         "subtitles": subtitles
-        or {"en": [{"ext": "json3", "url": "https://x.test/en.json3"}]},
+        or {
+            "en": [
+                {
+                    "ext": "json3",
+                    "url": "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
+                }
+            ]
+        },
         "automatic_captions": {},
     }
 

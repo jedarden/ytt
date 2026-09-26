@@ -30,9 +30,11 @@ the only interpolated part is a proven 11-char `[A-Za-z0-9_-]` string — no
 metacharacter, whitespace, unicode lookalike, or userinfo payload can alter
 the scheme, host, port, or path, or add a query parameter. The caller's URL
 is not *sanitized*; it is **discarded** and the id is re-embedded into a
-fresh, fully literal URL. (Only the caption path additionally opens a second
-URL — the json3 track URL — which yt-dlp itself extracted from that same
-canonical video's metadata, not from caller input.)
+fresh, fully literal URL. (The caption and audio paths additionally follow
+URLs yt-dlp itself extracted from that canonical video's metadata — the json3
+track URL, the media format URLs, and their redirects. Those derived URLs are
+a separate surface with its own scheme/host allowlist, enforced at dial,
+redirect, and pre-download layers: see `derived-url-policy.md`.)
 
 ## The gate's position in the request path
 

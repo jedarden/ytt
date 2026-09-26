@@ -44,6 +44,14 @@ class NoCaptionsError(YttError):
 
 # --- error_code constants (the stable enum) ---------------------------------
 BAD_URL = "bad_url"
+# A URL extracted from a video's yt-dlp metadata (caption track, media
+# format, or a redirect target reached from either) violated the derived-URL
+# scheme/host allowlist — docs/notes/derived-url-policy.md. Unlike bad_url
+# this is never caller-fixable: the caller's input was fine, the video's
+# metadata tried to send our egress somewhere it must not go. Never routed
+# into the Whisper ASR fallback — that would download audio from the very
+# video whose metadata misbehaved.
+BAD_METADATA_URL = "bad_metadata_url"
 PRIVATE = "private"
 MEMBERS_ONLY = "members_only"
 AGE_RESTRICTED = "age_restricted"

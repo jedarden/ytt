@@ -32,8 +32,10 @@ import httpx
 import structlog
 import yt_dlp
 import yt_dlp.utils
+from yt_dlp.networking.exceptions import RequestError
 
 from ytt import errors
+from ytt.derived_url import audit_audio_info_urls
 from ytt.errors import YttError
 from ytt.fetch import (
     YDL_EXTRACTOR_ARGS,
@@ -306,12 +308,22 @@ def _do_download_audio(
                     cap_bytes=cap,
                 )
 
+            # SSRF containment (docs/notes/derived-url-policy.md): every URL
+            # the downloader is about to resolve is yt-dlp *metadata*, not
+            # caller input — audit it against the derived-URL allowlist
+            # before any byte is dialed, so a lying metadata response is a
+            # clean pre-download rejection, never a mid-stream abort.
+            # (Dial- and redirect-time gates are armed process-wide at
+            # ytt.fetch import; they cover this download's second internal
+            # metadata extraction, which no caller ever sees.)
+            audit_audio_info_urls(info, what="audio download")
+
             # Now download (progress hook will abort if over cap mid-stream)
             ydl.download([url])
 
     except YttError:
         raise
-    except yt_dlp.utils.DownloadError as exc:
+    except (yt_dlp.utils.DownloadError, RequestError) as exc:
         # yt-dlp error strings can quote the configured proxy URL verbatim
         # (creds included) — sanitize before they become a relayable message.
         code = classify_ydl_error(str(exc))

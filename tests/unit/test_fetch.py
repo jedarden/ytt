@@ -76,7 +76,10 @@ def _make_settings(**kwargs):
         return Settings()
 
 
-def _make_format_list(ext: str = "json3", url: str = "http://example.com/caps.json3"):
+def _make_format_list(
+    ext: str = "json3",
+    url: str = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
+):
     return [{"ext": ext, "url": url}]
 
 
@@ -318,10 +321,13 @@ class TestGetAvailableLangs:
 # _select_track — language selection logic
 # ---------------------------------------------------------------------------
 
-MANUAL_EN_URL = "http://example.com/manual_en.json3"
-AUTO_EN_URL = "http://example.com/auto_en.json3"
-MANUAL_FR_URL = "http://example.com/manual_fr.json3"
-AUTO_FR_URL = "http://example.com/auto_fr.json3"
+# Track URLs are yt-dlp *metadata* (docs/notes/derived-url-policy.md) —
+# fixtures use real-shaped allowlisted URLs, since _do_fetch now validates
+# the selected track against the derived-URL policy before dialing it.
+MANUAL_EN_URL = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en"
+AUTO_EN_URL = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&kind=asr"
+MANUAL_FR_URL = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=fr"
+AUTO_FR_URL = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=fr&kind=asr"
 
 
 def _manual(url: str) -> list[dict]:

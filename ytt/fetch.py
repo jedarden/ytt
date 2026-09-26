@@ -51,8 +51,10 @@ from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 import yt_dlp
 import yt_dlp.utils
+from yt_dlp.networking.exceptions import RequestError
 
 from ytt import errors
+from ytt.derived_url import POLICY_VIOLATION_MARK, install, validate_derived_url
 from ytt.errors import NoCaptionsError, YttError
 from ytt.models import Segment
 from ytt.observability import redact_credentials
@@ -62,6 +64,17 @@ if TYPE_CHECKING:
     from ytt.config import Settings
 
 T = TypeVar("T")
+
+# ---------------------------------------------------------------------------
+# Derived-URL redirect guard (docs/notes/derived-url-policy.md)
+# ---------------------------------------------------------------------------
+
+#: Arm the derived-URL redirect guard for this process: every redirect hop
+#: yt-dlp follows — on the caption path, the audio path, or the canary — is
+#: validated against the derived-URL allowlist before it is dialed. Idempotent;
+#: the initial derived URLs (json3 track / media formats) are validated
+#: explicitly at their call sites below.
+install()
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +143,10 @@ YDL_BASE_OPTS: dict = {
 #: Order matters: more specific patterns first.  This list is a maintenance
 #: point pinned to ``yt-dlp==2025.5.22``; update on version bumps.
 SEED_MAP: list[tuple[str, str]] = [
+    # The derived-URL redirect guard raises a yt-dlp RequestError whose
+    # message carries this marker — classify it before any generic seed can
+    # (docs/notes/derived-url-policy.md).
+    (POLICY_VIOLATION_MARK, errors.BAD_METADATA_URL),
     ("Private video", errors.PRIVATE),
     ("members-only", errors.MEMBERS_ONLY),
     ("Sign in to confirm your age", errors.AGE_RESTRICTED),
@@ -358,12 +375,19 @@ def _do_fetch(
             available = get_available_langs(info)
             track_url, kind, served_lang, fallback_msg = _select_track(info, lang)
 
+            # SSRF containment: the track URL is yt-dlp *metadata*, not caller
+            # input — validate it against the derived-URL scheme/host
+            # allowlist before it is dialed
+            # (docs/notes/derived-url-policy.md; redirect hops are covered by
+            # the guard installed at import, above).
+            track_url = validate_derived_url(track_url, what="caption track")
+
             # Fetch json3 body in-process (avoids a second YDL construction)
             resp = ydl.urlopen(track_url)
             raw_bytes = resp.read()
     except YttError:
         raise
-    except yt_dlp.utils.DownloadError as exc:
+    except (yt_dlp.utils.DownloadError, RequestError) as exc:
         # yt-dlp error strings can quote the configured proxy URL verbatim
         # (creds included) — sanitize before they become a relayable message.
         code = classify_ydl_error(str(exc))

@@ -397,12 +397,16 @@ class TestInstalledDistributionSurface:
 #: (``canary.py`` — the same caption fetch, watched) may use yt-dlp; the
 #: egress probe (``selftest.py``) is the one sanctioned non-YouTube httpx
 #: caller (ipinfo.io — outside the transcript paths, see
-#: FORBIDDEN_EGRESS_HOST_PATTERNS).
+#: FORBIDDEN_EGRESS_HOST_PATTERNS). ``derived_url.py`` dials nothing of its
+#: own — it wraps yt-dlp's request entry points to enforce the derived-URL
+#: allowlist (docs/notes/derived-url-policy.md) on the egress the rows
+#: above dial.
 NETWORK_IMPORTS_BY_FILE: dict[str, set[str]] = {
     "fetch.py": {"yt_dlp"},
     "whisper.py": {"yt_dlp", "httpx"},
     "canary.py": {"yt_dlp"},
     "selftest.py": {"httpx"},
+    "derived_url.py": {"yt_dlp"},
 }
 
 #: Stdlib modules that can open connections and must never be imported by
