@@ -30,6 +30,11 @@ metadata:
     app.kubernetes.io/name: ytt
     app.kubernetes.io/component: alerts
     prometheus: kube-prometheus
+    # This stack's Prometheus CR ruleSelector matches release= — without it the
+    # operator never loads these rules at all (they were absent from
+    # /api/v1/rules until 2026-09-25, so every Ytt* alert was inert regardless
+    # of series presence). Mirror ibkr-mcp's rule, the working precedent.
+    release: kube-prometheus-stack-ardenone-cluster
     role: alert-rules
 spec:
   groups:

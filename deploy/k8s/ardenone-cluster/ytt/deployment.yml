@@ -5,8 +5,9 @@
 #
 # Image: ronaldraygun/ytt (Docker Hub, fleet-standard registry — same as ibkr-mcp).
 # Pinned to a semver tag (k8s/CLAUDE.md Rule #8: never :latest, never bare SHA).
-# 0.2.21 is the first image carrying the per-path canary metrics (6b1c3de), which
-# makes the three per-path YttCanary* alerts live (see canary-deployment.yml).
+# 0.2.22 is the first image carrying the derived-URL SSRF allowlist (b65b494);
+# 0.2.21 added the per-path canary metrics (6b1c3de) that make the three
+# per-path YttCanary* alerts live (see canary-deployment.yml).
 # Pull via docker-hub-registry (auto-reflected into this namespace by kubernetes-reflector).
 #
 # Egress: ardenone-cluster is hosted on a residential connection, so yt-dlp
@@ -55,7 +56,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt
-          image: ronaldraygun/ytt:0.2.21
+          image: ronaldraygun/ytt:0.2.22
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

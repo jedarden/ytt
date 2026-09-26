@@ -16,9 +16,10 @@
 #             failures) — prometheusrule.yml; response procedure:
 #             deploy/CANARY-MONITORING-RUNBOOK.md
 #   scrape:   service/ytt-canary port metrics, via servicemonitor.yml
-# Image: ronaldraygun/ytt:0.2.21 — first image carrying the per-path metrics
-# (6b1c3de). Pinned semver, no :latest.
-#   Per-path metrics note: live since this pin — the
+# Image: ronaldraygun/ytt:0.2.22 — first image carrying the derived-URL SSRF
+# allowlist (b65b494); per-path metrics since 0.2.21 (6b1c3de). Pinned semver,
+# no :latest.
+#   Per-path metrics note: live since 0.2.21 — the
 #   ytt_canary_probe_* / ytt_canary_probes_total{probe,outcome} series are
 #   exported by this image and the three per-path alerts evaluate real data
 #   (they self-guard on absence, so they could not fire against 0.2.20);
@@ -63,7 +64,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt-canary
-          image: ronaldraygun/ytt:0.2.21
+          image: ronaldraygun/ytt:0.2.22
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics
