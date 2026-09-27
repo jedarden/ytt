@@ -131,7 +131,13 @@ Like `SEED_MAP`, the gates reach into yt-dlp internals and are pinned to the
 - `yt_dlp.YoutubeDL.urlopen` (public, stable signature: `str | networking.Request`);
 - `yt_dlp.networking._urllib.RedirectHandler.redirect_request`;
 - `yt_dlp.networking._requests.RequestsSession.rebuild_method` (optional
-  backend — absent here, its gate is skipped by design).
+  backend — absent here, its gate is skipped by design);
+- `YoutubeDL._request_director` and the handlers' `_make_sslcontext` — not a
+  gate, but the TLS-verification backstop §Residual risk rests on: leg J
+  builds the real director over this project's options and asserts every
+  handler's context does hostname verification with `CERT_REQUIRED`. A bump
+  that renames either fails loudly here rather than letting the acceptance
+  silently lose its second leg.
 
 On a yt-dlp bump, verify all three: a renamed hook fails loudly (AttributeError
 at `ytt.fetch` import, or a failed identity assertion in
@@ -140,13 +146,85 @@ process.
 
 ## Known limitations (deliberate scope)
 
-- **DNS rebinding on allowlisted hosts**: the gate constrains scheme/host
-  strings, not what `*.googlevideo.com` resolves to at dial time. A compromise
-  of YouTube's own DNS/CDN is out of scope — the same trust the input gate
-  places in `www.youtube.com`.
 - **External downloaders** (ffmpeg/aria2c) bypass `ydl.urlopen`. None is
   configured: the paths use yt-dlp's native downloaders only.
 - **The allowlist is YouTube-controlled** by construction: metadata says where
   the media lives; the policy says it must live on a YouTube-controlled host
   over TLS. Widening it is a code review event, not a config change — there is
   deliberately no environment knob.
+
+## Residual risk — DNS rebinding on allowlisted hosts: ACCEPTED
+
+The gate is name-based by construction (§The policy: "There is no DNS
+resolution in the gate"), so it constrains what a derived URL *names*, not
+what that name *resolves to* at dial time. An allowlisted name — say
+`rr3---sn-x.googlevideo.com` — resolving through hostile or poisoned DNS to
+loopback, an RFC1918 address, or the cloud-metadata endpoint would pass all
+six rules and be dialed at the poisoned address. That is this surface's one
+residual, and it is **accepted deliberately** (decision bead `ytt-e1036a3b`,
+2026-09-27 — the recorded-decision shape of http-endpoints.md's accepted
+metrics exposure, `ytt-8303946b`, and auth.md's declined WAF allowlist,
+`ytt-761fb151`). Pinned by `tests/unit/test_derived_url.py` leg J.
+
+The acceptance rests on the attack needing *both* of two independent legs:
+
+1. **Resolution control** — make the allowlisted name resolve where the
+   attacker wants (compromised resolver, cache poisoning). Real, and
+   invisible to a name-based gate.
+2. **Certificate possession** — whatever answers at the poisoned address
+   must complete the TLS handshake *for the allowlisted name*. The process
+   dials with certificate verification armed (`check_hostname=True`,
+   `CERT_REQUIRED` on every request handler yt-dlp builds for this
+   project's options — asserted against the live director by leg J — and
+   nothing in this repo sets `nocheckcertificate`) and on port 443 (rule 5
+   allows no other). The cloud-metadata endpoints cannot clear this leg at
+   all: they are plaintext-HTTP services on port 80, with certificates for
+   their own names if any, never for `*.googlevideo.com`.
+
+Leg 2 collapses the classic rebinding escalation. The allowlist is closed
+under attacker registration: every entry lives under a registry YouTube
+controls, so no domain-validation path can hand an attacker a legitimate
+certificate for any allowlisted name. Holding one requires CA misissuance
+for a Google-controlled name or compromise of Google's own keys/infra — at
+which point the attacker can already impersonate YouTube *content* (serve a
+lying json3 body or media stream from a public address they own), a
+strictly broader compromise than steering the same dial into private
+address space. The SSRF corner is the least of that incident, and the
+resulting trust is the same one the input gate extends to
+`https://www.youtube.com/watch?v=<id>` on every request — and every HTTPS
+client on the internet extends to every name it dials. Note also what the
+poisoned dial would even be worth: the dials carry no ytt credentials
+(cookies are disabled, §The policy rule 4 bans userinfo), so the target
+would have to be an internal service reachable from the pod — exactly the
+target set leg 2 walls off.
+
+**Why the mitigation was declined.** A post-resolution IP check at
+`validate_derived_url` — the one choke point all three layers delegate to —
+was considered and rejected:
+
+- *It is check-then-dial TOCTOU theater.* The gate's resolution and the
+  dial's resolution are two independent lookups; pinning the actual peer
+  requires resolving in the gate and forcing the connection onto that IP —
+  a dial *rewrite*, which this policy forbids by construction (§The policy:
+  "validated, never rewritten") — or hooking the request backends' socket
+  layer, a deeper pinned-internals surface (§Pinned yt-dlp internals) on a
+  fast-moving dependency.
+- *It breaks the gate's deliberate shape* — pure, offline, a pure function
+  of the string (pinned). The audio audit validates every format and
+  fragment URL, dozens per request, most of which are never dialed; every
+  validation would become a DNS side effect, and resolver flakiness would
+  masquerade as `bad_metadata_url` or demand a new error path.
+- *It would not bind the documented proxy fallback.* With `YTT_PROXY_URL`
+  set (`docs/notes/proxy-egress.md`) the *proxy's* resolver answers the
+  dial, so a local
+  pre-dial check would validate a different resolution than the one that
+  matters. Production runs proxy-unset by design, but the fallback is a
+  supported posture — and through a CONNECT tunnel the TLS backstop above
+  holds unchanged, which is the symmetry that makes acceptance stable.
+
+**Revisit triggers:** widening the allowlist to any name an attacker can
+register under — a shared-hosting/public-suffix-style entry would hand them
+a legitimate certificate and re-open leg 2 (`test_allowlist_shape_is_pinned`
+is the tripwire); or arming an external downloader that dials without the
+TLS backstop (§Known limitations). Otherwise the residual is recorded here
+and carried.

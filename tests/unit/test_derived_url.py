@@ -22,6 +22,13 @@ canonical form:
   Whisper ASR fallback, which would download audio from the very video whose
   metadata misbehaved): the server surfaces it as a plain fetch error and
   starts no job.
+- **The accepted residual** (leg J, decision bead ``ytt-e1036a3b``, policy
+  doc § Residual risk) — the name-based gate never resolves DNS, so an
+  allowlisted name resolving through hostile DNS to private/metadata space
+  passes the gate. Accepted, because the dial's TLS verification is the
+  second leg an attacker would also need and cannot have: these tests pin
+  the gate's no-resolution shape, the verification-armed request director,
+  and the doc's record of the decision.
 
 All tests are offline: no network, no DNS, no extraction.
 """
@@ -29,6 +36,7 @@ All tests are offline: no network, no DNS, no extraction.
 from __future__ import annotations
 
 import socket
+import ssl
 import urllib.request as urllib_request
 from pathlib import Path
 from typing import Any
@@ -57,7 +65,7 @@ from ytt.derived_url import (
     validate_derived_url,
 )
 from ytt.errors import BAD_METADATA_URL, YttError
-from ytt.fetch import SEED_MAP, classify_ydl_error, fetch_transcript
+from ytt.fetch import SEED_MAP, YDL_BASE_OPTS, classify_ydl_error, fetch_transcript
 from ytt.whisper import _do_download_audio
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -849,3 +857,90 @@ def test_policy_doc_names_the_contract():
     assert "docs/notes/derived-url-policy.md" in (
         REPO_ROOT / "ytt/errors.py"
     ).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Leg J — the DNS-rebinding residual is ACCEPTED, with its backstops pinned
+# (decision bead ytt-e1036a3b; docs/notes/derived-url-policy.md § Residual risk)
+# ---------------------------------------------------------------------------
+
+
+def test_allowlisted_dial_decision_is_made_without_dns(monkeypatch):
+    """The residual is real *by design*: the gate names, it never resolves.
+
+    An allowlisted host passing the gate — and the audio audit sweeping its
+    manifest/fragment surface — while getaddrinfo is rigged to explode
+    proves the accept decision was made offline, from the string alone.
+    The doc's "There is no DNS resolution in the gate" is a policy
+    commitment, and this is its enforcement point: a future validator that
+    "hardens" itself into resolving fails here, which is the recorded
+    decision (§ Residual risk, declined mitigation) being defended.
+    """
+
+    def _no_resolution(*a: Any, **k: Any):
+        raise AssertionError("the derived-URL policy resolved DNS")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _no_resolution)
+    assert validate_derived_url(BENIGN_FMT_URL, what="probe") is BENIGN_FMT_URL
+    audit_audio_info_urls(
+        {
+            "duration": 600,
+            "formats": [
+                {
+                    "url": BENIGN_FMT_URL,
+                    "manifest_url": "https://manifest.googlevideo.com/api/manifest/dash/id/x",
+                    "fragment_base_url": "https://rr3---sn-x.googlevideo.com/videoplayback/",
+                    "fragments": [{"url": "https://rr3---sn-x.googlevideo.com/seg"}],
+                }
+            ],
+        },
+        what="audio download",
+    )  # must not raise — and must not have resolved anything above
+
+
+def test_tls_verification_is_armed_on_every_request_handler():
+    """The acceptance's load-bearing second leg: the process dials with
+    certificate verification ON for the dialed (allowlisted) name.
+
+    Builds the real request director over the real production opts and
+    asserts every handler's SSL context does hostname verification with
+    ``CERT_REQUIRED`` — what makes a poisoned resolution of an allowlisted
+    name unusable without a CA-valid certificate for it (§ Residual risk,
+    leg 2). A yt-dlp bump that drops ``_make_sslcontext`` from the Urllib
+    handler, or a ``nocheckcertificate`` sneaking into any option dict
+    (whisper/canary build theirs inline — hence the source sweep), fails
+    here instead of silently disarming the recorded acceptance.
+    """
+    assert "nocheckcertificate" not in YDL_BASE_OPTS
+    for path in sorted((REPO_ROOT / "ytt").glob("*.py")):
+        assert "nocheckcertificate" not in path.read_text(encoding="utf-8"), (
+            f"{path.name} sets nocheckcertificate — the § Residual risk "
+            f"acceptance no longer holds"
+        )
+
+    with yt_dlp.YoutubeDL(dict(YDL_BASE_OPTS)) as ydl:
+        handlers = ydl._request_director.handlers
+        assert "Urllib" in handlers  # the backend this project runs
+        asserted: list[str] = []
+        for name, handler in handlers.items():
+            make_ctx = getattr(handler, "_make_sslcontext", None)
+            if make_ctx is None:
+                continue
+            ctx = make_ctx()
+            assert ctx.check_hostname is True, f"{name}: check_hostname off"
+            assert ctx.verify_mode == ssl.CERT_REQUIRED, f"{name}: verify_mode"
+            asserted.append(name)
+    assert asserted, "no handler exposes _make_sslcontext — pin is stale"
+
+
+def test_policy_doc_records_the_rebinding_decision():
+    """The acceptance lives in the owning doc with the decision bead named —
+    the house shape (http-endpoints.md's ytt-8303946b, auth.md's
+    ytt-761fb151). An edited-away decision is a test failure here."""
+    doc = (REPO_ROOT / "docs/notes/derived-url-policy.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Residual risk" in doc
+    assert "ytt-e1036a3b" in doc  # the decision bead this leg pins
+    assert "ACCEPTED" in doc
+    assert "nocheckcertificate" in doc  # the backstop the acceptance names
