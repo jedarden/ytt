@@ -14,14 +14,14 @@ OAuth proves a caller is **authenticated** (it's a real, signed-in identity); it
 Authorization is therefore a separate, required control:
 
 - **Subject allowlist (`YTT_ALLOWED_SUBJECTS`)** checked on every tool call after token validation; non-allowlisted subject → `403`. **Empty allowlist = deny all** (fail-closed).
-- **Dynamic Client Registration disabled** for personal v1 (DCR lets anyone register). Authorize on the token **subject**, not the client name — the Claude apps register as `client_name: "claudeai"`, so never allowlist by an exact `"Claude"` string.
+- **DCR on ytt's client-facing AS is redirect-pinned, not open** — ytt issues codes only to Claude's own callback URIs (`CLAUDE_REDIRECT_URIS` in `ytt/auth.py`; see the registration bullet below), so a registration alone grants nothing. Authorize on the token **subject**, not the client name — the Claude apps register as `client_name: "claudeai"`, so never allowlist by an exact `"Claude"` string.
 - **Per-subject rate limiting** + Whisper quota so even an allowlisted caller can't exhaust the home IP / shared Whisper service.
 - **Job ownership** — a Whisper ASR job's poll handle is bound to the subject that started it; see [§Job ownership](#job-ownership--whisper-asr-handles-are-per-subject) below.
 
 ## What this means for the build
 
 - Implement the OAuth 2.1 + PKCE flow the MCP spec mandates (authorization + protected-resource metadata discovery, token issuance, **audience-bound** bearer-token validation on every MCP request).
-- Use the **manual Client ID / Secret** (or FastMCP self-issued tokens) registration path for personal use; **do not** enable open DCR. If DCR is ever needed for sharing, gate it behind a pre-shared registration token.
+- Register the **manual Client ID / Secret** pair on the upstream IdP ([self-hosting.md Step 4](../usage/self-hosting.md#step-4--register-the-oauth-client-on-your-idp)) — the only registration path for personal use. **FastMCP self-issued tokens are not supported**: the ADR-001 design (ytt as its own OAuth AS, tokens issued with no upstream login) was never implemented and was superseded by ADR-003's `OIDCProxy` federation — `build_auth_provider` fail-closes at startup without `YTT_OAUTH_CLIENT_ID`/`YTT_OAUTH_CLIENT_SECRET` (pinned by `tests/unit/test_oauth_startup_fail_closed.py`), so there is no self-issued fallback to enable.
 - Every tool call must pass **both** a valid validated access token (AuthN) **and** the subject allowlist (AuthZ).
 - Inbound IP-allowlisting of Anthropic's egress ranges (`160.79.104.0/21`, `2607:6bc0::/48`) can only live at the **Cloudflare edge** (the origin pod can't see the client IP behind the tunnel) — as a **WAF custom rule**, never Access (an identity gate that would challenge Anthropic's unattended backend). It is **optional defense-in-depth, not a substitute for the subject allowlist**, and is **deliberately not adopted for now** — declined with the full rationale and adoption recipe on bead `ytt-761fb151` (no agent-editable WAF credential; zone-wide `http_request_firewall_custom` phase ownership risks unverifiable clobber on the shared host; the egress range drifts). Adopt only if the operator explicitly opts in, per `docs/plan/plan.md` ("only if explicitly chosen").
 

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **auth.md's registration guidance reconciled with the shipped OIDC
+  federation** (bead `ytt-4283b5b5`). `docs/notes/auth.md` still offered
+  "(or FastMCP self-issued tokens)" as an alternative registration path —
+  the ADR-001 design that was never implemented and that ADR-003's
+  `OIDCProxy` federation superseded; `build_auth_provider` fail-closes at
+  startup without `YTT_OAUTH_CLIENT_ID`/`YTT_OAUTH_CLIENT_SECRET`, so no
+  such path exists. The bullet now states the upstream-IdP registration as
+  the only personal-use path and names self-issued tokens as unsupported
+  (with the supersession history and the fail-closed pin), and the stale
+  "Dynamic Client Registration disabled" premise now describes what ships:
+  DCR on the client-facing AS is redirect-pinned (`CLAUDE_REDIRECT_URIS`),
+  not open. New guard `tests/unit/test_auth_docs_drift.py` keeps the
+  reconciliation from reverting: no guidance doc may offer the option,
+  auth.md's supersession statement must stay intact, and docs and
+  `ytt/auth.py`'s gate must keep rejecting the same fallback.
 - **The canary probe loop probes every configured video each cycle**
   (bead `ytt-1b1c6ac4`). `run_probe_loop` previously walked
   `CANARY_VIDEO_IDS` as a short-circuit ladder and stopped at the first
