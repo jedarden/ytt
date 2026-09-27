@@ -37,6 +37,13 @@ Coverage:
 - _do_download_audio: duration backstop — over-cap video refused before download
 - _do_download_audio: duration backstop — within-cap video downloads
 - _do_download_audio: duration backstop — unknown duration falls through
+- _do_download_audio: size cap — projected size over cap refused before download
+- _do_download_audio: size cap — scratch free space lowers the effective cap
+- _do_download_audio: size cap — free space above the configured cap keeps it
+- _do_download_audio: size cap — statvfs failure falls back to the configured cap
+- _do_download_audio: size cap — progress hook aborts midstream on overrun
+- _do_download_audio: size cap — midstream overrun classified too_long_for_asr
+- _do_download_audio: size cap — within-cap size downloads normally
 - _sweep_video_scratch: deletes only this video's partial files
 - _sweep_video_scratch: missing scratch dir is not an error
 - run_whisper_job: failed download sweeps the partial {video_id}.* file
@@ -1078,6 +1085,196 @@ class TestDurationBackstop:
                     max_asr_duration_sec=1200,
                 )
         assert "duration" in exc_info.value.message.lower()
+
+
+class TestSizeCapGuard:
+    """The size half of the inbound caps (retention-policy.md §3): the
+    projected download size is checked against
+    ``min(YTT_MAX_AUDIO_BYTES, scratch free space)`` *before* any bytes are
+    downloaded, and a progress hook aborts mid-stream on overrun — work that
+    never starts needs no retention."""
+
+    #: 1 TiB of free space — large enough that the configured cap alone binds
+    #: when statvfs is patched with this, making the effective cap
+    #: deterministic regardless of the host the suite runs on.
+    HUGE_FREE = 1 << 40
+
+    @staticmethod
+    def _statvfs(free_bytes: int) -> MagicMock:
+        return MagicMock(f_bavail=free_bytes // 4096, f_frsize=4096)
+
+    def test_projected_size_over_cap_refused_before_download(
+        self, tmp_path: Path
+    ) -> None:
+        """A video whose projected audio exceeds the configured cap is refused
+        too_long_for_asr before ydl.download runs — no bytes reach scratch."""
+        scratch = tmp_path / "scratch"
+        info = {"duration": 600, "filesize": 600 * 1024 * 1024}  # > 500 MiB cap
+        stub = _stub_ydl_for_audio(info=info)
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL", return_value=stub),
+            patch("os.statvfs", return_value=self._statvfs(self.HUGE_FREE)),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+        # The refusal names the effective cap and where it comes from.
+        assert "min(YTT_MAX_AUDIO_BYTES" in exc_info.value.message
+        # The download stage was never entered.
+        stub.__enter__.return_value.download.assert_not_called()
+        assert (
+            not scratch.exists() or list(scratch.iterdir()) == []
+        ), "a pre-download refusal must leave zero bytes in scratch"
+
+    def test_scratch_free_space_lowers_the_effective_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """Disk pressure on YTT_SCRATCH_DIR participates in the cap: a file
+        under YTT_MAX_AUDIO_BYTES but over the scratch volume's free space is
+        refused, because a download that would fill the volume is exactly the
+        pressure the retention policy exists to prevent."""
+        scratch = tmp_path / "scratch"
+        free = 10 * 1024 * 1024  # 10 MiB free — the binding constraint
+        info = {"duration": 600, "filesize": 20 * 1024 * 1024}  # < 500 MiB cap
+        stub = _stub_ydl_for_audio(info=info)
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL", return_value=stub),
+            patch("os.statvfs", return_value=self._statvfs(free)),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+        assert f"{free:,}" in exc_info.value.message  # the free-space cap
+        stub.__enter__.return_value.download.assert_not_called()
+
+    def test_free_space_above_configured_cap_keeps_configured_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """min() takes the *smaller* side: plentiful scratch does not raise
+        the configured YTT_MAX_AUDIO_BYTES."""
+        scratch = tmp_path / "scratch"
+        info = {"duration": 600, "filesize": 600 * 1024 * 1024}  # > 500 MiB
+        stub = _stub_ydl_for_audio(info=info)
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL", return_value=stub),
+            patch("os.statvfs", return_value=self._statvfs(self.HUGE_FREE)),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+        assert f"{500 * 1024 * 1024:,}" in exc_info.value.message
+
+    def test_statvfs_failure_falls_back_to_configured_cap(
+        self, tmp_path: Path
+    ) -> None:
+        """statvfs is an optimization, not a dependency: when it fails the
+        configured cap still binds (and a within-cap size still downloads)."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / f"{VIDEO_ID}.m4a").write_bytes(b"audio")
+        stub = _stub_ydl_for_audio(info={"duration": 600, "filesize": 600 * 1024 * 1024})
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL", return_value=stub),
+            patch("os.statvfs", side_effect=OSError("statvfs failed")),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+
+    def test_progress_hook_aborts_on_midstream_overrun(
+        self, tmp_path: Path
+    ) -> None:
+        """The registered progress hook raises when live bytes pass the cap,
+        and only when both the status is downloading *and* the bytes exceed
+        it — a size yt-dlp lied about at extraction time is still bounded."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / f"{VIDEO_ID}.m4a").write_bytes(b"audio")  # stub output file
+        captured: dict = {}
+
+        def _capture(opts: dict) -> Any:
+            captured.update(opts)
+            return _stub_ydl_for_audio(info={"id": VIDEO_ID})  # no size info
+
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL", side_effect=_capture),
+            patch("os.statvfs", return_value=self._statvfs(self.HUGE_FREE)),
+        ):
+            _do_download_audio(
+                VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                max_asr_duration_sec=1200,
+            )
+
+        hook = captured["progress_hooks"][0]
+        cap = 500 * 1024 * 1024
+        with pytest.raises(yt_dlp.utils.DownloadError, match="audio_too_large"):
+            hook({"status": "downloading", "downloaded_bytes": cap + 1})
+        # Under the cap, and non-downloading statuses: no abort.
+        hook({"status": "downloading", "downloaded_bytes": cap - 1})
+        hook({"status": "finished", "downloaded_bytes": cap + 1})
+
+    def test_midstream_overrun_surfaces_as_relayable_too_long(
+        self, tmp_path: Path
+    ) -> None:
+        """End to end: a download that blows through the cap mid-stream is
+        classified too_long_for_asr — the stable, relayable code — not an
+        opaque yt-dlp failure."""
+        scratch = tmp_path / "scratch"
+
+        def _overrun_download(opts: dict) -> Any:
+            stub = _stub_ydl_for_audio(info={"id": VIDEO_ID})
+            ydl = stub.__enter__.return_value
+
+            def _download(urls: list, **kw: Any) -> None:
+                opts["progress_hooks"][0](
+                    {"status": "downloading",
+                     "downloaded_bytes": 500 * 1024 * 1024 + 1}
+                )
+
+            ydl.download.side_effect = _download
+            return stub
+
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL",
+                  side_effect=_overrun_download),
+            patch("os.statvfs", return_value=self._statvfs(self.HUGE_FREE)),
+        ):
+            with pytest.raises(YttError) as exc_info:
+                _do_download_audio(
+                    VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                    max_asr_duration_sec=1200,
+                )
+        assert exc_info.value.error_code == errors.TOO_LONG_FOR_ASR
+
+    def test_within_cap_size_proceeds_to_download(self, tmp_path: Path) -> None:
+        """A projected size under the effective cap downloads normally — the
+        guard rejects, it does not degenerate into refusing everything."""
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / f"{VIDEO_ID}.m4a").write_bytes(b"audio")
+        info = {"duration": 600, "filesize": 100 * 1024 * 1024}
+        with (
+            patch("ytt.whisper.yt_dlp.YoutubeDL",
+                  side_effect=lambda opts: _stub_ydl_for_audio(info=info)),
+            patch("os.statvfs", return_value=self._statvfs(self.HUGE_FREE)),
+        ):
+            out = _do_download_audio(
+                VIDEO_ID, str(scratch), 500 * 1024 * 1024,
+                max_asr_duration_sec=1200,
+            )
+        assert out == str(scratch / f"{VIDEO_ID}.m4a")
 
 
 # ---------------------------------------------------------------------------

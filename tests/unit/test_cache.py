@@ -19,6 +19,9 @@ Coverage:
 - reconcile: evicts if recomputed total > cap.
 - reconcile: dead units (missing files) removed from registry.
 - ENOSPC degrade: put returns False when OSError(errno=28) on retry.
+- ENOSPC recovery: a later put after a degrade writes, serves, and accounts.
+- no-TTL conformance: age never expires a unit (reconcile keeps it); Settings
+  defines no cache_ttl knob (retention-policy.md §1/§2).
 - Concurrency: concurrent puts stay under cap (asyncio.gather).
 - Invariant 1 (property-based): total_bytes <= max_bytes after N random puts.
 - touch on hit: mtime updated so repeatedly-accessed units survive eviction.
@@ -41,6 +44,7 @@ from hypothesis import given, settings as hyp_settings
 from hypothesis import strategies as st
 
 from ytt.cache import CacheHit, TranscriptCache, _unit_stems
+from ytt.config import Settings
 
 
 # --------------------------------------------------------------------------- #
@@ -489,6 +493,81 @@ async def test_enospc_first_attempt_retry_succeeds(
 
     assert result is True
     assert call_count["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_enospc_degrade_recovers_on_a_later_put(
+    cache: TranscriptCache,
+) -> None:
+    """Degrade is not terminal: once the volume has space again the same unit
+    is written, served, and byte-accounted (retention-policy.md §2 — serving
+    is never held hostage to caching, and the cache recovers on its own)."""
+    await cache.startup_scan()
+
+    import errno as _errno
+    enospc = OSError(_errno.ENOSPC, "No space left on device")
+    with patch.object(cache, "_atomic_write_locked", side_effect=enospc):
+        assert await cache.put(VIDEO_ID, "en", "lost", None, "caption_auto", None) is False
+
+    assert await cache.get(VIDEO_ID, "en") is None  # the degraded unit is absent
+
+    assert (
+        await cache.put(VIDEO_ID, "en", "recovered", None, "caption_auto", None) is True
+    )
+    hit = await cache.get(VIDEO_ID, "en")
+    assert hit is not None and hit.text == "recovered"
+    assert cache.unit_count == 1
+    assert cache.total_bytes > 0
+
+
+# --------------------------------------------------------------------------- #
+# No-TTL conformance (retention-policy.md §1/§2)                                #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_age_never_expires_a_unit(
+    cache: TranscriptCache, cache_dir: Path
+) -> None:
+    """The single most important line of retention-policy.md §1: the
+    transcript cache has **no time-based expiry**. A unit whose files were
+    written a year ago is still registered after reconcile() and still serves
+    byte-identical text — only the size bound (LRU eviction) removes units."""
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID, "en", "ancient but valid", None, "caption_auto", None)
+
+    year_ago = time.time() - 365 * 24 * 3600
+    txt_name, json_name = _unit_stems(VIDEO_ID, "en")
+    os.utime(cache_dir / txt_name, (year_ago, year_ago))
+    os.utime(cache_dir / json_name, (year_ago, year_ago))
+
+    await cache.reconcile()  # re-stats every unit — and must keep this one
+
+    assert cache.unit_count == 1
+    hit = await cache.get(VIDEO_ID, "en")
+    assert hit is not None
+    assert hit.text == "ancient but valid"
+    assert (cache_dir / txt_name).exists()
+    assert (cache_dir / json_name).exists()
+
+    # A second reconcile after the touch-on-hit: still no expiry.
+    await cache.reconcile()
+    assert cache.unit_count == 1
+
+
+def test_settings_define_no_cache_ttl() -> None:
+    """The no-TTL stance is structural: no YTT_CACHE_TTL knob exists in the
+    configuration, so no deployment can accidentally switch time-based expiry
+    on. (retention-policy.md §2: 'There is no YTT_CACHE_TTL and there should
+    not be one'.)"""
+    config_src = (
+        Path(__file__).resolve().parents[2] / "ytt" / "config.py"
+    ).read_text(encoding="utf-8")
+    assert "cache_ttl" not in config_src, (
+        "a cache_ttl setting appeared — retention-policy.md §1 forbids "
+        "time-based transcript expiry"
+    )
+    assert not hasattr(Settings(), "cache_ttl")
 
 
 # --------------------------------------------------------------------------- #

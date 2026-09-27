@@ -293,3 +293,12 @@ another's data:
 | LRU eviction removes whole units (both files) to admit new work; untouched survivors still serve byte-identical text | `TestEviction` |
 | A restart-equivalent (fresh registry + startup sweep + `startup_scan` over the same volumes) loses job records and audio but serves previously cached transcripts | `TestRestart` |
 | This document names every mechanism, env var, and log event it claims — so the prose and the code rot together or not at all | `test_policy_doc_pins_its_mechanisms` |
+
+The per-mechanism claims whose home is a per-mechanism suite (the cross-component
+module above deliberately stays out of them) are pinned in place:
+
+| Guarantee | Test |
+|---|---|
+| The cache has **no TTL** (§1's single most important line): a year-old unit survives `reconcile()` and still serves; no `cache_ttl` knob exists in `Settings`, so no deployment can switch time-based expiry on | `tests/unit/test_cache.py` (`test_age_never_expires_a_unit`, `test_settings_define_no_cache_ttl`) |
+| An ENOSPC degrade is recoverable: the degraded unit is absent, and a later `put` writes, serves, and byte-accounts it (§2) | `tests/unit/test_cache.py` (`test_enospc_degrade_recovers_on_a_later_put`) |
+| Inbound caps (§3): a projected size over `min(YTT_MAX_AUDIO_BYTES, scratch free)` is refused `too_long_for_asr` before `ydl.download` runs — scratch disk pressure participates in the cap, statvfs failure falls back to the configured cap, and the progress hook aborts mid-stream on overrun, surfacing as the same relayable code | `tests/unit/test_whisper.py::TestSizeCapGuard` (bead `ytt-b27e9b18`) |
