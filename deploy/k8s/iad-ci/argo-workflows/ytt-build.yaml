@@ -1,13 +1,21 @@
-# ytt-build — CI pipeline for ytt container image
+# ytt-build — CI pipeline for the ytt container image
 # Sync to: declarative-config/k8s/iad-ci/argo-workflows/ytt-build.yaml
 #
-# WorkflowTemplate that builds the ytt Docker image on git push and pushes
-# to Docker Hub (ronaldraygun/ytt) — matching every other app in this fleet
-# and the image actually referenced by
-# k8s/ardenone-cluster/ytt/deployment.yml. The Dockerfile runs
-# pytest -m "not integration" as a test gate, so a failed test suite aborts
-# the build (no separate test step needed here — see armor-workflowtemplate.yml
-# for the pattern this mirrors: resolve-version + docker-build).
+# WorkflowTemplate that builds the ytt Docker image on git push and publishes
+# it to TWO registries, as the SAME image (same digest, no second build):
+#
+#   * Docker Hub  ronaldraygun/ytt   — private (the fleet namespace); this is
+#     what k8s/ardenone-cluster/ytt/deployment.yml pulls, through the
+#     docker-hub-registry pull secret.
+#   * GHCR        ghcr.io/jedarden/ytt — PUBLIC once its package is flipped
+#     to Public (see verify-ghcr-public); this is what the README quick start
+#     and docs/usage/self-hosting.md tell self-hosters to pull, anonymously.
+#     Same shape as armor (armor-workflowtemplate.yml): the ghcr-jedarden-
+#     registry secret already pushes ghcr.io/jedarden/{armor,clasp,sun-sim}.
+#
+# The Dockerfile runs pytest -m "not integration" as a test gate, so a failed
+# test suite aborts the build (no separate test step needed here — see
+# armor-workflowtemplate.yml for the pattern this mirrors).
 #
 # Requires VERSION to be bumped by the developer in each release commit;
 # CI validates the version bump and fails if it wasn't changed. CI never
@@ -16,54 +24,54 @@
 #
 # All git operations use Forgejo (git.ardenone.com), not GitHub. GitHub is
 # a read-only mirror and receives changes only via Forgejo's server-side
-# push-mirror, never via CI writes.
+# push-mirror, never via CI writes. (GHCR is a registry, not a git remote.)
 #
 # Triggered by Argo Events on git push (see ytt-sensor.yml).
 #
-# Release gate (anonymous pull, bead ytt-7656c3a2): after docker-build
-# publishes ronaldraygun/ytt:<version>, two further steps gate the release
-# on the exact promise the README quick start makes to self-hosters:
+# The build is PINNED to the pushed commit. ytt-sensor maps the webhook's
+# body.after into the `revision` parameter; resolve-version rejects anything
+# that is not a full 40-hex SHA and reads the VERSION diff from THAT commit's
+# parent, and docker-build's initContainer clones exactly that SHA. Before
+# 2026-09-27 the build cloned refs/heads/master at pod-start time, so a
+# sibling push (a fleet worker pushes to ytt master every ~30 minutes) could
+# slip commits into a release tag that CI never validated, or make the VERSION
+# diff read the wrong commit. Same fix, same recipe as armor (armor-8c4d068d).
 #
-#   1. anonymous-pull-gate — an UNAUTHENTICATED registry manifest lookup and
-#      a full anonymous blob pull (skopeo --no-creds/--src-no-creds: token
-#      endpoint hit without credentials, manifest + config + every layer
-#      fetched anonymously), the pulled manifest verified against the
-#      advertised sha256, and the tested tag + digest recorded as workflow
-#      output parameters (status outlives podGC's pod deletion). A 401/403
-#      here means the Docker Hub repo is (again) private — the documented
-#      quick start 401s for every user — and fails the release by design;
-#      DEPLOY-CHECKLIST.md §3 is the operator fix. Rate limits (429) and
-#      network errors are classified as such in the log so an outage is not
-#      misread as a visibility regression.
+# Steps, in order — the anonymous-visibility check is deliberately LAST, so a
+# package that is merely still private is the only thing left failing:
 #
-#   2. quick-start-smoke — runs the just-published image as a pod sidecar
-#      with the documented quick-start environment (required OAuth client
-#      pair + public URL, no-Whisper mode, reference-IdP default) and
-#      asserts /ytt/health answers {"status":"ok"} and the MCP mount
-#      rejects an anonymous GET with the documented 401 + Bearer
-#      WWW-Authenticate challenge — the pulled image actually boots.
+#   1. resolve-version    revision must be a full SHA; VERSION must change in it.
+#   2. docker-build       kaniko: test stage gate, push ronaldraygun/ytt:<v>.
+#   3. publish-ghcr       skopeo copy --preserve-digests of that exact image to
+#                         ghcr.io/jedarden/ytt:<v>; source and destination
+#                         manifest digests must match; the digest is a step
+#                         output.
+#   4. quick-start-smoke  boots the GHCR image as a pod sidecar with the
+#                         documented quick-start environment and asserts
+#                         /ytt/health answers {"status":"ok"} and the MCP mount
+#                         rejects an anonymous GET with 401 + a Bearer
+#                         WWW-Authenticate challenge.
+#   5. verify-ghcr-public an UNAUTHENTICATED registry lookup (plain curl, the
+#                         armor verify-push-ghcr recipe): anonymous token,
+#                         manifest whose sha256 equals the published digest,
+#                         and every config/layer blob authorized. A failure
+#                         here almost always means the package was just created
+#                         PRIVATE (GitHub's default for a new user package);
+#                         flipping it to Public is a one-time GitHub UI step,
+#                         then retry the failed step in the Argo UI —
+#                         deploy/DEPLOY-CHECKLIST.md section 3. The tested tag
+#                         and digest are recorded as workflow output
+#                         parameters (status outlives podGC's pod deletion).
 #
-# Both gate pods run as the bare ytt-pull-gate ServiceAccount (first
-# document below): the workflow-level argo-workflow account carries
-# imagePullSecrets, which would authenticate the kubelet's pull and let the
-# smoke pass against a private repo — that would silently defeat the gate.
-# The bare account has no pull secrets (anonymity is structural, not
-# behavioral) and no RBAC (the emissary executor needs none; see
-# workflow-rbac.yml). Gate steps carry no OnFailure retry: a registry
-# authorization error must fail the release, not be retried into a pass.
----
-# Bare service account for the two pull-gate pods. The anonymity of the
-# kubelet's image pull in quick-start-smoke rests on this account having NO
-# imagePullSecrets (argo-workflow, the workflow-level default, injects
-# docker-hub-registry + ghcr-jedarden-registry) and NO RBAC. If this account
-# ever needs a pull secret, the gate is void — move the gate off it instead.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ytt-pull-gate
-  namespace: argo-workflows
-automountServiceAccountToken: false
----
+# History: this used to end with anonymous-pull-gate + quick-start-smoke under
+# a bare ytt-pull-gate ServiceAccount (automountServiceAccountToken: false)
+# that was meant to keep the kubelet pull anonymous. It could never pass: the
+# Argo v4 executor's init container needs an API token, so every attempt died
+# with "invalid configuration: no configuration has been provided" before the
+# script ran (ytt-build-fxxct, release 0.2.25) — and the Docker Hub repo was
+# private besides. Anonymity is now checked by talking to the registry with no
+# credentials at all (verify-ghcr-public), which needs no special account, and
+# the smoke test runs under the workflow's ordinary account.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -77,9 +85,10 @@ spec:
   # not cover that case: on 2026-08-07 five needle-ci runs sat Running for
   # 8h against a 3600s step limit. ttlStrategy only reaps COMPLETED runs, so
   # without a workflow-level cap they are never terminated and never GCd.
-  # Basis: the pre-gate steps' sum x attempts = 5520s, + the two gate steps
-  # (600s x 3 attempts each) = 9120s total, +50% headroom.
-  activeDeadlineSeconds: 13800
+  # Basis: resolve-version 120s + docker-build (1800s x 3 attempts) +
+  # publish-ghcr (600s x 3) + quick-start-smoke (600s x 3) +
+  # verify-ghcr-public (300s x 1) = 9420s, +50% headroom = 14130s, rounded up.
+  activeDeadlineSeconds: 14400
   entrypoint: build
   serviceAccountName: argo-workflow
   arguments:
@@ -88,10 +97,29 @@ spec:
         value: jedarden/ytt
       - name: branch
         value: master
+      # Full 40-hex SHA of the pushed commit, wired by ytt-sensor from the
+      # webhook's body.after (parameters.2 in the sensor's resource). The
+      # sentinel default is deliberately not a SHA: a run that loses the
+      # wiring dies loudly at resolve-version instead of building whatever
+      # the branch happens to point at when the pod starts. To build by hand,
+      # submit with -p revision=<full sha>.
+      - name: revision
+        value: "unset"
   volumes:
+    # Docker Hub credential — kaniko's push, and skopeo's read of the
+    # (private) source image.
     - name: docker-config
       secret:
         secretName: docker-hub-registry
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+    # GHCR credential — skopeo's push to ghcr.io/jedarden/ytt. The same
+    # secret armor's docker-build-ghcr uses (ExternalSecret
+    # ghcr-jedarden-registry in this namespace).
+    - name: docker-config-ghcr
+      secret:
+        secretName: ghcr-jedarden-registry
         items:
           - key: .dockerconfigjson
             path: config.json
@@ -106,8 +134,8 @@ spec:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
-        - - name: anonymous-pull-gate
-            template: anonymous-pull-gate
+        - - name: publish-ghcr
+            template: publish-ghcr
             arguments:
               parameters:
                 - name: version
@@ -118,6 +146,14 @@ spec:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
+        - - name: verify-ghcr-public
+            template: verify-ghcr-public
+            arguments:
+              parameters:
+                - name: version
+                  value: "{{steps.resolve-version.outputs.parameters.version}}"
+                - name: digest
+                  value: "{{steps.publish-ghcr.outputs.parameters.digest}}"
       # The release record: exactly what the gate tested. Survives podGC
       # (podGC deletes pods at completion; parameters live on the Workflow
       # object) — `kubectl get workflow <name> -o jsonpath='{.outputs...}'`.
@@ -125,22 +161,43 @@ spec:
         parameters:
           - name: tested-tag
             valueFrom:
-              parameter: "{{steps.anonymous-pull-gate.outputs.parameters.tag}}"
+              parameter: "{{steps.verify-ghcr-public.outputs.parameters.tag}}"
           - name: tested-digest
             valueFrom:
-              parameter: "{{steps.anonymous-pull-gate.outputs.parameters.digest}}"
+              parameter: "{{steps.verify-ghcr-public.outputs.parameters.digest}}"
 
     - name: resolve-version
       activeDeadlineSeconds: 120
       script:
-        image: alpine/git
+        image: alpine/git:v2.54.0
         command: [sh]
         source: |
-          set -e
-          git clone --branch {{workflow.parameters.branch}} \
+          set -eu
+
+          # Only a full SHA pins a build (armor-8c4d068d): the branch can
+          # move between the push and this pod's start (queued runs, sibling
+          # pushes), and the VERSION diff below must read the triggering
+          # commit's parent, so the fetch keeps --depth 2. A bare ref, or the
+          # "unset" sentinel default, is rejected.
+          REV='{{workflow.parameters.revision}}'
+          printf '%s\n' "$REV" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "revision must be a full commit SHA, got: $REV" >&2
+            echo "(ytt-sensor wires it from the webhook's body.after; for a" >&2
+            echo " manual run pass -p revision=<full sha>)" >&2
+            exit 1
+          }
+
+          git clone --no-checkout --single-branch --depth 2 \
+            --branch '{{workflow.parameters.branch}}' \
             "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" \
             /tmp/repo
           cd /tmp/repo
+          git fetch --depth 2 origin "$REV"
+          git checkout --detach --quiet "$REV"
+          test "$(git rev-parse HEAD)" = "$REV" || {
+            echo "checked-out revision does not match the request" >&2
+            exit 1
+          }
 
           test -f VERSION || {
             echo "VERSION is required; CI never creates release versions" >&2
@@ -158,7 +215,7 @@ spec:
           esac
 
           echo "$VERSION" > /tmp/version
-          echo "Building version: ${VERSION}"
+          echo "Building version: ${VERSION} from ${REV}"
         env:
           # Forgejo is read-only here: this credential only permits cloning.
           # The script has no push path (CI validates, never writes).
@@ -175,6 +232,8 @@ spec:
             value: credential.helper
           - name: GIT_CONFIG_VALUE_0
             value: '!f() { test "$1" = get && echo "username=x-token" && echo "password=$FORGEJO_TOKEN"; }; f'
+          - name: GIT_TERMINAL_PROMPT
+            value: "0"
           - name: FORGEJO_TOKEN
             valueFrom:
               secretKeyRef:
@@ -186,6 +245,12 @@ spec:
             valueFrom:
               path: /tmp/version
 
+    # The initContainer clones the exact revision (armor's / pjp-demo's
+    # recipe: blobless clone, explicit-SHA fetch, detached checkout, asserted)
+    # into an emptyDir that kaniko consumes as a directory context — instead
+    # of kaniko cloning refs/heads/<branch> itself, which would build whatever
+    # the branch points at when the pod starts. The repo's .dockerignore keeps
+    # .git/.beads/.venv out of the context.
     - name: docker-build
       inputs:
         parameters:
@@ -197,28 +262,76 @@ spec:
         backoff:
           duration: 30s
           factor: "2"
+      volumes:
+        - name: build-context
+          emptyDir: {}
+      initContainers:
+        - name: clone-source
+          image: alpine/git:v2.54.0
+          command: [sh, -c]
+          args:
+            - |
+              set -eu
+              REV='{{workflow.parameters.revision}}'
+              printf '%s\n' "$REV" | grep -Eq '^[0-9a-f]{40}$' || {
+                echo "revision must be a full commit SHA, got: $REV" >&2
+                exit 1
+              }
+              git clone --filter=blob:none --no-checkout --single-branch \
+                --branch '{{workflow.parameters.branch}}' \
+                "http://forgejo-gitea-http.forgejo.svc.cluster.local:3000/{{workflow.parameters.git-repo}}.git" \
+                /workspace \
+              || git clone --filter=blob:none --no-checkout --single-branch \
+                --branch '{{workflow.parameters.branch}}' \
+                "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" \
+                /workspace
+              cd /workspace
+              git fetch --depth 1 origin "$REV"
+              git checkout --detach --quiet "$REV"
+              test "$(git rev-parse HEAD)" = "$REV" || {
+                echo "checked-out revision does not match the request" >&2
+                exit 1
+              }
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: credential.helper
+            - name: GIT_CONFIG_VALUE_0
+              value: '!f() { test "$1" = get && echo "username=x-token" && echo "password=$FORGEJO_TOKEN"; }; f'
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
+            - name: FORGEJO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: forgejo-webhook-token
+                  key: token
+          volumeMounts:
+            - name: build-context
+              mountPath: /workspace
+          # Copied from armor's clone-source initContainer, which runs the same
+          # recipe against the same Forgejo; not re-measured for ytt
+          # (k8s/CLAUDE.md rule 9 — say so rather than leave a bare number).
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
       container:
         image: gcr.io/kaniko-project/executor:v1.23.2
         args:
-          - --context=git://git.ardenone.com/{{workflow.parameters.git-repo}}.git#refs/heads/{{workflow.parameters.branch}}
-          - --dockerfile=Dockerfile
+          - --context=dir:///workspace
+          - --dockerfile=/workspace/Dockerfile
           - --destination=ronaldraygun/ytt:{{inputs.parameters.version}}
           - --cache=true
           - --cache-repo=ronaldraygun/cache
-        env:
-          # Kaniko's native git-context auth (GIT_USERNAME/GIT_PASSWORD),
-          # matching armor-workflowtemplate.yml's docker-build step -- fixed
-          # 2026-09-08, see resolve-version's env block above for why.
-          - name: GIT_USERNAME
-            value: x-token
-          - name: GIT_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: forgejo-webhook-token
-                key: token
         volumeMounts:
           - name: docker-config
             mountPath: /kaniko/.docker
+          - name: build-context
+            mountPath: /workspace
         resources:
           requests:
             cpu: 500m
@@ -228,104 +341,89 @@ spec:
             memory: 4Gi
 
     # ------------------------------------------------------------------
-    # Release gate 1/2 — anonymous manifest lookup + anonymous blob pull.
-    # Deliberately NOT the docker-config volume and NOT the argo-workflow
-    # account: every registry request below is credential-free. skopeo is
-    # used instead of raw curl so the anonymous token dance, content-type
-    # negotiation and blob fetch are the registry client's well-tested
-    # paths; the image is pinned (fleet rule: never :latest).
+    # Publish the image just built to GHCR — a registry-to-registry copy of
+    # the exact manifest, NOT a second kaniko build: the two registries hold
+    # byte-identical images (asserted below), the test stage does not run
+    # twice, and no second build pod competes for the namespace quota.
+    # skopeo is pinned (fleet rule: never :latest). Both credentials are
+    # mounted read-only as separate auth files (Docker Hub for the private
+    # source, GHCR for the destination). NOTE: skopeo's own
+    # `inspect --format '{{.Digest}}'` cannot be used in this file — Argo
+    # interpolates every {{...}} — so digests are the sha256 of the raw
+    # manifest bytes, which is what a registry digest is.
     # ------------------------------------------------------------------
-    - name: anonymous-pull-gate
+    - name: publish-ghcr
       inputs:
         parameters:
           - name: version
       activeDeadlineSeconds: 600
       retryStrategy:
-        # OnError retries pod-level infrastructure failures only (node
-        # death, eviction) — a container exit 1 (every registry
-        # authorization error) is phase Failed and is NOT retried: the
-        # release must fail on the first real answer from the registry.
+        # OnError retries pod-level infrastructure failures only (node death,
+        # eviction). A container exit 1 — an authorization error, a digest
+        # mismatch — is phase Failed and is not retried.
         limit: "2"
         retryPolicy: OnError
         backoff:
           duration: 30s
           factor: "2"
-      serviceAccountName: ytt-pull-gate
       script:
         image: quay.io/skopeo/stable:v1.22.3
         command: [sh]
         source: |
           set -eu
-          TAG="ronaldraygun/ytt:{{inputs.parameters.version}}"
-          IMAGE="docker://docker.io/ronaldraygun/ytt:{{inputs.parameters.version}}"
-          echo "$TAG" > /tmp/tested-tag
+          VERSION='{{inputs.parameters.version}}'
+          SRC="docker://docker.io/ronaldraygun/ytt:${VERSION}"
+          DST="docker://ghcr.io/jedarden/ytt:${VERSION}"
+          echo "publish-ghcr: ${SRC#docker://} -> ${DST#docker://} (same digest, no rebuild)"
 
-          echo "gate 1/2: anonymous manifest lookup (no credentials): $TAG"
-          LOOKUP=0
-          INSPECT="$(skopeo inspect --no-creds "$IMAGE" 2>&1)" || LOOKUP=1
-          if [ "$LOOKUP" -ne 0 ]; then
-            echo "ANONYMOUS-PULL-GATE FAILURE: anonymous manifest lookup failed for $TAG"
-            printf '%s\n' "$INSPECT" | tail -6
-            case "$INSPECT" in
-              *unauthorized*|*UNAUTHORIZED*|*401*|*denied*|*DENIED*|*403*)
-                echo ""
-                echo "Registry authorization error: the tag is not anonymously"
-                echo "pullable. The README quick start (docker run"
-                echo "ronaldraygun/ytt:<version>) 401s for every self-hoster."
-                echo "Fix: deploy/DEPLOY-CHECKLIST.md section 3 (Docker Hub"
-                echo "visibility is a Hub-UI operator step), then re-run the"
-                echo "release.";;
-              *toomanyrequests*|*429*|*Throttled*|*throttl*)
-                echo ""
-                echo "Anonymous Docker Hub rate limit (429) — not an"
-                echo "authorization failure. Re-run the release once the"
-                echo "throttle window passes.";;
-              *)
-                echo ""
-                echo "Not an authorization error — registry/network outage;"
-                echo "inspect the log above.";;
+          skopeo inspect --raw --authfile /docker-hub/config.json "$SRC" > /tmp/src.manifest || {
+            echo "PUBLISH-GHCR FAILURE: cannot read the source image ${SRC#docker://}" >&2
+            echo "(docker-build reported success, so this is a registry/credential problem)" >&2
+            exit 1
+          }
+          test -s /tmp/src.manifest || { echo "PUBLISH-GHCR FAILURE: empty source manifest" >&2; exit 1; }
+          SRC_DIGEST="sha256:$(sha256sum /tmp/src.manifest | cut -d' ' -f1)"
+          echo "source digest:      $SRC_DIGEST"
+
+          COPY=0
+          LOG="$(skopeo copy --preserve-digests --retry-times 3 \
+            --src-authfile /docker-hub/config.json \
+            --dest-authfile /ghcr/config.json \
+            "$SRC" "$DST" 2>&1)" || COPY=1
+          printf '%s\n' "$LOG" | tail -4
+          if [ "$COPY" -ne 0 ]; then
+            echo "PUBLISH-GHCR FAILURE: the copy to ghcr.io/jedarden/ytt:${VERSION} failed" >&2
+            case "$LOG" in
+              *unauthorized*|*denied*|*403*|*401*)
+                echo "GHCR rejected the push. The ghcr-jedarden-registry credential" >&2
+                echo "needs write:packages, and if the package ghcr.io/jedarden/ytt" >&2
+                echo "already exists it must grant that credential's account write" >&2
+                echo "access. armor/clasp/sun-sim already push with this secret." >&2;;
             esac
             exit 1
           fi
-          DIGEST="$(printf '%s\n' "$INSPECT" \
-            | grep -oE '"Digest": *"sha256:[a-f0-9]{64}"' \
-            | grep -oE 'sha256:[a-f0-9]{64}' | head -n1)"
-          if [ -z "$DIGEST" ]; then
-            echo "ANONYMOUS-PULL-GATE FAILURE: lookup answered but no manifest digest found in:"
-            printf '%s\n' "$INSPECT" | head -3
-            exit 1
-          fi
-          echo "lookup OK: $TAG -> $DIGEST"
 
-          echo "gate 2/2: anonymous pull of manifest + config + every layer"
-          rm -rf /tmp/pull && mkdir -p /tmp/pull
-          PULL=0
-          COPY_LOG="$(skopeo copy --src-no-creds "$IMAGE" dir:/tmp/pull 2>&1)" || PULL=1
-          if [ "$PULL" -ne 0 ]; then
-            echo "ANONYMOUS-PULL-GATE FAILURE: anonymous blob pull failed for $TAG"
-            printf '%s\n' "$COPY_LOG" | tail -6
-            case "$COPY_LOG" in
-              *unauthorized*|*UNAUTHORIZED*|*401*|*denied*|*DENIED*|*403*)
-                echo "Registry authorization error mid-pull —"
-                echo "deploy/DEPLOY-CHECKLIST.md section 3.";;
-              *toomanyrequests*|*429*)
-                echo "Anonymous Docker Hub rate limit (429) — re-run later.";;
-            esac
+          skopeo inspect --raw --authfile /ghcr/config.json "$DST" > /tmp/dst.manifest || {
+            echo "PUBLISH-GHCR FAILURE: copy reported success but the destination manifest cannot be read" >&2
+            exit 1
+          }
+          DST_DIGEST="sha256:$(sha256sum /tmp/dst.manifest | cut -d' ' -f1)"
+          echo "destination digest: $DST_DIGEST"
+          if [ "$SRC_DIGEST" != "$DST_DIGEST" ]; then
+            echo "PUBLISH-GHCR FAILURE: digests differ — the two registries do not hold the same image" >&2
             exit 1
           fi
-          printf '%s\n' "$COPY_LOG" | tail -2
-          test -s /tmp/pull/manifest.json || {
-            echo "ANONYMOUS-PULL-GATE FAILURE: pull reported success but wrote no manifest"
-            exit 1
-          }
-          # The tested digest is only evidence if the fetched bytes hash to
-          # it: the dir transport stores the manifest verbatim.
-          printf '%s  %s\n' "$DIGEST" /tmp/pull/manifest.json | sha256sum -c - || {
-            echo "ANONYMOUS-PULL-GATE FAILURE: pulled manifest does not hash to the advertised $DIGEST"
-            exit 1
-          }
-          echo "$DIGEST" > /tmp/tested-digest
-          echo "ANONYMOUS-PULL-GATE OK: $TAG ($DIGEST, $(du -sh /tmp/pull | cut -f1) fetched anonymously)"
+          echo "$DST_DIGEST" > /tmp/published-digest
+          echo "PUBLISH-GHCR OK: ghcr.io/jedarden/ytt:${VERSION} = $DST_DIGEST"
+        volumeMounts:
+          - name: docker-config
+            mountPath: /docker-hub
+            readOnly: true
+          - name: docker-config-ghcr
+            mountPath: /ghcr
+            readOnly: true
+        # Carried over from the previous gate step (also skopeo, also streaming
+        # blobs); not measured for a full-image copy — k8s/CLAUDE.md rule 9.
         resources:
           requests:
             cpu: 100m
@@ -335,24 +433,20 @@ spec:
             memory: 512Mi
       outputs:
         parameters:
-          - name: tag
-            valueFrom:
-              path: /tmp/tested-tag
           - name: digest
             valueFrom:
-              path: /tmp/tested-digest
+              path: /tmp/published-digest
 
     # ------------------------------------------------------------------
-    # Release gate 2/2 — run the documented quick start against the
-    # published tag. The sidecar IS ronaldraygun/ytt:<version>, pulled by
-    # the kubelet under the bare ytt-pull-gate account (no pull secrets —
-    # an anonymous pull, and a second, independent proof of the one in
-    # anonymous-pull-gate). Env mirrors the README "Quick start
-    # (self-hosted)" block: the startup-required trio present (throwaway
-    # values — the gate never authenticates to anything), documented
-    # no-Whisper mode, and the documented default upstream IdP (no
-    # YTT_OIDC_ISSUER — the reference Authentik discovery fetch is part of
-    # what a self-hoster's first boot exercises).
+    # Run the documented quick start against the published GHCR tag. The
+    # sidecar IS ghcr.io/jedarden/ytt:<version>. Env mirrors the README
+    # "Quick start (self-hosted)" block: the startup-required trio present
+    # (throwaway values — the smoke never authenticates to anything),
+    # documented no-Whisper mode, and the documented default upstream IdP
+    # (no YTT_OIDC_ISSUER — the reference Authentik discovery fetch is part
+    # of what a self-hoster's first boot exercises). Runs under the
+    # workflow's ordinary account: the kubelet's pull is authenticated, which
+    # is fine — anonymity is verify-ghcr-public's job, not this step's.
     # ------------------------------------------------------------------
     - name: quick-start-smoke
       inputs:
@@ -365,14 +459,13 @@ spec:
         backoff:
           duration: 30s
           factor: "2"
-      serviceAccountName: ytt-pull-gate
       script:
         image: alpine:3.20
         command: [sh]
         source: |
           set -eu
           BASE="http://127.0.0.1:8080/ytt"
-          TAG="ronaldraygun/ytt:{{inputs.parameters.version}}"
+          TAG="ghcr.io/jedarden/ytt:{{inputs.parameters.version}}"
 
           echo "quick-start smoke: waiting up to ~180s for $BASE/health"
           i=0
@@ -384,10 +477,10 @@ spec:
             i=$((i + 1))
             if [ "$i" -gt 90 ]; then
               echo "QUICK-START-SMOKE FAILURE: $TAG never answered $BASE/health within ~180s."
-              echo "Usual causes: (1) registry authorization — the pod cannot pull"
-              echo "the image anonymously (ImagePullBackOff; the gate serviceaccount"
-              echo "has no pull secrets by design), (2) startup fail-closed on the"
-              echo "required env, (3) the upstream OIDC discovery fetch failing."
+              echo "Usual causes: (1) the pod cannot pull the image (ImagePullBackOff —"
+              echo "check that publish-ghcr succeeded and the workflow account's"
+              echo "ghcr-jedarden-registry pull secret is valid), (2) startup fail-closed"
+              echo "on the required env, (3) the upstream OIDC discovery fetch failing."
               exit 1
             fi
             sleep 2
@@ -411,7 +504,7 @@ spec:
             exit 1
           fi
           echo "$TAG" > /tmp/smoke-tag
-          echo "QUICK-START-SMOKE OK: $TAG booted from an anonymous pull;"
+          echo "QUICK-START-SMOKE OK: $TAG booted;"
           echo "  /ytt/health -> 200 ok, anonymous MCP GET -> 401 + Bearer challenge"
         resources:
           requests:
@@ -427,7 +520,7 @@ spec:
               path: /tmp/smoke-tag
       sidecars:
         - name: quick-start
-          image: ronaldraygun/ytt:{{inputs.parameters.version}}
+          image: ghcr.io/jedarden/ytt:{{inputs.parameters.version}}
           env:
             - name: YTT_PUBLIC_URL
               value: "http://127.0.0.1:8080/ytt"
@@ -453,3 +546,105 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+
+    # ------------------------------------------------------------------
+    # The self-hoster's view: ghcr.io/jedarden/ytt:<version> with NO
+    # credentials. Plain curl + jq against the registry API (armor's
+    # verify-push-ghcr recipe) — no ServiceAccount games, because nothing
+    # here carries a credential: the anonymous token endpoint, the manifest,
+    # and every blob are asked for without one. The manifest's sha256 must
+    # equal the digest publish-ghcr recorded, so the anonymous answer is the
+    # image we published and not some other tag. No retry strategy: an
+    # authorization error must fail the release, not be retried into a pass
+    # (the loop below only absorbs registry propagation lag).
+    # ------------------------------------------------------------------
+    - name: verify-ghcr-public
+      inputs:
+        parameters:
+          - name: version
+          - name: digest
+      activeDeadlineSeconds: 300
+      script:
+        image: alpine:3.20
+        command: [sh]
+        source: |
+          set -eu
+          apk add --no-cache curl jq >/dev/null 2>&1
+          REPO="jedarden/ytt"
+          TAG="{{inputs.parameters.version}}"
+          EXPECTED="{{inputs.parameters.digest}}"
+          ACCEPT='application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
+          echo "verify-ghcr-public: anonymous pull check for ghcr.io/${REPO}:${TAG} (expect ${EXPECTED})"
+
+          CODE=000
+          for attempt in 1 2 3 4; do
+            TOKEN="$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token // empty')"
+            if [ -n "$TOKEN" ]; then
+              CODE="$(curl -s -o /tmp/manifest.json -w '%{http_code}' \
+                -H "Authorization: Bearer $TOKEN" -H "Accept: $ACCEPT" \
+                "https://ghcr.io/v2/${REPO}/manifests/${TAG}")"
+              [ "$CODE" = "200" ] && break
+              echo "  attempt $attempt: anonymous manifest lookup -> HTTP $CODE"
+            else
+              echo "  attempt $attempt: no anonymous pull token"
+            fi
+            sleep 20
+          done
+
+          if [ "$CODE" != "200" ]; then
+            echo "VERIFY-GHCR-PUBLIC FAILURE: ghcr.io/${REPO}:${TAG} is not anonymously pullable (last HTTP $CODE)."
+            case "$CODE" in
+              401|403|404)
+                echo ""
+                echo "publish-ghcr succeeded, so the image is there — the package is almost"
+                echo "certainly PRIVATE: GitHub creates a new user package private. This is"
+                echo "the ONE manual step left (deploy/DEPLOY-CHECKLIST.md section 3):"
+                echo "  github.com/jedarden -> Packages -> ytt -> Package settings ->"
+                echo "  Danger zone -> Change visibility -> Public."
+                echo "Then retry the failed step in the Argo UI (argo-ci.ardenone.com);"
+                echo "the release is otherwise complete: the image is published and smoke-tested.";;
+              429|5*|000)
+                echo ""
+                echo "Not an authorization error (rate limit / registry outage) — retry later.";;
+            esac
+            exit 1
+          fi
+
+          GOT="sha256:$(sha256sum /tmp/manifest.json | cut -d' ' -f1)"
+          if [ "$GOT" != "$EXPECTED" ]; then
+            echo "VERIFY-GHCR-PUBLIC FAILURE: the anonymous manifest hashes to $GOT, not the published $EXPECTED"
+            exit 1
+          fi
+          echo "manifest OK: $GOT"
+
+          BLOBS="$(jq -r '[.config.digest] + [.layers[].digest] | .[]' /tmp/manifest.json)"
+          test -n "$BLOBS" || { echo "VERIFY-GHCR-PUBLIC FAILURE: manifest lists no config/layer blobs (index or unexpected shape?)"; exit 1; }
+          N=0
+          for d in $BLOBS; do
+            N=$((N + 1))
+            B="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "https://ghcr.io/v2/${REPO}/blobs/${d}")"
+            case "$B" in
+              200|301|302|307) ;;
+              *) echo "VERIFY-GHCR-PUBLIC FAILURE: blob $d answered HTTP $B anonymously"; exit 1;;
+            esac
+          done
+          echo "blobs OK: all $N config/layer blobs authorized anonymously"
+
+          echo "ghcr.io/${REPO}:${TAG}" > /tmp/tested-tag
+          echo "$GOT" > /tmp/tested-digest
+          echo "VERIFY-GHCR-PUBLIC OK: ghcr.io/${REPO}:${TAG} ($GOT) pulls anonymously"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      outputs:
+        parameters:
+          - name: tag
+            valueFrom:
+              path: /tmp/tested-tag
+          - name: digest
+            valueFrom:
+              path: /tmp/tested-digest

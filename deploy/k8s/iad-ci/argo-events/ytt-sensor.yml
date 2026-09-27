@@ -68,6 +68,18 @@ spec:
       name: ytt-build
       argoWorkflow:
         operation: submit
+        # Pin the build to the pushed commit. body.after is the pushed SHA;
+        # index 2 is `revision` in the resource's arguments below. Without
+        # this the workflow's `revision` keeps its non-SHA sentinel and
+        # resolve-version rejects the run loudly (rather than building
+        # whatever refs/heads/master points at when a pod starts, which is
+        # how a sibling push could slip commits into a release tag). Same
+        # wiring as armor-sensor.yml (armor-8c4d068d).
+        parameters:
+        - src:
+            dependencyName: ytt-push
+            dataKey: body.after
+          dest: spec.arguments.parameters.2.value
         source:
           resource:
             apiVersion: argoproj.io/v1alpha1
@@ -85,4 +97,6 @@ spec:
                   value: jedarden/ytt
                 - name: branch
                   value: master
+                - name: revision
+                  value: unset
     conditions: ytt-push

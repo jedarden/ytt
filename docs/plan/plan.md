@@ -449,7 +449,26 @@ The OAuth metadata documents live at the **host root** (`mcp.ardenone.com/.well-
 - **Optional host-level WAF:** if the Anthropic-IP allowlist is adopted, it applies to the whole `mcp.ardenone.com` host (shared with ibkr) — coordinate it as a host concern, or skip it and rely on the per-tool OAuth + subject allowlist (the real authz). ibkr currently ships none.
 ### Image publishing
 
-> **Decision addendum (2026-09-16):** the registry below was changed from GHCR
+> **Decision addendum (2026-09-27) — GHCR is back, as the PUBLIC registry; Docker
+> Hub stays the cluster's.** The 2026-09-16 addendum below dropped GHCR because
+> "no GHCR push credential was ever provisioned". That was true of the coding
+> box's `gh` token, not of the cluster: armor, clasp and sun-sim already
+> publish public images to `ghcr.io/jedarden/*` from Argo with the
+> `ghcr-jedarden-registry` secret. Meanwhile the Docker Hub repo stayed
+> private (the fleet namespace is private and the flip is a Hub-UI action), so
+> the README quick start was unpullable, and `ytt-build`'s anonymous-pull gate
+> could never pass — it ran under a token-less ServiceAccount that broke Argo
+> v4's executor init (ytt-build-fxxct). Decision: `ytt-build` pushes
+> `ronaldraygun/ytt:<version>` (the image the cluster deploys, unchanged) and
+> copies the same image, digest-for-digest, to `ghcr.io/jedarden/ytt:<version>`,
+> which the README quick start and self-hosting compose example pin. GHCR
+> creates a new user package private, so the package is flipped to Public once
+> by hand after its first publish (`deploy/DEPLOY-CHECKLIST.md` §3); the last
+> workflow step (`verify-ghcr-public`) proves anonymous pullability with plain
+> curl and fails, with instructions, until then. The build is also pinned to
+> the pushed commit (armor's recipe) so a sibling push cannot slip into a tag.
+
+> **Decision addendum (2026-09-16), superseded above:** the registry below was changed from GHCR
 > to **Docker Hub `ronaldraygun/ytt`, public**. Reality drifted from this plan
 > during Phase 9-11: the applied `ytt-build` template pushed only Docker Hub
 > (fleet-standard, same as `ibkr-mcp` and every other app), the cluster pulls

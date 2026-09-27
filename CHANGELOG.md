@@ -7,7 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.26] — 2026-09-27
+
+> First release published to **GHCR** as well as Docker Hub. The Docker Hub
+> repo `ronaldraygun/ytt` is private (the fleet namespace), so the README
+> quick start was unpullable for everyone else, and `ytt-build`'s
+> anonymous-pull gate could never pass (release 0.2.25's workflow ended Failed
+> after a good push: the gate's token-less ServiceAccount broke Argo v4's
+> executor init before its script ran — `ytt-build-fxxct`). This release
+> restores the registry the plan originally chose: the same image, digest for
+> digest, is now at `ghcr.io/jedarden/ytt:0.2.26`, and the docs pin it. The
+> cluster keeps deploying `ronaldraygun/ytt:0.2.26`. GHCR creates a new user
+> package private, so the package needs a one-time flip to Public by hand
+> (`deploy/DEPLOY-CHECKLIST.md` section 3); until then the workflow's last step
+> fails by design with instructions, and the image is nonetheless published.
+> No runtime code changed in *this* commit — the runtime changes below are
+> the worker commits already on `master` since 0.2.25.
+
+### Added
+
+- **GHCR publication** (beads `ytt-bffa140b`, `ytt-7656c3a2`): `ytt-build`
+  copies the image `docker-build` pushed to `ghcr.io/jedarden/ytt:<version>`
+  with `skopeo copy --preserve-digests` (no second build), refusing to succeed
+  unless both registries report the same manifest digest, then boots the GHCR
+  tag with the README quick-start environment and finally asks the registry
+  for it with **no credentials at all** (anonymous token, manifest hashed
+  against the published digest, every blob authorized) — armor's
+  `verify-push-ghcr` recipe, run last so a merely-private package is the only
+  thing left failing.
+
 ### Changed
+
+- **The build is pinned to the pushed commit** (bead `ytt-bffa140b`).
+  `ytt-sensor` maps the webhook's `body.after` into a `revision` parameter;
+  `resolve-version` requires a full SHA and reads the `VERSION` diff from that
+  commit's parent, and `docker-build` builds that exact SHA (initContainer
+  checkout, directory context) instead of letting kaniko clone
+  `refs/heads/master` whenever the pod started. A fleet worker pushes to
+  `master` roughly every half hour, so a sibling push could previously slip
+  unvalidated commits into a release tag. Same recipe as armor
+  (armor-8c4d068d).
+- **The release gates were rebuilt** (bead `ytt-7656c3a2`): the token-less
+  `ytt-pull-gate` ServiceAccount and the `anonymous-pull-gate` step are gone
+  (the gate could never execute — see above), the smoke test runs under the
+  workflow's ordinary account, and anonymity is proven by talking to the
+  registry without credentials. `tests/unit/test_pull_release_gate.py` had
+  *asserted* the broken design; it now pins the working one and adds a
+  regression test that no step may override the workflow's ServiceAccount.
+- **Public docs point at GHCR**: the README quick start and the self-hosting
+  compose example pin `ghcr.io/jedarden/ytt:0.2.26`; the release-metadata guard
+  (`scripts/definition-of-done.sh`) and `tests/unit/test_config_docs_drift.py`
+  follow. `deploy/DEPLOY-CHECKLIST.md` section 3 is now the GHCR
+  visibility flip; the plan's "Image publishing" section records the decision.
 
 - **OAuth client registration is now redirect-pinned end to end** (bead
   `ytt-8459c44d`). The documented policy ("DCR on ytt's client-facing AS is

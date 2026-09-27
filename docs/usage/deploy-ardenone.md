@@ -116,20 +116,24 @@ curl http://ytt.ytt.svc:8080/ytt/metrics | grep ytt_
 1. Release commit to `jedarden/ytt` on Forgejo bumps `VERSION`
    (plus `pyproject.toml`, `ytt/__init__.py`, `CHANGELOG.md`).
 2. Argo Events `ytt-sensor` fires on the push to `master`.
-3. `ytt-build` WorkflowTemplate (iad-ci) validates the `VERSION` bump, then
-   kaniko-builds the image — the Dockerfile's test stage runs
-   `pytest -m "not integration"` and a red suite aborts the build — and
-   pushes `ronaldraygun/ytt:<version>` to Docker Hub.
+3. `ytt-build` WorkflowTemplate (iad-ci) validates the `VERSION` bump in the
+   pushed commit, then kaniko-builds exactly that commit — the Dockerfile's
+   test stage runs `pytest -m "not integration"` and a red suite aborts the
+   build — pushes `ronaldraygun/ytt:<version>` to Docker Hub (what this
+   Deployment pulls), copies the same image to `ghcr.io/jedarden/ytt:<version>`,
+   smoke-tests it, and checks that it pulls anonymously.
 4. The pinned tag in `declarative-config/k8s/ardenone-cluster/ytt/deployment.yml`
    is bumped by a manual commit (CI never auto-bumps); ArgoCD syncs the
    updated Deployment and the pod restarts with the new image.
 
-The published image is `ronaldraygun/ytt` on Docker Hub.  It is pullable
-without auth only while the Hub repository is public; visibility is an
-operator Hub-UI flip with a one-line anonymous-pull check, in
+The image is published to two registries.  This Deployment pulls
+`ronaldraygun/ytt` from Docker Hub (a private namespace, via the
+`docker-hub-registry` pull secret).  The public one — what the README quick
+start and the self-hosting guide pin — is `ghcr.io/jedarden/ytt`, which is
+pullable without auth only once its GHCR package is public: a one-time
+operator flip with a one-line anonymous-pull check, in
 `deploy/DEPLOY-CHECKLIST.md` §3 (a 401 there means the flip is pending).
-The originally planned `ghcr.io/jedarden/ytt` was dropped; the decision is
-recorded in `docs/plan/plan.md` ("Image publishing").
+The decision is recorded in `docs/plan/plan.md` ("Image publishing").
 
 Watch builds: https://argo-ci.ardenone.com
 

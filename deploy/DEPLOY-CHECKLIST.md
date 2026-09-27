@@ -26,32 +26,42 @@ commit:
 - `ytt/__init__.py` `__version__`
 - `CHANGELOG.md` (new `## [x.y.z]` section)
 
-### 2. Push — CI builds and pushes the image
+### 2. Push — CI builds and publishes the image
 
 ```bash
 git push   # Forgejo is origin; GitHub receives the read-only mirror
 ```
 
 The Forgejo webhook fires the `ytt-sensor` (argo-events) → `ytt-build`
-WorkflowTemplate in iad-ci:
+WorkflowTemplate in iad-ci. The sensor passes the pushed commit's SHA
+(`body.after`) as the workflow's `revision` parameter, and every step works
+on exactly that commit — not on whatever `master` has become by the time a
+pod starts:
 
-1. `resolve-version` validates the `VERSION` bump (semver) — no bump, no build.
-2. `docker-build` builds with kaniko; the Dockerfile's test stage runs
-   `pytest -m "not integration"` and a red suite aborts the build; then
-   pushes **`ronaldraygun/ytt:<version>`** to Docker Hub.
-3. `anonymous-pull-gate` verifies what a self-hoster hits next: an
-   unauthenticated registry manifest lookup and a full anonymous blob pull
-   (skopeo `--no-creds` / `--src-no-creds`) of **`ronaldraygun/ytt:<version>`**,
-   the pulled manifest hash-checked against the advertised sha256. A registry
-   authorization error (401/403 — the Hub repo private again) fails the
-   release right here; §3 is the operator fix. Rate limits (429) and outages
-   are classified as such in the log — they are real failures too, but they
-   are not the visibility regression, and neither is retried into a pass.
-4. `quick-start-smoke` boots the tag step 3 just pulled as a pod — under the
-   secret-free `ytt-pull-gate` ServiceAccount, so the kubelet's pull is
-   anonymous too — with the README quick-start environment, and requires
-   `/ytt/health` to answer `{"status":"ok"}` and an anonymous GET on the MCP
-   mount to get the documented `401` + Bearer `WWW-Authenticate` challenge.
+1. `resolve-version` rejects anything that is not a full SHA, checks out that
+   commit, and validates that *it* bumps `VERSION` (semver) — no bump, no
+   build.
+2. `docker-build` builds that commit with kaniko (an initContainer checks out
+   the exact SHA); the Dockerfile's test stage runs
+   `pytest -m "not integration"` against the whole build context and a red
+   suite aborts the build; then it pushes **`ronaldraygun/ytt:<version>`** to
+   Docker Hub — the image the cluster deploys.
+3. `publish-ghcr` copies that exact image to
+   **`ghcr.io/jedarden/ytt:<version>`** (`skopeo copy --preserve-digests`; no
+   second build) — the tag the README quick start pins, and the one a
+   self-hoster can pull with no login. It refuses to succeed unless both
+   registries report the same manifest digest.
+4. `quick-start-smoke` boots the GHCR tag as a pod with the README quick-start
+   environment, and requires `/ytt/health` to answer `{"status":"ok"}` and an
+   anonymous GET on the MCP mount to get the documented `401` + Bearer
+   `WWW-Authenticate` challenge.
+5. `verify-ghcr-public` — last on purpose — asks the registry for the tag with
+   **no credentials at all**: an anonymous token, the manifest (its sha256
+   must equal the digest step 3 published), and every config/layer blob. A
+   failure here almost always means the GHCR package is still private; §3 is
+   the one-time operator fix. Rate limits (429) and outages are classified as
+   such in the log — real failures too, but not the visibility one — and
+   nothing is retried into a pass.
 
 Watch: https://argo-ci.ardenone.com, or
 
@@ -60,51 +70,58 @@ kubectl --server=http://traefik-iad-ci:8001 \
   get workflows -n argo-workflows --sort-by=.metadata.creationTimestamp | tail -5
 ```
 
-Auth for the push is the `docker-hub-registry` Secret (SealedSecret in
+Push credentials: the `docker-hub-registry` Secret (SealedSecret in
 `declarative-config` under `k8s/apexalgo-iad/kubernetes-reflector/`,
 auto-reflected into `argo-workflows` and the ytt namespace by
-kubernetes-reflector).  There is no GHCR push — `ghcr.io/jedarden/ytt` was
-the Phase-11 plan and was dropped; see `docs/plan/plan.md` ("Image
-publishing") for the decision.
+kubernetes-reflector) for Docker Hub, and `ghcr-jedarden-registry` (an
+ExternalSecret in `argo-workflows`, needs `write:packages`) for GHCR — the same
+secret armor, clasp and sun-sim already publish public images with.
 
-The gate records what it tested on the Workflow object itself — podGC
+The workflow records what it verified on the Workflow object itself — podGC
 deletes the pods the moment they finish, but output parameters outlive them:
 
 ```bash
 kubectl --server=http://traefik-iad-ci:8001 get workflow <name> -n argo-workflows \
   -o jsonpath='{range .outputs.parameters[*]}{.name}={.value}{"\n"}{end}'
-# tested-tag=ronaldraygun/ytt:<version>
+# tested-tag=ghcr.io/jedarden/ytt:<version>
 # tested-digest=sha256:<64 hex>
 ```
 
-### 3. Keep the Docker Hub repository PUBLIC (operator)
+**Judge a release by the registry, not only by the workflow phase.** The
+image is published as soon as `publish-ghcr` succeeds; a workflow that ends
+red at `verify-ghcr-public` is a published, smoke-tested release whose GHCR
+package is still private. Confirm with an authenticated
+`docker manifest inspect ronaldraygun/ytt:<version>`.
 
-The quick-start (`README.md` → `docker run ronaldraygun/ytt:<version>`) only
-works if the Docker Hub repo `ronaldraygun/ytt` is **public**.  New repos
-default to private, and this one was pushed private until 2026-09-16 — an
-anonymous `docker pull` got 401 the whole time. The `anonymous-pull-gate`
-CI step now fails the release on exactly that regression (§2 step 3); this
-manual check is how you verify visibility *before* cutting a release,
-instead of finding out through a red release.
+### 3. Make the GHCR package PUBLIC — once (operator)
 
-- Where: Docker Hub → `ronaldraygun/ytt` → **Settings** → Visibility →
-  **Public**.
-- Why a human: the Hub API has no documented visibility-change endpoint, and
-  the PAT stored in OpenBao
-  (`secret/ardenone-cluster/docker-hub/registry`) authenticates read/pull
-  but gets `403 insufficient scope` on repository PATCH — the flip is a
-  Hub-UI action (password login).
+The quick start (`README.md` → `docker run ghcr.io/jedarden/ytt:<version>`)
+only works for strangers if the GHCR package is **public**. GitHub creates a
+new user package **private**, so the very first `publish-ghcr` creates
+`ghcr.io/jedarden/ytt` private and `verify-ghcr-public` fails with these
+instructions. It is a one-time flip; later versions are tags of the same
+package and stay public. (`ronaldraygun/ytt` on Docker Hub stays private — it
+is the cluster's image and nothing anonymous depends on it.)
 
-Verify from any machine **without** Docker Hub auth:
+- Where: github.com/jedarden → **Packages** → `ytt` → **Package settings** →
+  Danger zone → **Change visibility** → **Public**. The image carries an
+  `org.opencontainers.image.source` label pointing at the public
+  `jedarden/ytt` repo, which is what links the package to it.
+- Then retry the failed `verify-ghcr-public` step in the Argo UI
+  (`https://argo-ci.ardenone.com`); everything before it already succeeded.
+- Why a human: GitHub exposes no package-visibility endpoint that the fleet
+  uses (armor's own `verify-push-ghcr` gives the same UI instruction), and the
+  `gh` token on the coding box has no packages scope.
+
+Verify from any machine **without** any login:
 
 ```bash
-docker pull ronaldraygun/ytt:<version>    # or:
-curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ronaldraygun/ytt:pull" \
-  | jq -r .token > /tmp/t
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat /tmp/t)" \
-  -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
-  https://registry-1.docker.io/v2/ronaldraygun/ytt/manifests/<version>
-# Expect 200.  401 = still private.
+docker pull ghcr.io/jedarden/ytt:<version>    # or:
+TOKEN=$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:jedarden/ytt:pull" | jq -r .token)
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+  https://ghcr.io/v2/jedarden/ytt/manifests/<version>
+# Expect 200.  401/403/404 = still private (or the tag is missing).
 ```
 
 ### 4. Pin the new tag in declarative-config

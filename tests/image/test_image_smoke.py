@@ -27,8 +27,10 @@ no real credential ever enters this file, the image, or the daemon's config.
 Prerequisites (everything else skips cleanly):
   * a reachable docker daemon (``docker info``)
   * a built image ref: ``YTT_SMOKE_IMAGE`` (default: the ``VERSION``-pinned
-    published tag ``ronaldraygun/ytt:X.Y.Z`` — a private Hub repo, so either
-    ``docker login`` first or point ``YTT_SMOKE_IMAGE`` at a local build)
+    published tag ``ghcr.io/jedarden/ytt:X.Y.Z`` — the public GHCR image the
+    README quick start pins, so no ``docker login`` is needed once the package
+    is public; point ``YTT_SMOKE_IMAGE`` at a local build to test unpublished
+    code)
   * the ``cryptography`` package (already in the project's dependency graph —
     it signs the stub IdP's self-signed certificate)
 
@@ -125,7 +127,7 @@ def image() -> str:
     """
     ref = os.environ.get(
         "YTT_SMOKE_IMAGE",
-        f"ronaldraygun/ytt:{(Path(__file__).parents[2] / 'VERSION').read_text().strip()}",
+        f"ghcr.io/jedarden/ytt:{(Path(__file__).parents[2] / 'VERSION').read_text().strip()}",
     )
     if _docker("image", "inspect", ref).returncode != 0:
         pull = _docker("pull", ref)
@@ -133,8 +135,10 @@ def image() -> str:
             pytest.fail(
                 f"image {ref} not available locally and pull failed:\n"
                 f"{pull.stderr[-1000:]}\n"
-                "(ronaldraygun/* is a private Docker Hub repo — docker login "
-                "first, or set YTT_SMOKE_IMAGE to a locally built tag)"
+                "(ghcr.io/jedarden/ytt is public once its package visibility is "
+                "flipped — deploy/DEPLOY-CHECKLIST.md section 3; until then "
+                "docker login to ghcr.io, or set YTT_SMOKE_IMAGE to a locally "
+                "built tag)"
             )
     return ref
 

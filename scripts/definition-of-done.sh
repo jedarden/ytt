@@ -70,11 +70,11 @@ changelog_top="$(grep -m1 -E '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | sed
   note "CHANGELOG newest section is '${changelog_top:-none}', VERSION is ${release_version} (CHANGELOG.md)"
 
 for doc in README.md docs/usage/self-hosting.md; do
-  pins="$(grep -oE 'ronaldraygun/ytt:[0-9]+\.[0-9]+\.[0-9]+' "$doc" | sort -u || true)"
+  pins="$(grep -oE 'ghcr\.io/jedarden/ytt:[0-9]+\.[0-9]+\.[0-9]+' "$doc" | sort -u || true)"
   pin_count="$(printf '%s' "$pins" | grep -c . || true)"
   if [ "$pin_count" -ne 1 ]; then
-    note "${doc} should pin exactly one ronaldraygun/ytt:X.Y.Z image, found ${pin_count}"
-  elif [ "$pins" != "ronaldraygun/ytt:${release_version}" ]; then
+    note "${doc} should pin exactly one ghcr.io/jedarden/ytt:X.Y.Z image, found ${pin_count}"
+  elif [ "$pins" != "ghcr.io/jedarden/ytt:${release_version}" ]; then
     note "${doc} pins '${pins}', VERSION is ${release_version}"
   fi
 done

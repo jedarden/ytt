@@ -47,10 +47,11 @@ Covered by [DEPLOY-CHECKLIST.md](DEPLOY-CHECKLIST.md) §1–§3, condensed:
    the tag to Forgejo.  `scripts/definition-of-done.sh` fails the gate when
    any of these drift apart (added after 0.2.20 shipped with five of the six
    still at 0.2.19 and no tag — bead `ytt-d18f0ab1`).
-2. The push webhook fires `ytt-sensor` → `ytt-build` (iad-ci): the `VERSION`
-   bump is validated, the Dockerfile's test stage runs
-   `pytest -m "not integration"` as a build gate, and `ronaldraygun/ytt:<version>`
-   is pushed to Docker Hub.
+2. The push webhook fires `ytt-sensor` → `ytt-build` (iad-ci), pinned to the
+   pushed commit: the `VERSION` bump is validated, the Dockerfile's test stage
+   runs `pytest -m "not integration"` as a build gate, `ronaldraygun/ytt:<version>`
+   is pushed to Docker Hub (the cluster's image), and the same image is copied
+   to `ghcr.io/jedarden/ytt:<version>` (the public one).
 3. Watch the workflow (Argo UI at `https://argo-ci.ardenone.com`, or the
    `kubectl get workflows` recipe in DEPLOY-CHECKLIST §2).  **Do not pin a tag
    that has not finished building** — the pin step is what makes the cluster

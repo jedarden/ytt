@@ -52,21 +52,30 @@ values.
 The Forgejo webhook → `ytt-sensor` (argo-events, fires on every push to
 `master`) → `ytt-build` WorkflowTemplate (iad-ci):
 
-1. **resolve-version** — clones the repo and validates that the pushed commit
-   bumps `VERSION` to a semver tag.  CI never auto-bumps, auto-commits, or
-   pushes; a push without a `VERSION` change fails the run by design.
-2. **docker-build** — kaniko build from the Forgejo git context.  The
-   Dockerfile's `test` stage runs `pytest -m "not integration"` as a build
-   gate (a red suite aborts the build), then pushes `ronaldraygun/ytt:<version>`
-   to Docker Hub using the `docker-hub-registry` secret (SealedSecret in
+1. **resolve-version** — the sensor passes the pushed commit's SHA as the
+   `revision` parameter; this step checks out exactly that commit and
+   validates that it bumps `VERSION` to a semver tag.  CI never auto-bumps,
+   auto-commits, or pushes; a push without a `VERSION` change fails the run
+   by design.
+2. **docker-build** — kaniko build of that exact commit (an initContainer
+   checks out the SHA into a directory context).  The Dockerfile's `test`
+   stage runs `pytest -m "not integration"` as a build gate (a red suite
+   aborts the build), then pushes `ronaldraygun/ytt:<version>` to Docker Hub
+   using the `docker-hub-registry` secret (SealedSecret in
    `declarative-config`, reflected across namespaces by kubernetes-reflector).
+3. **publish-ghcr** — copies that same image (same digest, no rebuild) to
+   `ghcr.io/jedarden/ytt:<version>` with the `ghcr-jedarden-registry` secret.
+4. **quick-start-smoke** and **verify-ghcr-public** — boot the GHCR tag with
+   the README quick-start environment, then check that it pulls with no
+   credentials at all.
 
-The public-facing image is `ronaldraygun/ytt:<version>` on Docker Hub —
-this replaced the originally planned `ghcr.io/jedarden/ytt` (see
-`docs/plan/plan.md`, "Image publishing").  **The Docker Hub repository must
-be public** for the README quick-start to work; making it public is a
-Hub-UI action (a read-only PAT cannot change visibility) — see
-`DEPLOY-CHECKLIST.md`.
+Two registries, two audiences: the cluster deploys `ronaldraygun/ytt:<version>`
+from Docker Hub (a private namespace); the **public-facing image** — what the
+README quick start and the self-hosting compose example pin — is
+`ghcr.io/jedarden/ytt:<version>`.  This restores the registry originally
+planned (`docs/plan/plan.md`, "Image publishing").  The GHCR package must be
+flipped to Public once, by hand, after its first publish — see
+`DEPLOY-CHECKLIST.md` section 3.
 
 ## Human-gated steps
 

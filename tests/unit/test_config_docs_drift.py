@@ -619,12 +619,21 @@ _SELFHOSTING_PIN_DOCS = {
 def test_selfhosting_docs_pin_the_release_image(doc_name):
     """Each self-hosting document pins exactly the release image — the
     pytest-side twin of the DoD script's markdown leg, so the Docker build
-    gate enforces it too."""
+    gate enforces it too.
+
+    The public docs pin the GHCR image (``ghcr.io/jedarden/ytt``), the one a
+    self-hoster can pull anonymously; the cluster manifests keep pinning the
+    Docker Hub image (``test_manifests_pin_the_release_image``). Both are
+    published by ytt-build from the same build, so both track VERSION."""
     doc = _SELFHOSTING_PIN_DOCS[doc_name]
-    pins = set(re.findall(r"ronaldraygun/ytt:(\d+\.\d+\.\d+)", doc))
+    pins = set(re.findall(r"ghcr\.io/jedarden/ytt:(\d+\.\d+\.\d+)", doc))
     assert pins == {VERSION}, (
         f"{doc_name} pins {sorted(pins)}, VERSION is {VERSION} — bump every "
         "copy in the same release commit"
+    )
+    assert "ronaldraygun/ytt" not in doc, (
+        f"{doc_name} points a self-hoster at the private Docker Hub image — "
+        "the public quick start is ghcr.io/jedarden/ytt"
     )
 
 

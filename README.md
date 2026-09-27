@@ -20,7 +20,7 @@ docker run --rm \
   -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
   -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
-  ronaldraygun/ytt:0.2.25
+  ghcr.io/jedarden/ytt:0.2.26
 ```
 
 The OAuth client pair and `YTT_PUBLIC_URL` are startup-required — the server
@@ -36,8 +36,9 @@ for the full recipe.
 
 The server starts at `http://localhost:8080/ytt`.  Add it as a Claude connector
 at `https://your-domain.example.com/ytt` (HTTPS required for Anthropic's backend).
-If the image pull 401s, the Docker Hub repo's visibility flip is pending —
-see `deploy/DEPLOY-CHECKLIST.md` §3 for the operator step and the one-line
+The image is published to GHCR as a public package.  If the pull 401s, that
+package's one-time visibility flip is still pending — see
+`deploy/DEPLOY-CHECKLIST.md` §3 for the operator step and the one-line
 anonymous-pull check.
 
 See [docs/usage/self-hosting.md](docs/usage/self-hosting.md) for the full
