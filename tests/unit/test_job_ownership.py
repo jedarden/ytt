@@ -369,18 +369,25 @@ class TestRestarted:
         await _drain_background_jobs()
         assert (await env.registry.get(VIDEO_ID)).owner == ALICE
 
-        # Bob re-kicks; the replacement is his.
-        _install_download(monkeypatch)
+        # Bob re-kicks; the replacement is his. The replacement's download is
+        # held on a gate so the in-flight window below is deterministic — the
+        # stub ASR socket finishes the job within a few loop ticks, and
+        # ungated it could reach done/cache-hit before the polls run (seen as
+        # an intermittent DoD failure in clean extractions, ytt-43e648bf).
+        gate = threading.Event()
+        _install_download(monkeypatch, gate=gate)
         rekicked = await _start(monkeypatch, BOB)
         assert rekicked["status"] == "pending"
 
         replacement = await env.registry.get(VIDEO_ID)
-        assert replacement.status == "pending"
         assert replacement.owner == BOB
+        assert replacement.status in ("pending", "running")  # in-flight: gated
 
+        # The in-flight replacement handle polls for its re-owner only.
         assert (await _poll(monkeypatch, BOB))["status"] in ("pending", "running")
         assert await _poll(monkeypatch, ALICE) == _not_found(VIDEO_ID)
 
+        gate.set()
         await _drain_background_jobs()
         done_view = await _poll(monkeypatch, BOB)
         assert done_view["status"] == "ok"
