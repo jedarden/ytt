@@ -12,7 +12,7 @@ deploy/CANARY-MONITORING-RUNBOOK.md §1):
     ytt_canary_last_success_timestamp_seconds  — Gauge (set when ANY path succeeds)
     ytt_canary_failures_total                  — Counter (incremented when NO path succeeds)
     ytt_canary_probe_last_success_timestamp_seconds — Gauge{probe} (per path)
-    ytt_canary_probes_total                    — Counter{probe, outcome} (per path)
+    ytt_canary_probes_total                    — Counter{probe, outcome} (per video per path)
 
 The per-path pair is what makes a persistent failure *attributable*:
 ``probe=direct|via_proxy`` (the same vocabulary as the gate,
@@ -68,9 +68,12 @@ from ytt.observability import (
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Fixed internal video list (plan: §Canary — "fixed internal video list")
+# Fixed internal video set (plan: §Canary — "fixed internal video list")
 # These videos must be stable (old, non-livestream, always-captioned).
 # Update if a video is deleted or region-blocked.
+# Every entry is probed each cycle (see _probe_all_once): the list is a
+# coverage set, not a stop-at-first-success ladder — a caption-path
+# regression confined to one video must stay observable.
 # ---------------------------------------------------------------------------
 
 CANARY_VIDEO_IDS: tuple[str, ...] = (
@@ -117,8 +120,8 @@ CANARY_PROBE_OUTCOMES: tuple[str, ...] = (
 
 ytt_canary_probes_total = Counter(
     "ytt_canary_probes_total",
-    "Canary probe-ladder terminations by path and outcome (one per path per "
-    'cycle; outcome="ok" or a stable ytt.errors error_code).',
+    "Canary probe outcomes by path and video (one increment per video per "
+    'path per cycle; outcome="ok" or a stable ytt.errors error_code).',
     ["probe", "outcome"],
 )
 
@@ -218,41 +221,52 @@ def probe_once_detail(video_id: str, proxy: str | None = None) -> dict:
     }
 
 
-def _probe_ladder_once(proxy: str | None = None) -> dict:
-    """Walk the fixed video ladder once and return the terminating probe.
+def _probe_all_once(proxy: str | None = None) -> list[dict]:
+    """Probe **every** configured video once and return the per-video reports.
 
-    Probes :data:`CANARY_VIDEO_IDS` in order and stops at the first success
-    (the plan §Canary fallback ladder — one good fetch per cycle, no wasted
-    residential bandwidth).  Returns the terminating :func:`probe_once_detail`
-    report with the video that produced it added as ``video_id``, so the
-    ladder's result carries its own ``outcome`` for the per-path metrics and
-    the logs.  Never returns an empty dict: the ladder has at least one video.
+    Every :data:`CANARY_VIDEO_IDS` entry is fetched each cycle — the list is
+    a coverage set, not a stop-at-first-success ladder (bead
+    ``ytt-1b1c6ac4``).  Under the old ladder the second video was probed only
+    when the first failed, so a caption-path regression confined to it had
+    zero ongoing coverage while every freshness gauge stayed fresh.  The
+    added cost is one yt-dlp metadata fetch per path per cycle in the healthy
+    state — a cycle in which everything failed already walked the whole list.
+
+    Returns one :func:`probe_once_detail` report per video, in configured
+    order, each with its ``video_id`` added.  Never empty: the video set has
+    at least one entry.
 
     ``proxy`` is the continuous counterpart of ``ytt canary --once
     --via-proxy``: pass ``YTT_PROXY_URL`` to measure the fallback path from
     the same process and cadence that measures the direct one.
     """
-    result: dict = {}
-    for video_id in CANARY_VIDEO_IDS:
-        result = dict(probe_once_detail(video_id, proxy=proxy), video_id=video_id)
-        if result["ok"]:
-            break
-    return result
+    return [
+        dict(probe_once_detail(video_id, proxy=proxy), video_id=video_id)
+        for video_id in CANARY_VIDEO_IDS
+    ]
 
 
-def _record_probe(probe: str, detail: dict) -> bool:
-    """Record one path's ladder result in the per-path metrics.
+def _record_probe(probe: str, details: list[dict]) -> bool:
+    """Record one path's per-video probe results in the per-path metrics.
 
-    Every termination increments ``ytt_canary_probes_total{probe, outcome}``;
-    a success also stamps the per-path freshness gauge.  Returns the detail's
-    ``ok`` so the caller can fold paths into the overall cycle verdict.
+    Every probe increments ``ytt_canary_probes_total{probe, outcome}`` with
+    its own outcome — including a failure on a path that also had a success,
+    which is how a single-video caption regression stays visible (bead
+    ``ytt-1b1c6ac4``).  If any video on the path succeeded, the per-path
+    freshness gauge is stamped once.  Returns whether the path succeeded at
+    all so the caller can fold paths into the overall cycle verdict.
     """
-    ytt_canary_probes_total.labels(probe=probe, outcome=detail["outcome"]).inc()
-    if detail["ok"]:
+    any_ok = False
+    for detail in details:
+        ytt_canary_probes_total.labels(probe=probe, outcome=detail["outcome"]).inc()
+        _log_probe(probe, detail)
+        if detail["ok"]:
+            any_ok = True
+    if any_ok:
         ytt_canary_probe_last_success_timestamp_seconds.labels(probe=probe).set(
             time.time()
         )
-    return bool(detail["ok"])
+    return any_ok
 
 
 def _log_probe(probe: str, detail: dict) -> None:
@@ -275,17 +289,18 @@ def _log_probe(probe: str, detail: dict) -> None:
 async def run_probe_loop(interval_sec: int = 600) -> None:
     """Async probe loop — runs forever (plan: long-running Deployment).
 
-    Every ``interval_sec`` seconds, walk the fallback ladder **directly**;
-    when ``YTT_PROXY_URL`` is configured, walk it **through the proxy** too —
-    the continuous counterpart of the gate's two probes (RUNBOOK §3.1,
-    CANARY-MONITORING-RUNBOOK §1), so a persistent failure is attributable
-    to a path, not just "the canary".
+    Every ``interval_sec`` seconds, probe **every** configured video
+    **directly**; when ``YTT_PROXY_URL`` is configured, probe them all
+    **through the proxy** too — the continuous counterpart of the gate's two
+    probes (RUNBOOK §3.1, CANARY-MONITORING-RUNBOOK §1), so a persistent
+    failure is attributable to a path, not just "the canary".
 
     Metrics per cycle (CANARY-MONITORING-RUNBOOK §1):
 
-    * ``ytt_canary_probes_total{probe, outcome}`` — one increment per path
+    * ``ytt_canary_probes_total{probe, outcome}`` — one increment per video
+      per path, labelled by that video's own outcome
     * ``ytt_canary_probe_last_success_timestamp_seconds{probe}`` — stamped
-      per path on success
+      per path when any of its videos succeeded
     * ``ytt_canary_last_success_timestamp_seconds`` — stamped when ANY path
       succeeded; this is the gauge ``YttCanaryFailed`` watches, so stale
       means *neither* path has worked for the window — fetches down
@@ -315,13 +330,11 @@ async def run_probe_loop(interval_sec: int = 600) -> None:
     )
 
     while True:
-        direct = await asyncio.to_thread(_probe_ladder_once)
+        direct = await asyncio.to_thread(_probe_all_once)
         any_ok = _record_probe(PROBE_DIRECT, direct)
-        _log_probe(PROBE_DIRECT, direct)
         if proxy_url:
-            via = await asyncio.to_thread(_probe_ladder_once, proxy_url)
+            via = await asyncio.to_thread(_probe_all_once, proxy_url)
             any_ok = _record_probe(PROBE_VIA_PROXY, via) or any_ok
-            _log_probe(PROBE_VIA_PROXY, via)
 
         if any_ok:
             ytt_canary_last_success_timestamp_seconds.set(time.time())

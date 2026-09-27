@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The canary probe loop probes every configured video each cycle**
+  (bead `ytt-1b1c6ac4`). `run_probe_loop` previously walked
+  `CANARY_VIDEO_IDS` as a short-circuit ladder and stopped at the first
+  success, so `dQw4w9WgXcQ` was probed only when `jNQXAC9IVRw` failed —
+  a caption-path regression confined to the second video had zero ongoing
+  coverage while every freshness gauge stayed fresh. The list is now a
+  coverage set: every video is fetched each cycle per path,
+  `ytt_canary_probes_total{probe, outcome}` increments per video (a
+  single-video failure is now visible beside the successes that keep the
+  gauges fresh), and the per-path freshness gauge stamps once when any
+  video on the path succeeded. The cost is one extra yt-dlp metadata
+  fetch per path per cycle in the healthy state — a full-outage cycle
+  already walked the whole list. The four `YttCanary*` alerts and their
+  expressions are unchanged (`YttCanaryProbeFlapping` aggregates by
+  `probe`, so per-video increments need no rule change). Pinned by
+  `tests/unit/test_canary_once.py::TestProbeAllOnce` and the metric-layer
+  blind-spot test in `tests/unit/test_canary_monitoring.py`.
+
 ## [0.2.25] — 2026-09-26
 
 > First release since 0.2.21 that actually publishes an image. 0.2.22 and

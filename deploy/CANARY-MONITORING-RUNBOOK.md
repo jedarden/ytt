@@ -28,18 +28,20 @@ decision table, §3.1), [CACHE-RUNBOOK.md](CACHE-RUNBOOK.md),
 All series come from the **canary pod's own `/metrics` on :8081**
 (prometheus_client registry), scraped by the `ytt-canary` ServiceMonitor
 endpoint.  They are emitted by `ytt/canary.py::run_probe_loop`, which every
-cycle walks the fixed video ladder **directly** and — when `YTT_PROXY_URL`
-is configured — **through the proxy** (the same two paths the gate probes
-once).
+cycle probes **every** video in the fixed set (`CANARY_VIDEO_IDS` — a
+coverage set, not a stop-at-first-success ladder, so a caption regression
+confined to one video stays observable) **directly** and — when
+`YTT_PROXY_URL` is configured — **through the proxy** (the same two paths
+the gate probes once).
 
 | Series | Meaning |
 |---|---|
 | `ytt_canary_last_success_timestamp_seconds` | Unix time of the last cycle in which **any** path succeeded.  This is what `YttCanaryFailed` watches: stale means *neither* path has worked for the window — transcript fetches are down. |
 | `ytt_canary_failures_total` | Cycles in which **no** path succeeded. |
-| `ytt_canary_probe_last_success_timestamp_seconds{probe}` | Per-path freshness: last cycle in which **that path** succeeded.  `probe="direct"` (native egress) or `probe="via_proxy"` (through `YTT_PROXY_URL`). |
-| `ytt_canary_probes_total{probe, outcome}` | One increment per path per cycle, labelled by how the ladder **terminated**: `outcome="ok"` or a stable `ytt.errors` error code (`ip_blocked`, `empty_body`, `rate_limited`, `unavailable`, …). |
+| `ytt_canary_probe_last_success_timestamp_seconds{probe}` | Per-path freshness: last cycle in which **that path** succeeded (any of its videos).  `probe="direct"` (native egress) or `probe="via_proxy"` (through `YTT_PROXY_URL`). |
+| `ytt_canary_probes_total{probe, outcome}` | One increment per **video** per path per cycle, labelled by that video's own outcome: `outcome="ok"` or a stable `ytt.errors` error code (`ip_blocked`, `empty_body`, `rate_limited`, `unavailable`, …). |
 
-Three properties of these series that matter when reading them:
+Four properties of these series that matter when reading them:
 
 - **Freshness gauges initialize to loop-start time, not 0.**  A pod restart
   cannot fire a staleness alert before the first probe completes, and
@@ -58,6 +60,19 @@ Three properties of these series that matter when reading them:
   `ytt.observability.FETCH_BLOCK_OUTCOMES`), so an absent
   `ytt_canary_probes_total` child means "process predates this change",
   never "metric not registered".
+- **Every configured video is probed every cycle** — the list is a coverage
+  set, not a stop-at-first-success ladder (bead `ytt-1b1c6ac4`).  The
+  freshness gauges therefore mean "some video worked on this path", never
+  "each video did": a caption-path regression confined to one video leaves
+  every gauge fresh and all four alerts quiet, and shows up only as
+  non-`ok` increments on `ytt_canary_probes_total` beside the successes.
+  Read that counter by `outcome` (§3 step 3) whenever a single video is
+  suspected; with two configured videos a single persistently-failing one
+  is exactly 50 % of a path's increments, so `YttCanaryProbeFlapping`
+  (which needs more) is deliberately not its signal.  The cost of the
+  coverage is one extra yt-dlp metadata fetch per path per cycle in the
+  healthy state — a cycle in which everything failed already walked the
+  whole list.
 
 The **server** pod also exports the overall pair — registered at import,
 never updated (the server process runs no probe loop).  Only the
@@ -138,7 +153,7 @@ sum by (probe) (rate(ytt_canary_probes_total{outcome!="ok"}[30m]))
 
 A path failing every *other* cycle keeps its freshness gauge refreshing, so
 both staleness alerts stay quiet while the path is half-dead.  This rule
-fires when more than half of a path's ladder terminations in a 30-minute
+fires when more than half of a path's per-video probes in a 30-minute
 window were non-`ok`.  Which outcome dominates says why — break
 `ytt_canary_probes_total` down by `outcome` (§3) before acting.
 

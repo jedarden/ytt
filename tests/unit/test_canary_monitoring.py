@@ -15,8 +15,8 @@ cannot drift apart silently (bead ytt-2b3ca59e):
 
 Loop-metric tests run exactly one probe-loop cycle with the metric objects
 mocked (the prometheus_client REGISTRY is process-global; the established
-pattern from test_canary_once.py) and the ladder mocked per path.  No
-network I/O.
+pattern from test_canary_once.py) and the per-video probe mocked per path.
+No network I/O.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class _StopLoop(Exception):
 
 
 def _detail(ok: bool, outcome: str | None = None) -> dict:
-    """A ``_probe_ladder_once``-shaped terminating report."""
+    """A per-video ``probe_once_detail``-shaped report (video_id attached)."""
     return {
         "ok": ok,
         "outcome": outcome or ("ok" if ok else "ip_blocked"),
@@ -83,24 +83,25 @@ def _detail(ok: bool, outcome: str | None = None) -> dict:
 
 
 def _run_cycle(
-    direct: dict, via: dict | None = None, *, proxy_url: str | None = None
+    direct: list[dict], via: list[dict] | None = None, *, proxy_url: str | None = None
 ) -> SimpleNamespace:
     """Run exactly one ``run_probe_loop`` cycle; return the metric mocks.
 
-    ``direct``/``via`` are the ladder results each path's probe returns.
+    ``direct``/``via`` are the per-video probe results each path's cycle
+    returns (one entry per configured video, in order).
     """
     overall, failures = MagicMock(), MagicMock()
     pgauge, pcount = MagicMock(), MagicMock()
     settings = MagicMock(proxy_url=proxy_url)
-    ladder_calls: list[str | None] = []
+    probe_calls: list[str | None] = []
 
-    def ladder(proxy=None):
-        ladder_calls.append(proxy)
-        return dict(via if proxy else direct)
+    def probe_all(proxy=None):
+        probe_calls.append(proxy)
+        return list(via if proxy else direct)
 
     with (
         patch("ytt.config.get_settings", return_value=settings),
-        patch("ytt.canary._probe_ladder_once", side_effect=ladder),
+        patch("ytt.canary._probe_all_once", side_effect=probe_all),
         patch("ytt.canary.ytt_canary_last_success_timestamp_seconds", overall),
         patch("ytt.canary.ytt_canary_failures_total", failures),
         patch("ytt.canary.ytt_canary_probe_last_success_timestamp_seconds", pgauge),
@@ -115,7 +116,7 @@ def _run_cycle(
         failures=failures,
         pgauge=pgauge,
         pcount=pcount,
-        ladder_calls=ladder_calls,
+        probe_calls=probe_calls,
     )
 
 
@@ -123,47 +124,57 @@ def _label_kwargs(mock: MagicMock) -> set[str]:
     return {call.kwargs.get("probe") for call in mock.labels.call_args_list}
 
 
+def _outcome_pairs(pcount: MagicMock) -> set[tuple[str | None, str | None]]:
+    return {
+        (call.kwargs.get("probe"), call.kwargs.get("outcome"))
+        for call in pcount.labels.call_args_list
+    }
+
+
 class TestProbeLoopMetrics:
     def test_no_proxy_probes_only_the_direct_path(self):
-        cycle = _run_cycle(_detail(True))
-        assert cycle.ladder_calls == [None]
+        cycle = _run_cycle([_detail(True)])
+        assert cycle.probe_calls == [None]
 
     def test_proxy_configured_probes_both_paths(self):
-        cycle = _run_cycle(_detail(True), _detail(True), proxy_url="http://p:1")
-        assert cycle.ladder_calls == [None, "http://p:1"]
+        cycle = _run_cycle([_detail(True)], [_detail(True)], proxy_url="http://p:1")
+        assert cycle.probe_calls == [None, "http://p:1"]
 
     def test_boot_init_stamps_freshness_for_probed_paths_only(self):
         """Gauges initialize to loop start — for exactly the paths the loop
         will probe.  No via_proxy child is ever created without a proxy, so
         the series is absent (runbook §1: absent means "not probed", never
         "broken")."""
-        no_proxy = _run_cycle(_detail(True))
+        no_proxy = _run_cycle([_detail(True)])
         assert _label_kwargs(no_proxy.pgauge) == {"direct"}
 
-        with_proxy = _run_cycle(_detail(True), _detail(True), proxy_url="http://p:1")
+        with_proxy = _run_cycle(
+            [_detail(True)], [_detail(True)], proxy_url="http://p:1"
+        )
         assert _label_kwargs(with_proxy.pgauge) == {"direct", "via_proxy"}
 
     def test_boot_init_pre_registers_zero_counter_children(self):
         """Every canonical outcome gets a zero child per probed path, so an
         absent series reads as "process predates this", not "not
         registered" (runbook §1)."""
-        cycle = _run_cycle(_detail(True), _detail(True), proxy_url="http://p:1")
-        pairs = {
-            (call.kwargs.get("probe"), call.kwargs.get("outcome"))
-            for call in cycle.pcount.labels.call_args_list
-        }
+        cycle = _run_cycle([_detail(True)], [_detail(True)], proxy_url="http://p:1")
         expected = {
             (probe, outcome)
             for probe in ("direct", "via_proxy")
             for outcome in CANARY_PROBE_OUTCOMES
         }
-        # the cycle's own terminations add (path, "ok") pairs on top
+        # the cycle's own increments add (path, outcome) pairs on top
+        pairs = _outcome_pairs(cycle.pcount)
         assert expected <= pairs
         assert ("direct", "ok") in pairs and ("via_proxy", "ok") in pairs
 
     def test_cycle_success_refreshes_overall_and_path_gauges(self):
-        cycle = _run_cycle(_detail(True), _detail(True), proxy_url="http://p:1")
-        # boot stamp + one any-path stamp
+        cycle = _run_cycle(
+            [_detail(True)] * len(CANARY_VIDEO_IDS),
+            [_detail(True)] * len(CANARY_VIDEO_IDS),
+            proxy_url="http://p:1",
+        )
+        # boot stamp + one any-video stamp per path — once per path, not per video
         assert cycle.overall.set.call_count == 2
         assert cycle.failures.inc.called is False
         assert cycle.pgauge.labels.call_count == 4  # boot x2 + success x2
@@ -171,43 +182,72 @@ class TestProbeLoopMetrics:
     def test_any_path_success_refreshes_the_overall_gauge(self):
         """Overall freshness is ANY-path: a working proxy keeps
         YttCanaryFailed quiet while direct is blocked (runbook §1)."""
-        cycle = _run_cycle(_detail(False), _detail(True), proxy_url="http://p:1")
+        cycle = _run_cycle([_detail(False)], [_detail(True)], proxy_url="http://p:1")
         assert cycle.overall.set.call_count == 2
         assert cycle.failures.inc.called is False
 
     def test_no_path_success_increments_failures_not_the_gauge(self):
-        cycle = _run_cycle(_detail(False), _detail(False), proxy_url="http://p:1")
+        cycle = _run_cycle(
+            [_detail(False)] * len(CANARY_VIDEO_IDS),
+            [_detail(False)] * len(CANARY_VIDEO_IDS),
+            proxy_url="http://p:1",
+        )
         assert cycle.failures.inc.call_count == 1
         assert cycle.overall.set.call_count == 1  # boot stamp only
         assert cycle.pgauge.labels.call_count == 2  # boot stamps only
 
-    def test_termination_outcome_labels_each_path_counter(self):
+    def test_every_video_outcome_labels_the_path_counter(self):
+        """Each video's own outcome is counted — not just the cycle's
+        terminating one (bead ytt-1b1c6ac4)."""
         cycle = _run_cycle(
-            _detail(False, "empty_body"), _detail(False, "rate_limited"),
+            [_detail(True), _detail(False, "empty_body")],
+            [_detail(False, "rate_limited")],
             proxy_url="http://p:1",
         )
-        pairs = {
-            (call.kwargs.get("probe"), call.kwargs.get("outcome"))
-            for call in cycle.pcount.labels.call_args_list
-        }
+        pairs = _outcome_pairs(cycle.pcount)
+        assert ("direct", "ok") in pairs
         assert ("direct", "empty_body") in pairs
         assert ("via_proxy", "rate_limited") in pairs
 
+    def test_second_video_failure_keeps_the_path_fresh_but_is_counted(self):
+        """THE blind-spot pin at the metric layer (bead ytt-1b1c6ac4): a
+        caption regression confined to the second video must show up in the
+        counter while the path's freshness gauge — and the alerts that read
+        it — stay quiet.  Under the old ladder this cycle produced only
+        ``{probe="direct", outcome="ok"}`` and the second video was never
+        probed at all."""
+        cycle = _run_cycle([_detail(True), _detail(False, "empty_body")])
+        pairs = _outcome_pairs(cycle.pcount)
+        assert ("direct", "ok") in pairs
+        assert ("direct", "empty_body") in pairs
+        assert cycle.failures.inc.called is False  # the path still succeeded
+        assert cycle.overall.set.call_count == 2  # boot stamp + any-path stamp
+        assert _label_kwargs(cycle.pgauge) == {"direct"}  # no via_proxy child
+
+    def test_a_path_counts_as_failed_only_when_every_video_fails(self):
+        """Path freshness is any-video: both videos failing leaves the gauge
+        stale, skips the overall stamp and counts the cycle as failed."""
+        cycle = _run_cycle([_detail(False, "ip_blocked")] * len(CANARY_VIDEO_IDS))
+        assert cycle.pgauge.labels.call_count == 1  # boot stamp only
+        assert cycle.overall.set.call_count == 1  # boot stamp only
+        assert cycle.failures.inc.call_count == 1
+
 
 class TestRecordProbe:
-    """_record_probe — the per-path fold (counter always, gauge on ok)."""
+    """_record_probe — the per-path fold (counter per video, gauge once on
+    any-video success)."""
 
-    def _record(self, probe: str, detail: dict) -> SimpleNamespace:
+    def _record(self, probe: str, details: list[dict]) -> SimpleNamespace:
         pgauge, pcount = MagicMock(), MagicMock()
         with (
             patch("ytt.canary.ytt_canary_probe_last_success_timestamp_seconds", pgauge),
             patch("ytt.canary.ytt_canary_probes_total", pcount),
         ):
-            ok = canary._record_probe(probe, detail)
+            ok = canary._record_probe(probe, details)
         return SimpleNamespace(ok=ok, pgauge=pgauge, pcount=pcount)
 
     def test_success_counts_and_stamps(self):
-        rec = self._record("direct", _detail(True))
+        rec = self._record("direct", [_detail(True)])
         assert rec.ok is True
         rec.pcount.labels.assert_called_once_with(probe="direct", outcome="ok")
         rec.pcount.labels.return_value.inc.assert_called_once_with()
@@ -215,13 +255,37 @@ class TestRecordProbe:
         rec.pgauge.labels.return_value.set.assert_called_once()
 
     def test_failure_counts_without_stamping(self):
-        rec = self._record("via_proxy", _detail(False, "ip_blocked"))
+        rec = self._record("via_proxy", [_detail(False, "ip_blocked")])
         assert rec.ok is False
         rec.pcount.labels.assert_called_once_with(
             probe="via_proxy", outcome="ip_blocked"
         )
         rec.pcount.labels.return_value.inc.assert_called_once_with()
         rec.pgauge.labels.assert_not_called()
+
+    def test_every_video_counts_even_on_a_successful_path(self):
+        """A success does not short-circuit the fold: every video's outcome
+        is counted, which is what keeps a single-video regression visible
+        (bead ytt-1b1c6ac4)."""
+        rec = self._record(
+            "direct", [_detail(True), _detail(False, "empty_body")]
+        )
+        assert rec.ok is True
+        outcomes = [
+            call.kwargs.get("outcome")
+            for call in rec.pcount.labels.call_args_list
+        ]
+        assert outcomes == ["ok", "empty_body"]
+        assert rec.pcount.labels.return_value.inc.call_count == 2
+        # the path succeeded, so the freshness gauge stamps exactly once
+        rec.pgauge.labels.assert_called_once_with(probe="direct")
+        rec.pgauge.labels.return_value.set.assert_called_once()
+
+    def test_gauge_stamps_once_no_matter_how_many_videos_succeed(self):
+        rec = self._record("direct", [_detail(True), _detail(True)])
+        assert rec.ok is True
+        assert rec.pcount.labels.call_count == len(CANARY_VIDEO_IDS)
+        rec.pgauge.labels.assert_called_once_with(probe="direct")
 
 
 # ---------------------------------------------------------------------------

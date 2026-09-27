@@ -133,8 +133,11 @@ layer).
 > [docs/notes/single-replica.md](docs/notes/single-replica.md).
 
 Two canary knobs are compile-time constants in `ytt/canary.py`, not
-environment variables: the probe ladder (`CANARY_VIDEO_IDS` — `jNQXAC9IVRw`
-then `dQw4w9WgXcQ`, probed in order per cycle until one succeeds) and the
+environment variables: the fixed video set (`CANARY_VIDEO_IDS` —
+`jNQXAC9IVRw` then `dQw4w9WgXcQ`, every entry probed each cycle — a
+coverage set, not a stop-at-first-success ladder: a caption regression
+confined to the second video stays visible in `ytt_canary_probes_total`
+even while the first keeps succeeding) and the
 canary's dedicated metrics port :8081 (the server's own `/metrics` stays on
 :8080). Changing either is a code change, not config; the `ytt_canary_*`
 series they feed and their alerts:

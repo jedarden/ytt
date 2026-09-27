@@ -125,3 +125,19 @@ change, a missing series means "process predates the fix", never "metric not
 registered". The counter still has no increment site; wiring `ytt.fetch`
 outcomes into it remains the candidate follow-up named above. Everything else
 in this note is a 2026-09-18 evidence record for 0.2.20 and is unchanged.
+
+## Postscript — 2026-09-26 (bead `ytt-1b1c6ac4`)
+
+The loop shape this note describes has changed: `run_probe_loop` no longer
+stops at the first success.  Every `CANARY_VIDEO_IDS` entry is probed each
+cycle — a coverage set, not a ladder — so `dQw4w9WgXcQ` now has ongoing
+coverage instead of being reached only on a "Me at the zoo" failure, and
+`ytt_canary_probes_total` increments per video per path per cycle (a
+caption regression confined to one video is visible in the counter while
+the freshness gauges stay fresh).  From the release carrying this change, a
+cycle log showing only the first video means the second video's probe
+*failed* — that is the incident shape, not the healthy one recorded above.
+The cost of the coverage is one extra yt-dlp metadata fetch per path per
+cycle in the healthy state; the ladder already walked the whole list
+whenever everything failed.  Everything above the 2026-09-24 postscript is
+a 2026-09-18 evidence record for 0.2.20 and is unchanged.
