@@ -17,8 +17,10 @@ Pinned here, over the wire:
 - **URL aliases** — watch?v=, youtu.be, /shorts/, /live/, /embed/, the ``m.``
   subdomain and the bare 11-char id all canonicalize to one video and land in
   **one** cache unit on disk (README: "all normalize to the same cache
-  entry"); follow-up calls carrying the served ``lang`` are served from that
-  unit without another fetch.
+  entry"); follow-up calls — carrying the served ``lang`` or no ``lang`` at
+  all (a default-language call resolves to the stored unit) — are served from
+  that unit without another fetch, and concurrent callers racing in via
+  different forms single-flight into one upstream fetch.
 - **Inline vs paginated** — a short transcript with ``mode=full`` is one
   complete answer; ``mode=chunk`` (or text over the inline limit) yields
   ``status='partial'`` with the loud ⚠️ PARTIAL prefix and a ``next_cursor``.
@@ -43,10 +45,11 @@ Pinned here, over the wire:
 
 Cache-key semantics (plan §Language selection): a cache unit is keyed
 ``(video_id, served_lang)``; the first response's ``lang`` field is what a
-follow-up call passes to hit it. The unit suite mocks
-``transcript_cache.get`` wholesale (``test_server.py``), so the real
-keying — and the on-disk one-entry-per-video property — is only exercised
-here.
+follow-up call passes to hit it, and a default-language call (no ``lang``)
+resolves to the stored unit instead of re-fetching (ytt-83eaa5f6). The unit
+suite mocks ``transcript_cache.get`` wholesale (``test_server.py``), so the
+real keying — and the on-disk one-entry-per-video property — is only
+exercised here.
 
 Auth tooling: the transport's RequireAuthMiddleware demands an
 ``Authorization: Bearer`` header and the provider's required scopes before
@@ -100,6 +103,20 @@ VIDEO = "aliasVideo1"
 VIDEO2 = "freshMiss01"
 WORDLIST = [f"w{i:03d}" for i in range(60)]  # 299 chars joined — multi-chunk
 SHORT_WORDS = ["hello", "world"]
+
+#: Every URL form of VIDEO the README promises normalize to one cache entry
+#: ("Pass any YouTube URL form: youtu.be/…, ?v=, /shorts/, /live/, bare
+#: 11-char ID") plus /embed/ and the ``m.`` subdomain — noise params
+#: (``list=``, ``si=``) included to prove they are ignored.
+ALIAS_FORMS = [
+    f"https://www.youtube.com/watch?v={VIDEO}&list=PLwhatever",
+    f"https://youtu.be/{VIDEO}?si=abc123",
+    f"https://www.youtube.com/shorts/{VIDEO}",
+    f"https://www.youtube.com/live/{VIDEO}",
+    f"https://www.youtube.com/embed/{VIDEO}",
+    f"https://m.youtube.com/watch?v={VIDEO}",
+    VIDEO,
+]
 
 ACCEPT = {"Accept": "application/json, text/event-stream"}
 
@@ -526,18 +543,8 @@ def test_url_aliases_normalize_to_one_cache_entry(session, cache, monkeypatch):
     calls: list = []
     monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, SHORT_WORDS))
 
-    aliases = [
-        f"https://www.youtube.com/watch?v={VIDEO}&list=PLwhatever",
-        f"https://youtu.be/{VIDEO}?si=abc123",
-        f"https://www.youtube.com/shorts/{VIDEO}",
-        f"https://www.youtube.com/live/{VIDEO}",
-        f"https://www.youtube.com/embed/{VIDEO}",
-        f"https://m.youtube.com/watch?v={VIDEO}",
-        VIDEO,
-    ]
-
     payloads = []
-    for i, alias in enumerate(aliases):
+    for i, alias in enumerate(ALIAS_FORMS):
         args: dict[str, Any] = {"url": alias}
         if i > 0:
             args["lang"] = "en"  # follow-up calls carry the served lang
@@ -561,6 +568,75 @@ def test_url_aliases_normalize_to_one_cache_entry(session, cache, monkeypatch):
         f"{VIDEO}.en.json",
         f"{VIDEO}.en.txt",
     ]
+
+
+def test_url_forms_share_one_entry_for_default_language_calls(
+    session, cache, monkeypatch
+):
+    """The README promise verbatim — every URL form of ``ALIAS_FORMS``, and
+    NO call passes ``lang``: the first form fetches and stores the unit under
+    the served lang, every later form's default-language call resolves to
+    that stored unit (empty lang = no language preference), so the whole
+    loop costs ONE upstream fetch and leaves exactly ONE cache unit on disk.
+    An exact ``(video_id, "")`` key can never exist (fetches key on the
+    served lang), so without that resolution the second form here would
+    re-fetch (bead ytt-83eaa5f6) — this pins the resolution in composition
+    with cross-form canonicalization, which is the README sentence read
+    literally."""
+    calls: list = []
+    monkeypatch.setattr(ytt.fetch, "fetch_transcript", _caption_fetch(calls, SHORT_WORDS))
+
+    payloads = [
+        session.call_payload("get_youtube_transcript", {"url": alias})
+        for alias in ALIAS_FORMS
+    ]
+
+    first = payloads[0]
+    assert first["status"] == "ok"
+    assert first["video_id"] == VIDEO
+    assert first["lang"] == "en"  # the served lang the unit is stored under
+    for payload in payloads[1:]:
+        assert payload["status"] == "ok"
+        assert payload["video_id"] == first["video_id"]
+        assert payload["lang"] == first["lang"]
+        assert payload["source"] == first["source"]
+        assert payload["text"] == first["text"]
+
+    # One canonical fetch, one physical cache unit (the .txt/.json pair).
+    assert calls == [VIDEO]
+    assert sorted(p.name for p in cache._dir.iterdir()) == [
+        f"{VIDEO}.en.json",
+        f"{VIDEO}.en.txt",
+    ]
+
+
+async def test_concurrent_alias_callers_single_flight_to_one_fetch():
+    """Racing callers arriving via DIFFERENT URL forms of one video dedupe
+    to ONE upstream fetch (bead ytt-b0afb5b4): the discovery single-flight
+    on the tool's cache-miss path is keyed by the canonical video id, so
+    every form's canonicalize() lands on the same key and only the first
+    caller's fetch executes — the rest await and share its result. This is
+    the composition the README's "all normalize to the same cache entry"
+    economy claim rests on; the registry primitive alone is pinned in
+    test_concurrency.py, the canonicalizer alone in test_canonicalize.py."""
+    from ytt.canonicalize import canonicalize
+
+    runs: list = []
+
+    async def _fetch() -> str:
+        runs.append("fetch")
+        await asyncio.sleep(0)  # yield so the other callers really pile in
+        return "transcript"
+
+    results = await asyncio.gather(
+        *(
+            server._concurrency.discovery_flights.run(canonicalize(alias), _fetch)
+            for alias in ALIAS_FORMS
+        )
+    )
+
+    assert runs == ["fetch"]  # one underlying execution …
+    assert results == ["transcript"] * len(ALIAS_FORMS)  # … shared by all forms
 
 
 # ---------------------------------------------------------------------------
