@@ -8,9 +8,10 @@ summarized or re-shaped by a client convenience layer. ASGI responses here are
 byte-for-byte what uvicorn would put on the wire for the same request.
 
 This module is shared infrastructure for the MCP session-lifecycle
-conformance children of ytt-7829b244 (initialize/session establishment in
-``test_mcp_session_lifecycle.py``; the GET-SSE listen stream, DELETE session
-termination, and path-prefix mounting children follow). Import the fixtures
+conformance children of ytt-7829b244 (initialize/session establishment, the
+GET-SSE listen stream, and DELETE session termination all live in
+``test_mcp_session_lifecycle.py``; the path-prefix mounting child follows).
+Import the fixtures
 and helpers — do not re-derive app/auth setup::
 
     from tests.unit._mcp_asgi_harness import (  # noqa: F401
@@ -358,6 +359,12 @@ class AsgiMcpSession:
         """POST a raw body (for deliberately malformed JSON-RPC)."""
         merged = {**self.headers(**kwargs), "Content-Type": "application/json"}
         return await self.client.post(self.path, content=body, headers=merged)
+
+    async def delete(self, **kwargs) -> httpx.Response:
+        """DELETE the MCP endpoint (§transports "Session Management" item 5:
+        the client's explicit session-termination request). Headers follow the
+        same rules as ``post()``; DELETE carries no body."""
+        return await self.client.delete(self.path, headers=self.headers(**kwargs))
 
     # -- lifecycle ----------------------------------------------------------
 

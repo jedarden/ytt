@@ -1,13 +1,12 @@
-"""MCP Streamable-HTTP session-establishment conformance, over the real ASGI
+"""MCP Streamable-HTTP session-lifecycle conformance, over the real ASGI
 transport.
 
-First slice of ytt-7829b244 (MCP session-lifecycle conformance): pins the
-initialize/session-establishment exchange of the 2025-06-18 Streamable HTTP
-transport against ``build_asgi_app()`` driven through ``httpx.ASGITransport``
-(via the shared ``_mcp_asgi_harness`` — not the Starlette ``TestClient``), so
-what these tests see is exactly what uvicorn would put on the wire. The
-follow-on children (GET SSE listen stream, DELETE termination, path-prefix
-mounting) reuse that harness; this file owns the establishment handshake.
+Children of ytt-7829b244 (MCP session-lifecycle conformance), pinning the
+2025-06-18 Streamable HTTP transport against ``build_asgi_app()`` driven
+through ``httpx.ASGITransport`` (via the shared ``_mcp_asgi_harness`` — not
+the Starlette ``TestClient``), so what these tests see is exactly what
+uvicorn would put on the wire. The path-prefix mounting child reuses the same
+harness.
 
 Each test's asserts carry the spec sentence they hold the server to, so the
 file doubles as the conformance record. References are to the MCP
@@ -91,6 +90,38 @@ Pinned here:
     the same RFC 6750 §3 / RFC 9728 §5.1 shape ``test_oauth_conformance.py``
     pins for the POST transport probe, and it 401s even when a valid session
     id is presented: auth runs before session logic.
+- **DELETE termination** — DELETE on the MCP endpoint with the established
+  ``Mcp-Session-Id`` answers HTTP 200 with an empty body and the terminated
+  session's own id echoed (§transports "Session Management" item 5: the
+  client SHOULD send DELETE to explicitly terminate; the only status the
+  spec itself pins for DELETE is the 405 a server that forbids termination
+  would return — this server allows it, and 200-with-no-body is its pinned
+  success form). The termination is real: a subsequent POST on that id gets
+  HTTP 404 with the transport-level "Not Found: Session has been terminated"
+  envelope, addressed by the dead session's own id — and the §item 4
+  recovery (a fresh initialize without a session id) still opens a working
+  session.
+- **repeated/continued use of a terminated session** — POST, GET, and a
+  second DELETE on the terminated id each earn the same exact 404
+  "Session has been terminated" envelope; the id is never resurrected or
+  re-served, and every one of those 404s echoes the dead id — the session's
+  own transport answers its obituary, not a global handler.
+- **DELETE failure shapes** — the two refusals, at exact statuses with the
+  same envelope shapes their GET counterparts use:
+  - DELETE without ``Mcp-Session-Id`` → HTTP 400 "Bad Request: Missing
+    session ID" (item 2's header MUST covers the termination request too),
+    with the same minted-throwaway-id artifact the session-less GET shows:
+    the manager routes a header-less request through its new-session case
+    and the refusing transport answers with the *fresh* id it just minted.
+  - DELETE with an unknown session id → HTTP 404 "Session not found" — the
+    same envelope the POST and GET sides answer, and no session id header
+    (never read as an assignment).
+- **no state leaks across terminated sessions** — after terminating session
+  A, a fresh initialize on the same client opens session B with a new id
+  that answers its own requests, while A stays 404-dead beside it: B's
+  existence neither resurrects A nor answers for it (A's 404 still carries
+  A's id, and B's responses carry B's), so terminated sessions cannot hand
+  reachability to new ones or borrow it back.
 
 Auth is stubbed (harness autouse fixtures): these tests exercise transport
 and session lifecycle, not OAuth — the 401/403 auth paths belong to
@@ -828,3 +859,238 @@ async def test_unauthenticated_get_is_a_401_bearer_challenge():
         # And the authenticated session itself is still live afterwards.
         live = await session.request("ping")
         assert "result" in live
+
+
+# ---------------------------------------------------------------------------
+# DELETE — explicit session termination
+# ---------------------------------------------------------------------------
+
+
+def _assert_session_terminated(resp: httpx.Response, session_id: str) -> dict:
+    """The exact shape of the 404 any continued use of a terminated session
+    earns (§transports "Session Management" item 3): HTTP 404, application/
+    json, a well-formed transport error envelope — the id stand-in
+    "server-error" (session routing rejected before dispatch; the request's
+    own id was never seen), code -32600, the exact "Session has been
+    terminated" message — and the dead session's own id echoed: the
+    session's own transport answered, not a session-less global handler.
+    """
+    assert resp.status_code == 404, resp.text[:200]
+    assert resp.headers["content-type"].startswith("application/json")
+    envelope = json_rpc_messages(resp)[0]
+    well_formed_response_envelope(envelope)
+    assert envelope["id"] == "server-error", envelope
+    assert envelope["error"]["code"] == -32600, envelope
+    assert envelope["error"]["message"] == "Not Found: Session has been terminated"
+    assert resp.headers.get("mcp-session-id") == session_id, (
+        "the terminated-session 404 must be addressed by the dead id itself"
+    )
+    return envelope
+
+
+async def test_delete_with_a_live_session_terminates_the_session():
+    """DELETE with the established session id answers 200 with an empty body
+    — and the session is actually gone: a subsequent POST on that id gets
+    404, while the spec's re-initialize recovery still opens a fresh working
+    session.
+
+    §transports "Session Management" item 5: "A client that no longer needs
+    a particular session … SHOULD send an HTTP DELETE method to the MCP
+    endpoint with the Mcp-Session-Id header, to explicitly terminate the
+    session. The server MAY respond with HTTP 405 Method Not Allowed if it
+    does not allow clients to terminate sessions." This server allows
+    termination, so the 405 escape does not apply and 200-with-no-body is
+    its (spec-unpinned, here pinned) success form. Termination being *real*
+    is item 3's MUST — after termination the server "MUST respond to
+    requests containing that session ID with HTTP 404 Not Found" — and item
+    4 makes the fresh InitializeRequest-without-a-session-id the client's
+    recovery, asserted working below.
+    """
+    async with open_established_session() as session:
+        sid = session.session_id
+
+        resp = await session.delete()
+
+        assert resp.status_code == 200, resp.text[:200]
+        # Acceptance of a termination is an empty body, not a message.
+        assert resp.content == b"", resp.content[:100]
+        # The 200 echoes the id it just terminated — the session's own
+        # transport answered the goodbye.
+        assert resp.headers.get("mcp-session-id") == sid
+
+        # --- the termination took: the id no longer serves requests -------
+        dead = await session.client.post(
+            session.path,
+            json={"jsonrpc": "2.0", "id": 42, "method": "ping"},
+            headers=session.headers(),
+        )
+        envelope = _assert_session_terminated(dead, sid)
+        # The refusal is the transport's, not the request's: the envelope id
+        # is the transport stand-in even though the POST carried id 42 —
+        # contrast the in-band initialize errors pinned above, which echo
+        # the real request id.
+        assert envelope["id"] == "server-error"
+
+        # --- the prescribed recovery: initialize again, without the id ----
+        session.session_id = None  # §item 4: the client drops the dead id
+        fresh = await session.initialize(id_=2)
+        assert fresh.status_code == 200, fresh.text[:200]
+        assert session.session_id and session.session_id != sid
+        await session.initialized_notification()
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_repeated_use_of_a_terminated_session_is_always_404():
+    """Every continued use of a terminated session id — POST, GET, and even
+    the terminating DELETE again — earns the same exact 404 envelope, and
+    the dead id is never resurrected into a working session.
+
+    §transports "Session Management" item 3: after termination the server
+    "MUST respond to requests containing that session ID with HTTP 404 Not
+    Found" — repeated asks included. There is no re-attach, no lazy
+    re-establishment, and no id rotating back into service.
+    """
+    async with open_established_session() as session:
+        sid = session.session_id
+        assert (await session.delete()).status_code == 200
+
+        # Continued use takes every method the endpoint speaks.
+        repost = await session.client.post(
+            session.path,
+            json={"jsonrpc": "2.0", "id": 43, "method": "ping"},
+            headers=session.headers(),
+        )
+        _assert_session_terminated(repost, sid)
+
+        reget = await session.client.get(session.path, headers=session.headers())
+        _assert_session_terminated(reget, sid)
+
+        # A second DELETE is continued use too — the id was already
+        # terminated, so the 200-of-termination cannot happen twice.
+        redelete = await session.delete()
+        _assert_session_terminated(redelete, sid)
+
+
+async def test_delete_without_a_session_id_is_a_400_missing_session_error():
+    """A DELETE that omits Mcp-Session-Id is refused with HTTP 400 and the
+    transport's "Missing session ID" envelope — the same refusal the
+    session-less GET earns — and the established session is unharmed.
+
+    §transports "Session Management" item 2: once the server assigned a
+    session id, "clients using the Streamable HTTP transport MUST include it
+    in the Mcp-Session-Id header on all of their subsequent HTTP requests" —
+    the termination request included; item 5's DELETE is addressed to the
+    session it names, never to the endpoint at large. The stateful session
+    manager routes a header-less request through its new-session case, so —
+    the same artifact the session-less GET shows — the refusing transport
+    answers with the *fresh* id it just minted: proof the 400 was a
+    session-less rejection and not a termination of the caller's real
+    session.
+    """
+    async with open_established_session() as session:
+        resp = await session.client.delete(
+            session.path,
+            headers={
+                **ACCEPT,
+                "Authorization": BEARER,
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+
+        assert resp.status_code == 400, resp.text[:200]
+        assert resp.headers["content-type"].startswith("application/json")
+        envelope = json_rpc_messages(resp)[0]
+        well_formed_response_envelope(envelope)
+        assert envelope["id"] == "server-error"
+        assert envelope["error"]["code"] == -32600
+        assert envelope["error"]["message"] == "Bad Request: Missing session ID"
+        assert resp.headers.get("mcp-session-id"), "expected the fresh session id"
+        assert resp.headers["mcp-session-id"] != session.session_id
+
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_delete_with_an_unknown_session_id_is_404_session_not_found():
+    """A DELETE carrying a session id the server never issued gets HTTP 404
+    with the same well-formed "Session not found" envelope the POST and GET
+    sides answer — termination is not a side door past session management,
+    and an unknown id earns no session id of its own.
+
+    §transports "Session Management" item 3: after termination the server
+    "MUST respond to requests containing that session ID with HTTP 404 Not
+    Found" — an id never issued is the degenerate terminated case and must
+    meet the same MUST, whatever the method; item 4 makes that 404 the
+    client's re-initialize trigger.
+    """
+    async with open_established_session() as session:
+        bogus = "b0gus-b0gus-b0gus-b0gus"
+        resp = await session.client.delete(
+            session.path,
+            headers={
+                **ACCEPT,
+                "Authorization": BEARER,
+                "Mcp-Session-Id": bogus,
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+
+        assert resp.status_code == 404, resp.text[:200]
+        assert resp.headers["content-type"].startswith("application/json")
+        envelope = json_rpc_messages(resp)[0]
+        well_formed_response_envelope(envelope)
+        assert envelope["id"] == "server-error"
+        assert envelope["error"]["code"] == -32600
+        assert envelope["error"]["message"] == "Session not found"
+        # An unknown-session DELETE must not be read as a session assignment.
+        assert "mcp-session-id" not in resp.headers
+
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_terminated_sessions_do_not_leak_state_into_new_ones():
+    """After terminating session A, a fresh initialize on the same client
+    opens session B with its own id that answers its own requests, while A
+    stays 404-dead beside it: B neither inherits A's reachability nor
+    answers for A, and A cannot borrow B's.
+
+    §transports "Session Management": item 4's recovery is a *new* session
+    (a fresh InitializeRequest without a session id) and item 3's 404 MUST
+    keeps the terminated id dead independently of whatever else the server
+    is serving. Concretely, all three at once: B's id differs from A's, B's
+    response answers B's own request id, and A's continued use still gets
+    the terminated-404 — addressed by A's own id, so it is provably A's own
+    transport answering, not B serving A's traffic out of B's state.
+    """
+    async with open_established_session() as session:
+        dead = session.session_id
+        assert (await session.delete()).status_code == 200
+
+        # §item 4: the recovery — a new InitializeRequest, no session id.
+        session.session_id = None
+        fresh_resp = await session.initialize(id_=2)
+        assert fresh_resp.status_code == 200, fresh_resp.text[:200]
+        fresh = session.session_id
+        assert fresh and fresh != dead
+        await session.initialized_notification()
+
+        # B answers for B: the ping's response id is the ping's own.
+        live = await session.request("ping")
+        assert live["id"] == session.last_id
+        assert "result" in live
+
+        # A stays dead beside a living B — and the 404 is addressed by A's
+        # own id, so B did not inherit A's reachability.
+        old = await session.client.post(
+            session.path,
+            json={"jsonrpc": "2.0", "id": 44, "method": "ping"},
+            headers={
+                **ACCEPT,
+                "Authorization": BEARER,
+                "Mcp-Session-Id": dead,
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+        _assert_session_terminated(old, dead)
