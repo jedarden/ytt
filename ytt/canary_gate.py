@@ -19,6 +19,11 @@ full pass.  On failure the report carries a ``remediation`` directive —
 rollback vs. escalate, keyed by which probe failed and how — mirroring the
 decision table in ``deploy/RUNBOOK.md`` §3.1.
 
+The evidence artifact's full contract — schema, destination, retention,
+failure-output shape, and the sensitive-configuration exclusion — is
+specified in ``docs/notes/canary-gate-evidence.md`` and drift-guarded by
+``tests/unit/test_canary_gate.py`` (TestEvidenceSpecDoc).
+
 Like ``ytt canary --once``, the gate never touches the singleton lock (only
 ``serve()`` does), so it is safe to exec into the live server pod.
 """
@@ -51,6 +56,31 @@ _EVIDENCE_FILENAME_PREFIX = "ytt-canary-gate"
 
 #: Probe order — also the order failing probes are reported in.
 PROBE_ORDER: tuple[str, ...] = ("direct", "via_proxy")
+
+
+# ---------------------------------------------------------------------------
+# Sensitive-configuration exclusion — enforced at the artifact boundary
+# ---------------------------------------------------------------------------
+
+
+def _scrub_secrets(node: Any) -> Any:
+    """Return ``node`` with credential-bearing URLs redacted from every string.
+
+    Defense-in-depth at the evidence boundary: ``run_once`` redacts its own
+    error strings, but the gate owns the artifact — a future probe field or
+    upstream regression that lets the credentialed ``YTT_PROXY_URL`` into a
+    report must still never reach the retained JSON or stdout
+    (``docs/notes/canary-gate-evidence.md`` §6).  Strings without a
+    ``scheme://user:password@host`` URL pass through unchanged, so legitimate
+    content (org names, language codes) is never mangled.
+    """
+    if isinstance(node, str):
+        return redact_credentials(node)
+    if isinstance(node, dict):
+        return {key: _scrub_secrets(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_scrub_secrets(item) for item in node]
+    return node
 
 
 # ---------------------------------------------------------------------------
@@ -163,10 +193,11 @@ def _run_probe(video_id: str | None, *, via_proxy: bool) -> dict:
     """Run one ``run_once`` probe; a crash becomes a ``gate_error`` report.
 
     Probes stay ``run_once``-shaped so consumers never branch on missing
-    keys, and a gate bug can never take the shape of a passing probe.
+    keys, and a gate bug can never take the shape of a passing probe.  The
+    report is scrubbed before it is embedded (see :func:`_scrub_secrets`).
     """
     try:
-        return run_once(video_id=video_id, via_proxy=via_proxy)
+        return _scrub_secrets(run_once(video_id=video_id, via_proxy=via_proxy))
     except Exception as exc:  # noqa: BLE001 — the gate reports, not raises
         log.exception("Canary gate: %s probe crashed", _probe_label(via_proxy))
         return _gate_error_probe(video_id, via_proxy=via_proxy, exc=exc)
@@ -176,24 +207,49 @@ def _probe_label(via_proxy: bool) -> str:
     return "via_proxy" if via_proxy else "direct"
 
 
+def _evidence_path(evidence_dir: str | os.PathLike[str], ran: datetime) -> Path:
+    """Pick the evidence file's path: timestamped, never overwriting.
+
+    Two gate runs sharing a second (an immediate re-run after a failure)
+    would otherwise collide on the same name and silently destroy the first
+    run's artifact — the second gets a ``-2``, ``-3``, … suffix instead.
+    Sequential runs are the contract; two gates racing in the same second in
+    the same directory is not a supported scenario (§3 of the evidence spec).
+    """
+    candidate = Path(evidence_dir) / "{}-{}.json".format(
+        _EVIDENCE_FILENAME_PREFIX, ran.strftime("%Y%m%dT%H%M%SZ")
+    )
+    sequence = 2
+    while candidate.exists():
+        candidate = candidate.with_name(f"{candidate.stem}-{sequence}.json")
+        sequence += 1
+    return candidate
+
+
 def _write_evidence(report: dict, evidence_dir: str | os.PathLike[str]) -> None:
     """Write the combined report to the evidence file and record its path.
 
-    A failed write degrades to ``evidence_error`` on the report — the stdout
-    copy is still evidence — but never flips a verdict.
+    The write is atomic (temp file + rename): a reader — or a release record
+    — never observes a half-written artifact, and a crashed write leaves no
+    truncated file that would parse as evidence.  A failed write degrades to
+    ``evidence_error`` on the report — the stdout copy is still evidence —
+    but never flips a verdict.
     """
     ran = datetime.fromisoformat(report["ran_at"])
-    filename = "{}-{}.json".format(
-        _EVIDENCE_FILENAME_PREFIX, ran.strftime("%Y%m%dT%H%M%SZ")
-    )
-    path = Path(evidence_dir) / filename
+    path = _evidence_path(evidence_dir, ran)
     persisted = dict(report, evidence_file=str(path))
+    tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(persisted, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(persisted, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
     except OSError as exc:
         log.warning("Canary gate: evidence write failed: %s", exc)
         report["evidence_error"] = redact_credentials(str(exc))
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover — cleanup is best-effort
+            pass
         return
     report["evidence_file"] = str(path)
 
@@ -211,7 +267,8 @@ def run_gate(
     returned report is JSON-serializable (it is written to the evidence file
     and printed verbatim) and contains no secrets — probe reports carry
     credential-redacted error strings, and the proxy URL itself never
-    appears.
+    appears.  Every run writes a fresh timestamped artifact and nothing is
+    ever deleted: a re-run appends evidence, it does not replace it.
 
     Failure reports carry ``remediation`` — the rollback/escalation directive
     from :func:`remediation_for` — and the CLI exits 1.

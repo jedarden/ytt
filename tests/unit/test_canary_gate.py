@@ -5,23 +5,43 @@ ytt-026fdbb4, ``deploy/RUNBOOK.md`` §3): direct probe + via-proxy probe when
 a proxy is configured, pass only on ``outcome=ok`` from every probe, JSON
 evidence retained, rollback/escalation directive on failure.  All network
 I/O is mocked (``run_once`` itself); evidence writes go to ``tmp_path``.
+
+The evidence artifact's full contract — schema, destination, retention,
+failure output, secret exclusion — is specified in
+``docs/notes/canary-gate-evidence.md`` (bead ytt-7f576b65);
+``TestEvidenceSpecDoc`` drift-guards that document against this code, so a
+contract change fails here until the spec follows — and vice versa.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ytt.canary_gate import (
+    _EVIDENCE_FILENAME_PREFIX,
+    _evidence_path,
     DEFAULT_EVIDENCE_DIR,
     GATE_ERROR,
+    PROBE_ORDER,
     remediation_for,
     run_gate,
 )
 from ytt.cli import main as cli_main
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SPEC_DOC = REPO_ROOT / "docs" / "notes" / "canary-gate-evidence.md"
+
+
+@pytest.fixture(scope="module")
+def spec() -> str:
+    """The evidence-artifact spec doc, read once (TestEvidenceSpecDoc)."""
+    assert SPEC_DOC.is_file(), "the evidence spec doc went missing"
+    return SPEC_DOC.read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Fixtures — run_once-shaped probe reports (the schema test_canary_once pins)
@@ -256,6 +276,195 @@ class TestEvidence:
 
 
 # ---------------------------------------------------------------------------
+# Evidence durability — spec §3/§4: atomic, append-only, never overwritten
+# ---------------------------------------------------------------------------
+
+class TestEvidenceDurability:
+    def test_evidence_path_never_collides(self, tmp_path):
+        """Same-second runs disambiguate with -2/-3/… instead of clobbering
+        the earlier artifact (spec §3 — the runbook's immediate re-run)."""
+        ran = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+        first = _evidence_path(tmp_path, ran)
+        assert first.name == "ytt-canary-gate-20260927T120000Z.json"
+        first.write_text("{}", encoding="utf-8")
+        second = _evidence_path(tmp_path, ran)
+        assert second.name == "ytt-canary-gate-20260927T120000Z-2.json"
+        second.write_text("{}", encoding="utf-8")
+        assert _evidence_path(tmp_path, ran).name.endswith("-3.json")
+
+    def test_same_second_rerun_appends_and_keeps_the_first_artifact(self, tmp_path):
+        """End to end: two gates in one second both survive, each report
+        pointing at its own file."""
+        frozen = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: N805 — datetime subclass idiom
+                return frozen
+
+        with patch("ytt.canary_gate.datetime", _FrozenDatetime):
+            first = _gate(evidence_dir=tmp_path)
+            second = _gate(evidence_dir=tmp_path)
+        first.pop("_calls")
+        second.pop("_calls")
+        p1 = Path(first["evidence_file"])
+        p2 = Path(second["evidence_file"])
+        assert p1 != p2
+        assert p1.name == f"{_EVIDENCE_FILENAME_PREFIX}-20260927T120000Z.json"
+        assert p2.name == f"{_EVIDENCE_FILENAME_PREFIX}-20260927T120000Z-2.json"
+        # The first run's artifact is byte-intact, not replaced:
+        assert json.loads(p1.read_text(encoding="utf-8"))["evidence_file"] == str(p1)
+        assert {p.name for p in tmp_path.iterdir()} == {p1.name, p2.name}
+
+    def test_successful_write_is_atomic_and_leaves_no_temp_file(self, tmp_path):
+        report = _gate(evidence_dir=tmp_path)
+        report.pop("_calls")
+        assert [p.name for p in tmp_path.iterdir()] == [
+            Path(report["evidence_file"]).name
+        ]
+
+    def test_rename_failure_leaves_no_partial_artifact(self, tmp_path):
+        """A crash between write and rename must not leave a file that parses
+        as evidence, and must still degrade exactly like a failed write."""
+        with patch("ytt.canary_gate.os.replace", side_effect=OSError("no space")):
+            report = _gate(evidence_dir=tmp_path)
+        report.pop("_calls")
+        assert report["gate"] == "pass"  # the verdict is never flipped
+        assert report["evidence_file"] is None
+        assert "evidence_error" in report
+        assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Sensitive-configuration exclusion — spec §6, enforced at the artifact
+# boundary (the gate re-scrubs what run_once already redacted)
+# ---------------------------------------------------------------------------
+
+class TestSecretExclusion:
+    def test_probe_report_strings_are_scrubbed_before_retention(self, tmp_path):
+        """A probe error that quotes the credentialed proxy URL is redacted
+        in the retained artifact even if an upstream layer failed to — the
+        host:port survives, the userinfo never does (spec §6)."""
+        leaky = _once_report("ip_blocked", via_proxy=True)
+        leaky["caption_fetch"]["error"] = (
+            "dial http://alice:s3cret@proxy:3128 failed"
+        )
+        report = _gate(
+            proxy_url="http://alice:s3cret@proxy:3128",
+            direct=_once_report(),
+            via_proxy=leaky,
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        on_disk = Path(report["evidence_file"]).read_text(encoding="utf-8")
+        for secret in ("s3cret", "alice"):
+            assert secret not in on_disk
+        assert "http://proxy:3128 failed" in on_disk
+
+    def test_configured_proxy_url_never_reaches_a_clean_pass_artifact(self, tmp_path):
+        report = _gate(
+            proxy_url="http://alice:s3cret@proxy:3128", evidence_dir=tmp_path
+        )
+        report.pop("_calls")
+        on_disk = Path(report["evidence_file"]).read_text(encoding="utf-8")
+        assert "s3cret" not in on_disk
+        assert "alice" not in on_disk
+
+
+# ---------------------------------------------------------------------------
+# Retained evidence on failure — spec §4/§5: the artifact is self-contained
+# for the release record, pass or fail
+# ---------------------------------------------------------------------------
+
+class TestRetainedEvidenceContract:
+    def test_direct_only_failure_artifact_is_self_contained(self, tmp_path):
+        report = _gate(
+            proxy_url=None, direct=_once_report("ip_blocked"), evidence_dir=tmp_path
+        )
+        report.pop("_calls")
+        on_disk = json.loads(Path(report["evidence_file"]).read_text("utf-8"))
+        assert on_disk == report
+        assert on_disk["gate"] == "fail"
+        assert on_disk["failed_probe"] == "direct"
+        assert on_disk["verdict"] == "ip_blocked"
+        assert on_disk["remediation"]
+        assert on_disk["probes"]["direct"]["caption_fetch"]["outcome"] == "ip_blocked"
+
+    def test_proxy_failure_artifact_keeps_both_probe_results(self, tmp_path):
+        report = _gate(
+            proxy_url="http://proxy:3128",
+            direct=_once_report("ok"),
+            via_proxy=_once_report("ip_blocked", via_proxy=True),
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        on_disk = json.loads(Path(report["evidence_file"]).read_text("utf-8"))
+        assert set(on_disk["probes"]) == {"direct", "via_proxy"}
+        assert on_disk["probes"]["direct"]["caption_fetch"]["via_proxy"] is False
+        assert on_disk["probes"]["via_proxy"]["caption_fetch"]["via_proxy"] is True
+
+    def test_success_artifact_records_each_probe_path(self, tmp_path):
+        report = _gate(proxy_url="http://proxy:3128", evidence_dir=tmp_path)
+        report.pop("_calls")
+        on_disk = json.loads(Path(report["evidence_file"]).read_text("utf-8"))
+        assert on_disk["gate"] == "pass"
+        assert on_disk["probes"]["direct"]["caption_fetch"]["ok"] is True
+        assert on_disk["probes"]["via_proxy"]["caption_fetch"]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Spec doc — docs/notes/canary-gate-evidence.md ↔ code drift guard (§7)
+# ---------------------------------------------------------------------------
+
+class TestEvidenceSpecDoc:
+    """The evidence contract lives in the spec doc; every key, constant and
+    guarantee it claims must still be true of the code, and every key the
+    code emits must still be documented there."""
+
+    def test_spec_names_the_implementation(self, spec):
+        assert "ytt/canary_gate.py" in spec
+        assert "ytt-7f576b65" in spec
+
+    def test_every_report_key_is_documented(self, spec, tmp_path):
+        keys: set[str] = set()
+        for kwargs in (
+            {"proxy_url": None},
+            {
+                "proxy_url": "http://proxy:3128",
+                "direct": _once_report("ok"),
+                "via_proxy": _once_report("ip_blocked", via_proxy=True),
+            },
+        ):
+            report = _gate(evidence_dir=tmp_path / "e", **kwargs)
+            report.pop("_calls")
+            keys |= set(report)
+        assert keys >= {"verdict", "gate", "remediation", "evidence_file"}
+        for key in keys:
+            assert f"`{key}`" in spec, f"report key {key!r} is not in the spec doc"
+
+    def test_conditional_and_probe_keys_are_documented(self, spec):
+        assert "`evidence_error`" in spec
+        for key in _REPORT_KEYS:
+            assert f"`{key}`" in spec, f"probe key {key!r} is not in the spec doc"
+
+    def test_documented_constants_match_the_code(self, spec):
+        assert DEFAULT_EVIDENCE_DIR in spec
+        assert f"{_EVIDENCE_FILENAME_PREFIX}-" in spec
+        assert GATE_ERROR in spec
+        for probe in PROBE_ORDER:
+            assert f"`{probe}`" in spec
+        assert "--evidence-dir" in spec
+        assert "redact_credentials" in spec
+        assert "_scrub_secrets" in spec
+
+    def test_failure_output_and_retention_contract_is_documented(self, spec):
+        assert "CANARY GATE FAILED" in spec  # the stderr banner, verbatim
+        for phrase in ("exit code", "argparse", "never deletes", "release bead"):
+            assert phrase in spec, f"spec doc lost the {phrase!r} guarantee"
+        assert "RUNBOOK" in spec and "§3.1" in spec  # the remediation mirror
+
+
+# ---------------------------------------------------------------------------
 # Remediation — the rollback/escalation decision table (RUNBOOK §3.1)
 # ---------------------------------------------------------------------------
 
@@ -395,3 +604,57 @@ class TestCli:
         with pytest.raises(SystemExit) as excinfo:
             cli_main(["canary", "--video-id", "x"])
         assert excinfo.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# CLI full stack — exit codes, stdout/stderr split and the retained artifact
+# through the real run_gate (only run_once is mocked) — spec §5
+# ---------------------------------------------------------------------------
+
+class TestCliFullStack:
+    def test_pass_exits_zero_and_retains_the_artifact(self, capsys, tmp_path):
+        with (
+            patch("ytt.config.get_settings", return_value=_settings(None)),
+            patch("ytt.canary_gate.run_once", return_value=_once_report()),
+        ):
+            code = cli_main(["canary", "--gate", "--evidence-dir", str(tmp_path)])
+        assert code == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        report = json.loads(captured.out)
+        assert report["gate"] == "pass"
+        assert Path(report["evidence_file"]).is_file()
+        # stdout and disk are the same object (spec §5: parse either):
+        on_disk = json.loads(Path(report["evidence_file"]).read_text("utf-8"))
+        assert on_disk == report
+
+    def test_fail_exits_one_directs_on_stderr_and_retains_evidence(self, capsys, tmp_path):
+        with (
+            patch(
+                "ytt.config.get_settings",
+                return_value=_settings("http://alice:s3cret@proxy:3128"),
+            ),
+            patch(
+                "ytt.canary_gate.run_once",
+                side_effect=[
+                    _once_report("ok"),
+                    _once_report("ip_blocked", via_proxy=True),
+                ],
+            ),
+        ):
+            code = cli_main(["canary", "--gate", "--evidence-dir", str(tmp_path)])
+        assert code == 1
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        assert report["gate"] == "fail"
+        assert "CANARY GATE FAILED" in captured.err
+        assert report["remediation"] in captured.err
+        # the credentialed proxy URL is clean on every channel (spec §6):
+        for channel in (captured.out, captured.err):
+            assert "s3cret" not in channel
+            assert "alice" not in channel
+        # the failure artifact still lands and still carries the directive:
+        on_disk = json.loads(Path(report["evidence_file"]).read_text("utf-8"))
+        assert on_disk == report
+        assert on_disk["gate"] == "fail"
+        assert on_disk["remediation"]
