@@ -165,6 +165,22 @@ kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt -c ytt -- ytt canary --gate \
   | tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"
 ```
 
+**Retain the evidence (the durability contract).**  The `tee` file on the
+operator's box is the durable copy — the artifact inside the pod
+(`report.evidence_file`, default `/tmp/ytt-canary-evidence/`) has
+pod-lifetime retention and dies with the pod; the release record is where
+evidence survives (contract: `docs/notes/canary-gate-evidence.md` §4).
+Assert the capture before moving on:
+
+```bash
+F=$(ls -t canary-gate-*.json 2>/dev/null | head -1)   # the copy tee just wrote
+if [ -n "$F" ] && [ -s "$F" ] && jq -e '.gate' "$F" >/dev/null; then
+  echo "durable copy retained: $F — paste it into the release bead"
+else
+  echo "NO RETAINED EVIDENCE — tee file missing, empty, or not a gate report; re-run the gate before proceeding"
+fi
+```
+
 Exit 0 + `outcome=ok` on every probe = release validated; the `tee` copy is
 the retained evidence for the release record.  On failure the report's
 `remediation` names the rollback/escalation path — the decision table is

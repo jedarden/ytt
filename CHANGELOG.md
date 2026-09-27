@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Canary-gate evidence now has a durability contract** (bead
+  `ytt-958dccc1`): `docs/notes/canary-gate-evidence.md` §4 separates
+  retention (the gate never prunes, at any destination — a persistent
+  evidence dir grows without bound by design) from durability (what
+  survives the run, per environment — the server pod's `/tmp` dies with the
+  pod at every Recreate swap, and an ephemeral CI pod's `podGC` deletes
+  everything at completion, so no in-pod default can survive everywhere).
+  The contract rules the cache volume out as an evidence home, names the
+  release record as the durable copy, and makes the operator capture step a
+  mandatory, asserted checklist item in `deploy/RUNBOOK.md` §3 step 4 and
+  `deploy/DEPLOY-CHECKLIST.md` §5 (`tee` the gate's stdout, then assert the
+  file exists, is non-empty and parses with `jq -e '.gate'`). The README's
+  "retains the JSON evidence" promise now points at the contract, and
+  `TestEvidenceDurabilityDoc` pins all three docs to it. No runtime
+  behavior changed — the gate's destination, schema and write path are
+  untouched.
+
 ### Fixed
 
 - **Default-language calls never hit the cache** (bead `ytt-83eaa5f6`): the

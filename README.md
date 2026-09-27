@@ -72,7 +72,9 @@ ytt canary --once    # fetches captions for one known-good video; JSON report,
 
 After changing the image or the egress config, run the acceptance gate
 instead — it runs the direct probe **and** `--via-proxy` when `YTT_PROXY_URL`
-is set, requires `outcome=ok` on both, retains the JSON evidence, and prints
+is set, requires `outcome=ok` on both, retains the JSON evidence
+(`report.evidence_file` — pod-local by default; what survives where is the
+durability contract in `docs/notes/canary-gate-evidence.md` §4), and prints
 the rollback/escalation directive on failure:
 
 ```bash

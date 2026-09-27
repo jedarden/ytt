@@ -196,15 +196,29 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt -c ytt -- ytt canary --gate \
      | tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"
    ```
+   **Retain the evidence (the durability contract).**  The `tee` file on the
+   operator's box is the durable copy — the artifact the gate wrote inside
+   the pod (`report.evidence_file`, default `/tmp/ytt-canary-evidence/`) has
+   pod-lifetime retention and dies with the pod at the next Recreate swap;
+   it is a convenience duplicate, never the release record (contract:
+   `docs/notes/canary-gate-evidence.md` §4).  Assert the capture before
+   moving on — it must exist, be non-empty, and parse as a gate report:
+   ```bash
+   F=$(ls -t canary-gate-*.json 2>/dev/null | head -1)   # the copy tee just wrote
+   if [ -n "$F" ] && [ -s "$F" ] && jq -e '.gate' "$F" >/dev/null; then
+     echo "durable copy retained: $F — paste it into the release bead"
+   else
+     echo "NO RETAINED EVIDENCE — tee file missing, empty, or not a gate report; re-run the gate before proceeding"
+   fi
+   ```
    The gate runs `ytt canary --once` (direct) **and** `--via-proxy` when
    `YTT_PROXY_URL` is configured, requires `outcome=ok` on every probe,
    writes the combined JSON evidence (default
-   `/tmp/ytt-canary-evidence/`), and exits 0 **only** on a full pass.  The
-   `tee` copy is the retained evidence for the release record (the pod's
-   `/tmp` dies with the pod) — paste it into the release bead.  Exit 1 = gate
-   failed: the report's `remediation` field names the rollback/escalation
-   path (§3.1 below) and the report's `probes` half carries the per-probe
-   detail.  Like `ytt canary --once`, the gate does not touch the singleton
+   `/tmp/ytt-canary-evidence/`), and exits 0 **only** on a full pass.
+   Exit 1 = gate failed: the report's `remediation` field names the
+   rollback/escalation path (§3.1 below) and the report's `probes` half
+   carries the per-probe detail.  Like `ytt canary --once`, the gate does
+   not touch the singleton
    lock — only `serve()` does — so it is safe alongside the live server; the
    same is true of `ytt selftest`.  (A stray `ytt serve` exec'd into the pod
    *will* exit 1 on the lock — that's the tripwire working.)
@@ -269,10 +283,13 @@ on the **first failing probe** (`report.failed_probe`) and its
 | either probe | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
 | either probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the gate environment and re-run; escalate with the evidence only if it persists. |
 
-**Retain the evidence either way.**  The `tee`d stdout copy (or
-`report.evidence_file` where the filesystem survives) goes into the release
-bead — pass or fail.  A pass without retained evidence is an unauditable
-release; a failure without evidence is an escalation nobody can act on.
+**Retain the evidence either way.**  The `tee`d stdout copy on the
+operator's box goes into the release bead — pass or fail; that capture, not
+the in-pod artifact, is the durable copy (`report.evidence_file`'s default
+destination has pod-lifetime retention and dies with the pod —
+`docs/notes/canary-gate-evidence.md` §4).  A pass without retained evidence
+is an unauditable release; a failure without evidence is an escalation
+nobody can act on.
 The report contains no secrets: probe error strings are credential-redacted
 and the proxy URL never appears.
 

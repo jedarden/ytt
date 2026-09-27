@@ -49,7 +49,8 @@ GATE_ERROR = "gate_error"
 #: Where evidence JSON lands when ``--evidence-dir`` is not given.  ``/tmp``
 #: is writable in every context the gate runs (server pod, canary pod,
 #: self-hoster's host); retention beyond the pod lifetime is the caller's
-#: job — the runbook says to capture stdout into the release record.
+#: job — capture stdout into the release record (the durability contract:
+#: ``docs/notes/canary-gate-evidence.md`` §4; RUNBOOK §3 step 4).
 DEFAULT_EVIDENCE_DIR = "/tmp/ytt-canary-evidence"
 
 _EVIDENCE_FILENAME_PREFIX = "ytt-canary-gate"

@@ -14,6 +14,10 @@ contract change fails here until the spec follows — and vice versa.
 ``TestRunbookRemediationMirror`` (bead ytt-fefb4698) pins the other recorded
 mirror the same way: the rollback/escalation directives of
 ``remediation_for`` against ``deploy/RUNBOOK.md`` §3.1's decision table.
+``TestEvidenceDurabilityDoc`` (bead ytt-958dccc1) pins spec §4's durability
+contract — what survives the run environment, the release record as the
+durable copy — to the operator surfaces that enact it (RUNBOOK §3 step 4,
+DEPLOY-CHECKLIST §5, README).
 """
 
 from __future__ import annotations
@@ -818,3 +822,99 @@ class TestCliFullStack:
         assert on_disk == report
         assert on_disk["gate"] == "fail"
         assert on_disk["remediation"]
+
+
+# ---------------------------------------------------------------------------
+# Durability contract — spec §4 ↔ the operator surfaces that enact it
+# (RUNBOOK §3 step 4, DEPLOY-CHECKLIST §5, README) — bead ytt-958dccc1
+# ---------------------------------------------------------------------------
+
+CHECKLIST = REPO_ROOT / "deploy" / "DEPLOY-CHECKLIST.md"
+README = REPO_ROOT / "README.md"
+
+#: The capture assertion every operator surface must carry — spec §4's
+#: "exists, non-empty, parses as a gate report" in executable form.
+_CAPTURE_ASSERTION = (
+    'if [ -n "$F" ] && [ -s "$F" ] && jq -e \'.gate\' "$F" >/dev/null; then'
+)
+
+
+def _collapsed(path: Path) -> str:
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+@pytest.fixture(scope="module")
+def runbook_step3() -> str:
+    """``deploy/RUNBOOK.md`` §3 up to §3.1 — the step-4 gate procedure."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    match = re.search(r"^## 3\. .*?(?=^### 3\.1)", text, re.S | re.M)
+    assert match, "deploy/RUNBOOK.md lost its §3 post-deploy validation section"
+    return " ".join(match.group(0).split())
+
+
+class TestEvidenceDurabilityDoc:
+    """Retention (the gate never prunes) is pinned by ``TestEvidenceSpecDoc``;
+    these legs pin *durability* — spec §4's survival contract and the
+    operator surfaces that enact it.  The gate cannot make its artifact
+    outlive the run environment (an ephemeral CI pod deletes everything at
+    completion), so the contract names the release record as the durable
+    copy and turns the capture into a mandatory, asserted checklist step in
+    both operator docs.  An edit that drops the assertion, the failure
+    branch, the retention bound, or the README pointer fails here instead of
+    silently promising evidence that no longer has a survival story."""
+
+    def test_spec_states_the_survival_contract(self, spec):
+        collapsed = " ".join(spec.split())
+        for phrase in (
+            "never deletes",                              # the retention bound
+            "podGC",                                      # the CI counterexample
+            "OnPodCompletion",
+            "the release record is the durable copy",
+            "grows without bound",                        # never-pruned, at any destination
+            "never under `YTT_CACHE_DIR`/`YTT_SCRATCH_DIR`",
+            "the cache volume is never the evidence home",
+            "`deploy/RUNBOOK.md` §3 step 4",
+            "`deploy/DEPLOY-CHECKLIST.md` §5",
+        ):
+            assert phrase in collapsed, f"spec doc lost the §4 guarantee {phrase!r}"
+
+    def test_runbook_step4_carries_the_capture_and_assertion(self, runbook_step3):
+        assert 'tee "canary-gate-$(date -u +%Y%m%dT%H%M%SZ).json"' in runbook_step3
+        assert _CAPTURE_ASSERTION in runbook_step3
+        assert "NO RETAINED EVIDENCE" in runbook_step3
+        assert "durable copy retained" in runbook_step3
+        assert "pod-lifetime retention" in runbook_step3
+        assert "canary-gate-evidence.md` §4" in runbook_step3
+
+    def test_deploy_checklist_carries_the_same_assertion(self):
+        t = _collapsed(CHECKLIST)
+        assert _CAPTURE_ASSERTION in t
+        assert "NO RETAINED EVIDENCE" in t
+        assert "durable copy retained" in t
+        assert "pod-lifetime retention" in t
+        assert "canary-gate-evidence.md` §4" in t
+
+    def test_readme_points_the_retention_promise_at_the_contract(self):
+        t = _collapsed(README)
+        assert "retains the JSON evidence" in t
+        assert (
+            "the durability contract in `docs/notes/canary-gate-evidence.md` §4"
+            in t
+        )
+
+    def test_stdout_capture_satisfies_the_documented_assertion(
+        self, capsys, tmp_path
+    ):
+        """The property the checklist assertion checks — the capture exists,
+        is non-empty, and parses as a gate report — is true of the gate's
+        actual stdout: `tee` alone produces a durable copy."""
+        with (
+            patch("ytt.config.get_settings", return_value=_settings(None)),
+            patch("ytt.canary_gate.run_once", return_value=_once_report()),
+        ):
+            assert cli_main(["canary", "--gate", "--evidence-dir", str(tmp_path)]) == 0
+        capture = tmp_path / "canary-gate-capture.json"
+        capture.write_text(capsys.readouterr().out, encoding="utf-8")  # what tee does
+        assert capture.stat().st_size > 0  # `test -s "$F"`
+        # `jq -e '.gate'` — the capture parses as a gate report:
+        assert json.loads(capture.read_text(encoding="utf-8"))["gate"] == "pass"
