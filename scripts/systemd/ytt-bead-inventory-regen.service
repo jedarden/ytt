@@ -1,0 +1,17 @@
+[Unit]
+Description=Regenerate the ytt bead-inventory snapshot pair from the live store and commit it
+Documentation=file:///home/coding/ytt/docs/notes/bead-inventory-cadence.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/ytt
+Environment=PATH=/run/current-system/sw/bin:/home/coding/.cargo/bin:/home/coding/.local/bin
+ExecStart=/home/coding/ytt/scripts/bead-inventory-cadence.sh run
+# A hung bead/git must not wedge the timer.
+TimeoutStartSec=5min
+Nice=10
+# Capture the script's own decision lines, so a skipped or failed tick is
+# diagnosable from the journal alone.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ytt-bead-inventory-regen

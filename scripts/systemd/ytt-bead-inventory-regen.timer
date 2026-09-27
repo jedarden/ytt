@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily ytt bead-inventory regeneration (designated host: codinghome)
+
+[Timer]
+# Monotonic, so it is timezone-agnostic and survives clock changes (house
+# style). Persistent=true does not apply to monotonic timers; a missed elapse
+# while the box is down is caught up by OnBootSec.
+OnBootSec=10min
+OnUnitActiveSec=1d
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

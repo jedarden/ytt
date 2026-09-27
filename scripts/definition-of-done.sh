@@ -25,7 +25,10 @@
 # runs inside the suite below: it cross-checks the generated
 # docs/bead-inventory.{md,json} pair and lints curated docs for hand-written
 # bead-status claims; its freshness leg skips where no live bead store exists
-# (same skip shape as the parity guard above).
+# (same skip shape as the parity guard above). Freshness is normally kept by
+# the scheduled regeneration cadence (scripts/bead-inventory-cadence.sh,
+# docs/notes/bead-inventory-cadence.md) — this suite leg is only the
+# backstop if that timer dies.
 #
 # The egress-boundary guard (tests/unit/test_egress_boundary.py) also runs
 # inside the suite: static legs close the dependency / installed-plugin /

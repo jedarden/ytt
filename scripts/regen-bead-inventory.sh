@@ -11,12 +11,18 @@
 #     rebuild from a stale checkpoint.
 #   - Locally, every test run would rewrite committed files with transient
 #     store state, dirtying the tree for every worker sharing the checkout.
-# The docs therefore carry an explicit point-in-time caveat instead. Run this
-# on demand when a current snapshot is needed, and commit the result when it
-# is going to be cited. A staleness gate bounds the "on demand" habit:
+# The docs therefore carry an explicit point-in-time caveat instead, and the
+# refresh is automated instead of habitual: scripts/bead-inventory-cadence.sh
+# run — driven daily by the ytt-bead-inventory-regen.timer systemd --user
+# unit (scripts/systemd/, installed on the designated host codinghome, the
+# only host with this workspace's live store) — regenerates from the live
+# store and commits the pair when its data changed, plus a 7-day heartbeat
+# so a quiet store still proves the cadence is alive. Run this script by
+# hand when a current snapshot is needed right now. Two backstops remain:
 # tests/unit/test_bead_inventory_docs.py fails the DoD suite where a live
-# bead store exists if the committed snapshot is older than 14 days —
-# regenerate (and commit BOTH files) when that gate trips.
+# bead store exists if the committed snapshot is older than 14 days, and
+# `scripts/bead-inventory-cadence.sh age` self-labels the snapshot (exit 1
+# once stale) for anyone about to cite it.
 #
 # Requires: bead (bead-rs CLI — this workspace's declared backend per
 # .needle.yaml), python3.
@@ -53,6 +59,15 @@ total = len(beads)
 open_n = counts.get("open", 0)
 in_progress_n = counts.get("in_progress", 0)
 closed_n = counts.get("closed", 0)
+# The status vocabulary is not closed (deferred appeared live 2026-09-27):
+# every status outside the headline three is counted and named rather than
+# silently folded into total.
+other_statuses = {
+    str(status): n
+    for status, n in sorted(counts.items(), key=lambda kv: str(kv[0]))
+    if status not in ("open", "in_progress", "closed")
+}
+other_n = sum(other_statuses.values())
 active = [b for b in beads if b.get("status") != "closed"]
 active.sort(key=lambda b: (b.get("priority", 9), b.get("id", "")))
 
@@ -105,6 +120,8 @@ snapshot = {
         "open": open_n,
         "in_progress": in_progress_n,
         "closed": closed_n,
+        "other": other_n,
+        "other_statuses": other_statuses,
     },
     "beads_not_closed": [
         {
@@ -209,11 +226,28 @@ def prior_history(md_path: Path) -> list:
     return list(dict.fromkeys(demoted))  # dedupe, keep order
 
 
+def other_clause():
+    if not other_statuses:
+        return ""
+    return ", " + ", ".join(f"{n} {s}" for s, n in other_statuses.items())
+
+
 history = prior_history(Path("docs/bead-inventory.md")) or STATIC_HISTORY
-history.append(
+new_entry = (
     f"- {generated_at} (this snapshot): {open_n} open, {in_progress_n} in "
-    f"progress, {closed_n} closed."
+    f"progress, {closed_n} closed{other_clause()}."
 )
+# Collapse consecutive same-count entries: heartbeat regenerations on a
+# quiet store would otherwise append an identical-count bullet per liveness
+# commit, turning History into a heartbeat log instead of a change log.
+counts_shape = re.compile(
+    r": (\d+) open, (\d+) in progress, (\d+) closed((?:, \d+ \w+)*?)\.$"
+)
+new_counts = counts_shape.search(new_entry)
+prev_counts = counts_shape.search(history[-1]) if history else None
+if new_counts and prev_counts and new_counts.groups() == prev_counts.groups():
+    history.pop()
+history.append(new_entry)
 history_text = "\n".join(history)
 
 doc = f"""# Workspace Bead Inventory
@@ -224,6 +258,11 @@ doc = f"""# Workspace Bead Inventory
 > live state, run `bead list` yourself. It is deliberately **not** refreshed
 > by `scripts/definition-of-done.sh` — see the header of the regen script for
 > why (no live store inside a clean extraction; constant tree churn locally).
+> A daily cadence on the designated host (`scripts/bead-inventory-cadence.sh
+> run`, timer `ytt-bead-inventory-regen.timer` in `scripts/systemd/`)
+> normally refreshes this pair; check `scripts/bead-inventory-cadence.sh
+> age` before citing — it prints this snapshot's age and exits nonzero once
+> it exceeds the freshness bound.
 
 Generated {generated_at} from the live bead-rs store with:
 
@@ -235,8 +274,8 @@ via `scripts/regen-bead-inventory.sh` (the only supported way to regenerate —
 this file is fully generated, do not hand-edit).
 
 Summary at generation time: **{open_n} open**, **{in_progress_n} in
-progress**, {closed_n} closed — {total} beads total. The machine-readable
-copy is [docs/bead-inventory.json](bead-inventory.json).
+progress**, {closed_n} closed{other_clause()} — {total} beads total. The
+machine-readable copy is [docs/bead-inventory.json](bead-inventory.json).
 
 ## Not-closed beads ({len(active)})
 
