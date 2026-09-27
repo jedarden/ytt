@@ -23,11 +23,13 @@ Coverage map (each class cites the requirement it pins):
   S256 ``code_challenge`` (``plain`` rejected, absent rejected), and an
   approved consent redirects upstream with a fresh S256 challenge (the proxy
   re-challenges for the upstream leg per ``forward_pkce=True``).
-- :class:`TestDCRRestrictedToClaudeRedirects` — the shipped form of
-  docs/notes/auth.md's "DCR disabled for personal v1": registration completes
-  (OAuthProxy requires it) but the authorize endpoint enforces the
-  Claude-only redirect allowlist, so a self-registered third-party redirect
-  URI can never complete an authorization — the open-redirect/relay guard.
+- :class:`TestDCRRestrictedToClaudeRedirects` — docs/notes/auth.md's
+  "redirect-pinned, not open" registration policy, pinned at BOTH
+  enforcement points: ``/register`` refuses any client that requests a
+  callback outside Claude's two URIs (RFC 7591 ``invalid_redirect_uri``),
+  and ``/authorize`` independently re-enforces the same allowlist — so an
+  unapproved (or loopback-http) redirect URI can never obtain an
+  authorization code — the open-redirect/relay guard.
 - :class:`TestPathBearingAudienceBinding` — RFC 8707: the token audience, the
   resource identifier and the issuer are all the **path-bearing** public URL
   (never the bare origin), and the upstream id-token verifier rejects wrong
@@ -564,16 +566,18 @@ class TestPKCEFlow:
 
 
 class TestDCRRestrictedToClaudeRedirects:
-    """docs/notes/auth.md: "Dynamic Client Registration disabled for personal
-    v1 (DCR lets anyone register)."
+    """docs/notes/auth.md: "DCR on ytt's client-facing AS is redirect-pinned,
+    not open — ytt issues codes only to Claude's own callback URIs."
 
-    Shipped model (ytt/auth.py): OAuthProxy requires an open registration
-    endpoint, so the control is enforced at the *authorization* step —
-    ``allowed_client_redirect_uris`` is Claude's two callbacks, and an
-    authorize request for any other registered redirect URI is refused with
-    400 invalid_request (never a redirect). These tests pin that enforcement
-    point: a self-registered third-party (or loopback-http) redirect URI must
-    be unable to complete an authorization, which is what keeps ytt's AS from
+    Shipped model (ytt/auth.py): the registration endpoint itself refuses a
+    client that asks for any other callback — ``YttOIDCProvider
+    .register_client`` raises RFC 7591 §3.2.2 ``invalid_redirect_uri`` (400)
+    for a URI outside ``CLAUDE_REDIRECT_URIS`` — and ``/authorize``
+    independently re-enforces the same allowlist (``invalid_request``, never
+    a redirect). These tests pin both enforcement points: an unapproved
+    third-party (or loopback-http) redirect URI must be unable to obtain an
+    authorization code, even when the stored client was created by a route
+    that skipped the registration gate, which is what keeps ytt's AS from
     acting as an open relay to arbitrary redirect targets.
     """
 
@@ -584,29 +588,121 @@ class TestDCRRestrictedToClaudeRedirects:
             "http://127.0.0.1:0/callback",  # loopback (public-client) variant
         ],
     )
-    def test_foreign_redirect_uri_cannot_complete_authorization(
-        self, client, evil_redirect
-    ):
-        registration = register_client(client, CLAUDE_REDIRECT, evil_redirect)
-        assert registration["client_id"]
-        assert registration["redirect_uris"] == [CLAUDE_REDIRECT, evil_redirect]
-
-        _, challenge = _pkce_pair()
-        resp = client.get(
-            f"{_issuer_path()}/authorize",
-            params={
-                "response_type": "code",
-                "client_id": registration["client_id"],
-                "redirect_uri": evil_redirect,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "state": "x",
+    def test_unapproved_redirect_uri_cannot_register(self, client, evil_redirect):
+        """The registration hop refuses the foreign URI outright: 400
+        invalid_redirect_uri, no client_id minted, nothing stored."""
+        resp = client.post(
+            f"{BASE}{_issuer_path()}/register",
+            json={
+                "client_name": "oauth-conformance-suite",
+                "redirect_uris": [evil_redirect],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
             },
         )
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "invalid_request"
-        # No redirect may leave for the unregistered URI (open-redirect guard)
-        assert "location" not in {k.lower() for k in resp.headers}
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        assert body["error"] == "invalid_redirect_uri"
+        assert "client_id" not in body, "a refused registration minted a client_id"
+
+    def test_mixed_registration_is_refused_wholesale(self, client):
+        """A registration naming an allowlisted URI *plus* an unapproved one
+        fails entirely — the foreign URI is never quietly filtered out of an
+        accepted registration (fail-closed, not fail-partial)."""
+        evil_redirect = "https://evil.example.com/callback"
+        resp = client.post(
+            f"{BASE}{_issuer_path()}/register",
+            json={
+                "client_name": "oauth-conformance-suite",
+                "redirect_uris": [CLAUDE_REDIRECT, evil_redirect],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_redirect_uri"
+        assert "client_id" not in resp.json()
+
+    def test_claude_client_name_cannot_vouch_for_a_foreign_redirect(
+        self, client
+    ):
+        """The real Claude apps register as ``client_name: "claudeai"`` —
+        auth.md: "Authorize on the token subject, not the client name." A
+        Claude-named registration changes nothing: the redirect allowlist is
+        the only thing a registration is judged on, never the name it
+        claims."""
+        resp = client.post(
+            f"{BASE}{_issuer_path()}/register",
+            json={
+                "client_name": "claudeai",
+                "redirect_uris": ["https://evil.example.com/callback"],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_redirect_uri"
+
+    @pytest.mark.parametrize(
+        "evil_redirect",
+        [
+            "https://evil.example.com/callback",  # third-party collector
+            "http://127.0.0.1:0/callback",  # loopback (public-client) variant
+        ],
+    )
+    def test_authorize_refuses_a_stored_unapproved_registration(
+        self, client, evil_redirect
+    ):
+        """Defense in depth: /authorize re-enforces the allowlist on a client
+        that is already in the store with a foreign URI — as one minted
+        before the registration gate existed would be. The registration
+        refusal above is not the only thing standing between an unapproved
+        callback and an authorization code."""
+        import asyncio
+        from urllib.parse import urlparse as _urlparse
+
+        from fastmcp.server.auth.oauth_proxy.models import ProxyDCRClient
+        from mcp.shared.auth import AnyUrl as _AnyUrl
+
+        from ytt.auth import CLAUDE_REDIRECT_URIS
+        from ytt.config import get_settings
+        from ytt.server import mcp as _mcp_app
+
+        issuer_path = _urlparse(get_settings().public_url).path.rstrip("/")
+        stored = ProxyDCRClient(
+            client_id="reg-preexisting-foreign-redirect",
+            client_secret=None,
+            redirect_uris=[_AnyUrl(evil_redirect)],
+            grant_types=["authorization_code", "refresh_token"],
+            scope="openid email offline_access",
+            token_endpoint_auth_method="none",
+            allowed_redirect_uri_patterns=list(CLAUDE_REDIRECT_URIS),
+            client_name="oauth-conformance-suite",
+        )
+        store = _mcp_app.auth._client_store
+        asyncio.run(store.put(key=stored.client_id, value=stored))
+        try:
+            _, challenge = _pkce_pair()
+            resp = client.get(
+                f"{issuer_path}/authorize",
+                params={
+                    "response_type": "code",
+                    "client_id": stored.client_id,
+                    "redirect_uri": evil_redirect,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                    "state": "x",
+                },
+            )
+            assert resp.status_code == 400, resp.text[:300]
+            assert resp.json()["error"] == "invalid_request"
+            # No redirect may leave for the unregistered URI (open-redirect guard)
+            assert "location" not in {k.lower() for k in resp.headers}
+        finally:
+            asyncio.run(store.delete(key=stored.client_id))
 
     def test_claude_redirect_uri_completes_authorization(self, client):
         """The allowlisted URI still walks the full flow — the restriction is

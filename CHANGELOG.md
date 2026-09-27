@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **OAuth client registration is now redirect-pinned end to end** (bead
+  `ytt-8459c44d`). The documented policy ("DCR on ytt's client-facing AS is
+  redirect-pinned, not open") and the shipped enforcement disagreed at the
+  `/register` hop: stock OAuthProxy registration stored whatever redirect
+  URIs a caller asked for (201), leaving the Claude-only allowlist to
+  authorize-time pattern matching — while a stale test docstring still
+  quoted the retired "DCR disabled for personal v1" wording. One policy is
+  now chosen and enforced at both hops: `YttOIDCProvider.register_client`
+  refuses any registration naming a callback outside `CLAUDE_REDIRECT_URIS`
+  with RFC 7591 `invalid_redirect_uri` (400, whole registration refused —
+  never a partial accept), and `/authorize` keeps its independent
+  re-check as defense in depth for a client that reached the store by any
+  other route. The refusal cannot lock out a client that could previously
+  complete a grant: a foreign-URI registration was already unable to
+  obtain a code. auth.md and the self-hosting guide state the same policy;
+  a claudeai-named (`client_name`) registration provably buys nothing —
+  the subject allowlist behind the token is unchanged. Pinned by
+  `TestDCRRestrictedToClaudeRedirects` (both enforcement points),
+  `TestRejectedGrantsNeverMintTokens`, the direct
+  `register_client` unit pins in `tests/unit/test_auth.py`, and the
+  end-to-end `TestRegistrationGrantsNoSubjectAuthorization`.
 - **Cancelled Whisper job tasks now land their registry entry in a stable
   terminal error** (bead `ytt-c3037dd5`). A job task killed by cancellation —
   server shutdown, loop teardown, or a cancellation while the job was still

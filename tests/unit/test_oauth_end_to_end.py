@@ -226,12 +226,14 @@ def client():
         yield test_client
 
 
-def register_client(client: TestClient, *redirect_uris: str) -> dict:
+def register_client(
+    client: TestClient, *redirect_uris: str, client_name: str = "oauth-end-to-end-suite"
+) -> dict:
     """DCR-register a client and return the registration response JSON."""
     resp = client.post(
         f"{BASE}{_issuer_path()}/register",
         json={
-            "client_name": "oauth-end-to-end-suite",
+            "client_name": client_name,
             "redirect_uris": list(redirect_uris),
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -243,7 +245,11 @@ def register_client(client: TestClient, *redirect_uris: str) -> dict:
 
 
 def walk_full_flow(
-    client: TestClient, mock_idp: _MockUpstreamIdP, *, state: str = "e2e-state"
+    client: TestClient,
+    mock_idp: _MockUpstreamIdP,
+    *,
+    state: str = "e2e-state",
+    client_name: str = "oauth-end-to-end-suite",
 ) -> tuple[str, str, str]:
     """Walk the complete grant up to (not including) POST /token.
 
@@ -254,7 +260,9 @@ def walk_full_flow(
     Returns ``(client_id, client_code, code_verifier)`` — everything a real
     MCP client holds when it redeems the code at POST /token.
     """
-    client_id = register_client(client, CLAUDE_REDIRECT)["client_id"]
+    client_id = register_client(
+        client, CLAUDE_REDIRECT, client_name=client_name
+    )["client_id"]
     verifier, challenge = _pkce_pair()
 
     # 1. /authorize with S256 PKCE → consent page
@@ -640,15 +648,16 @@ def bearer_variants() -> dict[str, str]:
 
 
 class TestRejectedGrantsNeverMintTokens:
-    """tests/unit/test_oauth_conformance.py pins the /authorize-leg
-    rejections in isolation (missing/plain challenge, foreign redirect
-    URI); this class walks the same rejections as *complete grant
-    attempts* to their shared terminus — nothing is ever issued, and the
-    token leg itself yields nothing. These are the two refusal classes
-    docs/notes/auth.md calls out: non-PKCE (OAuth 2.1 mandates S256) and
-    DCR clients whose redirect URI is not one of Claude's ("DCR lets
-    anyone register" — the proxy's registration facade accepts the
-    client, the authorization step refuses the grant)."""
+    """tests/unit/test_oauth_conformance.py pins the registration- and
+    /authorize-leg rejections in isolation (missing/plain challenge,
+    unapproved redirect URI); this class walks the same rejections as
+    *complete grant attempts* to their shared terminus — nothing is ever
+    issued, and the token leg itself yields nothing. These are the two
+    refusal classes docs/notes/auth.md calls out: non-PKCE (OAuth 2.1
+    mandates S256) and DCR clients asking for a redirect URI that is not
+    one of Claude's ("redirect-pinned, not open" — the registration is
+    refused outright, with the authorize allowlist behind it as defense
+    in depth)."""
 
     @staticmethod
     def _redeem_fabricated_code(client: TestClient, redirect_uri: str) -> httpx.Response:
@@ -694,39 +703,90 @@ class TestRejectedGrantsNeverMintTokens:
         assert token_resp.status_code == 401, token_resp.text[:300]
         assert token_resp.json()["error"] == "invalid_grant"
 
+    @pytest.mark.parametrize(
+        "evil_redirect",
+        [
+            "https://evil.example.com/callback",  # third-party collector
+            "http://127.0.0.1:0/callback",  # loopback (public-client) variant
+        ],
+    )
     def test_dcr_client_with_foreign_redirect_never_yields_a_token(
-        self, client
+        self, client, evil_redirect
     ):
-        """The DCR attempt that *is* accepted (registration succeeds — it is
-        the proxy's client-facing facade) still cannot complete a grant for
-        a non-Claude redirect URI: /authorize refuses with 400 and no
-        redirect, and the token leg mints nothing. Registration alone buys
-        nothing — the subject allowlist behind a valid token is the next
-        gate, and no token is reachable from here."""
-        evil_redirect = "https://evil.example.com/callback"
-        registration = register_client(client, CLAUDE_REDIRECT, evil_redirect)
-        assert registration["redirect_uris"] == [CLAUDE_REDIRECT, evil_redirect]
-
-        _, challenge = _pkce_pair()
-        resp = client.get(
-            f"{BASE}{_issuer_path()}/authorize",
-            params={
-                "response_type": "code",
-                "client_id": registration["client_id"],
-                "redirect_uri": evil_redirect,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "state": "dcr-evil",
+        """The DCR attempt naming a non-Claude callback dies at the
+        registration hop — 400 invalid_redirect_uri, no client_id minted —
+        and the token leg confirms the vault stays shut even for a caller
+        that ignores the refusal. Registration alone buys nothing; the
+        subject allowlist behind a valid token is the next gate, and no
+        token is reachable from here."""
+        resp = client.post(
+            f"{BASE}{_issuer_path()}/register",
+            json={
+                "client_name": "oauth-end-to-end-suite",
+                "redirect_uris": [CLAUDE_REDIRECT, evil_redirect],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
             },
         )
         assert resp.status_code == 400, resp.text[:300]
-        assert resp.json()["error"] == "invalid_request"
-        # No redirect may leave for the unregistered URI (open-redirect guard)
-        assert "location" not in {k.lower() for k in resp.headers}
+        assert resp.json()["error"] == "invalid_redirect_uri"
+        assert "client_id" not in resp.json(), (
+            "a refused registration minted a client_id"
+        )
 
         token_resp = self._redeem_fabricated_code(client, evil_redirect)
         assert token_resp.status_code == 401, token_resp.text[:300]
         assert token_resp.json()["error"] == "invalid_grant"
+
+
+# ===========================================================================
+# Registration alone cannot bypass subject authorization
+# ===========================================================================
+
+
+class TestRegistrationGrantsNoSubjectAuthorization:
+    """The second half of docs/notes/auth.md's registration policy: "a
+    registration alone grants nothing. Authorize on the token **subject**,
+    not the client name." A client may register (Claude's callbacks only),
+    walk the *complete* grant with valid S256 PKCE, and hold a
+    cryptographically valid FastMCP token — none of it moves the subject
+    allowlist. Pinned under the client_name the real Claude apps register
+    with ("claudeai"), so the registration record itself — identity as
+    claimed at DCR — is provably never the authorization."""
+
+    def test_claude_named_full_flow_still_allowlist_gated(
+        self, client, mock_idp, allowlist
+    ):
+        """A "claudeai" registration completes the entire OAuth 2.1 grant and
+        gets a real token — and still sees zero tools while its subject is
+        unallowlisted. The allowlist admits nobody here (the unit env's
+        fail-closed default), which is exactly the caller this test models:
+        fully authenticated, fully authorized *as a client*, authorized as
+        a *subject* by nothing."""
+        from ytt.authz import subject_allowed
+        from ytt.config import get_settings
+
+        client_id, code, verifier = walk_full_flow(
+            client, mock_idp, state="claudeai-registration", client_name="claudeai"
+        )
+        tokens = exchange_code(client, client_id, code, verifier).json()
+        assert tokens["access_token"], "the grant itself must succeed"
+
+        # The denial is the allowlist's doing, not a broken flow: the token
+        # validated end-to-end, and its subject is outside the (empty)
+        # allowlist — auth.md: "Empty allowlist = deny all (fail-closed)".
+        assert not subject_allowed(SUBJECT, get_settings().allowed_subjects_set)
+
+        session_id = open_mcp_session(client, tokens["access_token"])
+        resp = mcp_request(
+            client, tokens["access_token"], "tools/list", session_id=session_id
+        )
+        assert resp.status_code == 200, resp.text[:300]
+        assert mcp_json(resp)["result"]["tools"] == [], (
+            "a completed registration + grant must not bypass the subject "
+            "allowlist"
+        )
 
 
 # ===========================================================================

@@ -48,6 +48,8 @@ from starlette.routing import Route
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from mcp.server.auth.provider import RegistrationError
+from mcp.shared.auth import OAuthClientInformationFull
 
 from ytt.config import (
     DEFAULT_OIDC_CONFIG_URL,
@@ -58,10 +60,14 @@ from ytt.config import (
 log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Claude connector redirect URIs — the only redirect URIs ytt's AS will issue
-# authorization codes for. Defense in depth: the real access boundary is the
-# email allowlist (authz.check_subject_auth), but this keeps DCR from being a
-# fully open relay to arbitrary third-party redirect targets.
+# Claude connector redirect URIs — the only callback URIs ytt's AS accepts,
+# at BOTH OAuth hops a client drives: a DCR registration naming any other
+# redirect URI is refused outright (YttOIDCProvider.register_client), and
+# /authorize re-enforces the same allowlist before issuing a code (the
+# patterns ride on every stored client via allowed_client_redirect_uris).
+# Defense in depth: the real access boundary is the email allowlist
+# (authz.check_subject_auth), but this keeps ytt's AS from acting as an
+# open relay to arbitrary third-party redirect targets.
 # ---------------------------------------------------------------------------
 CLAUDE_REDIRECT_URIS: list[str] = [
     "https://claude.ai/api/mcp/auth_callback",
@@ -266,6 +272,42 @@ class YttOIDCProvider(OIDCProxy):
             existing_paths.add(pi_path)
 
         return base_routes
+
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Redirect-pinned DCR (docs/notes/auth.md): refuse any registration
+        that asks for a callback outside :data:`CLAUDE_REDIRECT_URIS`.
+
+        OAuthProxy's stock ``register_client`` stores whatever URIs a caller
+        sends and leaves the enforcement to authorize-time pattern matching —
+        under it, "redirect-pinned registration" described only *code
+        issuance*. Refusing at the registration step (RFC 7591 §3.2.2
+        ``invalid_redirect_uri`` — the SDK's ``RegistrationHandler`` turns
+        this exception into the 400) makes the documented policy true of the
+        registration itself. It cannot lock out a client that could
+        previously complete a grant: a registration naming a non-allowlisted
+        URI was already unable to obtain a code. /authorize keeps its own
+        copy of the allowlist as defense in depth (pinned by
+        ``TestDCRRestrictedToClaudeRedirects``), so a client that reached the
+        store by any other route still cannot redeem anything.
+        """
+        requested = [str(uri) for uri in (client_info.redirect_uris or [])]
+        unapproved = [uri for uri in requested if uri not in CLAUDE_REDIRECT_URIS]
+        if unapproved:
+            log.info(
+                "dcr_registration_rejected",
+                reason="redirect_uri not approved on this authorization server",
+                requested_count=len(requested),
+                unapproved_count=len(unapproved),
+            )
+            raise RegistrationError(
+                error="invalid_redirect_uri",
+                error_description=(
+                    "redirect_uri is not approved on this authorization "
+                    "server (redirect-pinned registration — see "
+                    "docs/notes/auth.md)"
+                ),
+            )
+        await super().register_client(client_info)
 
 
 def build_auth_provider(settings: Settings) -> YttOIDCProvider:

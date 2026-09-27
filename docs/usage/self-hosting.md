@@ -180,11 +180,14 @@ Claude ⇄ ytt's own OAuth AS        (hop 1 — nothing to register)
 **Hop 1 — Claude as ytt's client.** ytt is its own authorization server
 (FastMCP OAuthProxy, OAuth 2.1 + PKCE). Claude discovers it from the metadata
 in Step 7, registers itself via DCR, and authenticates the user by redirecting
-through hop 2. ytt only issues codes to Claude's own redirect URIs
+through hop 2. Registration is **redirect-pinned**: a DCR request naming any
+callback other than Claude's own two URIs
 (`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`
-— hardcoded, see `CLAUDE_REDIRECT_URIS` in `ytt/auth.py`). You configure
-nothing for this hop, and those two URLs are **not** registered anywhere on
-your IdP — a common confusion.
+— hardcoded, see `CLAUDE_REDIRECT_URIS` in `ytt/auth.py`) is refused with RFC
+7591 `invalid_redirect_uri` (400), and the authorize endpoint re-checks the
+same allowlist before issuing a code — no other client, on any callback, can
+obtain an authorization code. You configure nothing for this hop, and those
+two URLs are **not** registered anywhere on your IdP — a common confusion.
 
 **Hop 2 — ytt as your IdP's client.** On your IdP (Authentik, or any OIDC
 provider), register a **confidential** client for ytt:

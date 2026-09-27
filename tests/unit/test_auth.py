@@ -9,7 +9,7 @@ Tests cover:
 - HTTP-level 401 + WWW-Authenticate header on the MCP endpoint
 - 401 metadata URL points to /.well-known/oauth-protected-resource/ytt
 - Wrong-audience JWT rejected by JWTVerifier (audience validation unit test)
-- Static Claude connector client pre-registered (DCR off)
+- DCR is redirect-pinned: registration refuses non-Claude callbacks
 """
 
 from __future__ import annotations
@@ -303,11 +303,72 @@ class TestYttOIDCProviderMetadata:
         return build_auth_provider(s)
 
     def test_dcr_restricted_to_claude_redirect_uris(self, provider):
-        """DCR is open (required for OAuthProxy) but scoped to Claude's two
-        redirect URIs — defense in depth against ytt's AS being used as an
-        open relay by arbitrary third-party OAuth clients."""
+        """DCR is redirect-pinned (docs/notes/auth.md): the allowlist rides
+        on every stored client for the authorize-time check, on top of the
+        registration-time refusal — defense in depth against ytt's AS being
+        used as an open relay by arbitrary third-party OAuth clients."""
         from ytt.auth import CLAUDE_REDIRECT_URIS
         assert provider._allowed_client_redirect_uris == CLAUDE_REDIRECT_URIS
+
+    def test_register_client_refuses_unapproved_redirect_uri(self, provider):
+        """The registration-time half of the pin: a client asking for any
+        callback outside CLAUDE_REDIRECT_URIS raises the SDK's
+        RegistrationError(invalid_redirect_uri) — which the register route
+        turns into a 400 — and stores nothing."""
+        import asyncio
+
+        from mcp.server.auth.provider import RegistrationError
+        from mcp.shared.auth import AnyUrl, OAuthClientInformationFull
+
+        from ytt.auth import CLAUDE_REDIRECT_URIS
+
+        def _info(*uris: str) -> OAuthClientInformationFull:
+            return OAuthClientInformationFull(
+                client_id="reg-unit-test",
+                redirect_uris=[AnyUrl(u) for u in uris],
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+                token_endpoint_auth_method="none",
+            )
+
+        with pytest.raises(RegistrationError) as exc_info:
+            asyncio.run(
+                provider.register_client(_info("https://evil.example.com/cb"))
+            )
+        assert exc_info.value.error == "invalid_redirect_uri"
+        assert asyncio.run(provider._client_store.get(key="reg-unit-test")) is None
+
+        # Mixed lists fail wholesale too — never a partial accept.
+        with pytest.raises(RegistrationError):
+            asyncio.run(
+                provider.register_client(
+                    _info(CLAUDE_REDIRECT_URIS[0], "http://127.0.0.1:0/cb")
+                )
+            )
+        assert asyncio.run(provider._client_store.get(key="reg-unit-test")) is None
+
+    def test_register_client_accepts_claude_redirects(self, provider):
+        """The allowlisted callbacks still register — the pin is scoped, not
+        a registration lockout."""
+        import asyncio
+
+        from mcp.shared.auth import AnyUrl, OAuthClientInformationFull
+
+        from ytt.auth import CLAUDE_REDIRECT_URIS
+
+        info = OAuthClientInformationFull(
+            client_id="reg-unit-test-claude",
+            redirect_uris=[AnyUrl(u) for u in CLAUDE_REDIRECT_URIS],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        )
+        asyncio.run(provider.register_client(info))
+        stored = asyncio.run(
+            provider._client_store.get(key="reg-unit-test-claude")
+        )
+        assert stored is not None
+        assert [str(u) for u in stored.redirect_uris] == CLAUDE_REDIRECT_URIS
 
     def test_issuer_url_is_path_bearing(self, provider):
         """issuer_url must match the full path-bearing public_url."""
