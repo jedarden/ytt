@@ -464,13 +464,22 @@ spec:
         command: [sh]
         source: |
           set -eu
+          # Real curl, not busybox wget: alpine's wget prints only the status
+          # line for an error response (never the headers), so the 401
+          # WWW-Authenticate challenge below can never be observed with it —
+          # ytt-build-xhg9d's smoke failed on exactly that while the server
+          # under test was healthy and answering 401.
+          apk add --no-cache curl >/dev/null 2>&1 || {
+            echo "QUICK-START-SMOKE FAILURE: cannot install curl (alpine mirror unreachable?)" >&2
+            exit 1
+          }
           BASE="http://127.0.0.1:8080/ytt"
           TAG="ghcr.io/jedarden/ytt:{{inputs.parameters.version}}"
 
           echo "quick-start smoke: waiting up to ~180s for $BASE/health"
           i=0
           while :; do
-            if wget -q -O - "$BASE/health" 2>/dev/null \
+            if curl -s "$BASE/health" 2>/dev/null \
                 | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
               break
             fi
@@ -490,9 +499,10 @@ spec:
           # The MCP mount must reject anonymous callers exactly as
           # documented (README "Auth required"; the 401 challenge shape the
           # deployed-ingress smoke pins against the live deployment).
-          HEADERS="$(wget -S -O /dev/null "$BASE" 2>&1 || true)"
-          STATUS="$(printf '%s\n' "$HEADERS" \
-            | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | head -n1 | grep -oE '[0-9]{3}$')"
+          HEADERS="$(curl -s -D - -o /dev/null "$BASE" || true)"
+          # `|| true`: under set -e a no-match grep would otherwise end the
+          # script silently, before any message.
+          STATUS="$(printf '%s\n' "$HEADERS" | head -n1 | grep -oE '[0-9]{3}' | head -n1 || true)"
           if [ "$STATUS" != "401" ]; then
             echo "QUICK-START-SMOKE FAILURE: MCP mount answered '${STATUS:-nothing}' to an anonymous GET; documented behavior is 401"
             printf '%s\n' "$HEADERS" | head -5
@@ -569,7 +579,10 @@ spec:
         command: [sh]
         source: |
           set -eu
-          apk add --no-cache curl jq >/dev/null 2>&1
+          apk add --no-cache curl jq >/dev/null 2>&1 || {
+            echo "VERIFY-GHCR-PUBLIC FAILURE: cannot install curl/jq (alpine mirror unreachable?)" >&2
+            exit 1
+          }
           REPO="jedarden/ytt"
           TAG="{{inputs.parameters.version}}"
           EXPECTED="{{inputs.parameters.digest}}"
@@ -578,7 +591,8 @@ spec:
 
           CODE=000
           for attempt in 1 2 3 4; do
-            TOKEN="$(curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token // empty')"
+            TCODE="$(curl -s -o /tmp/token.json -w '%{http_code}' "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull")"
+            TOKEN="$(jq -r '.token // empty' /tmp/token.json 2>/dev/null || true)"
             if [ -n "$TOKEN" ]; then
               CODE="$(curl -s -o /tmp/manifest.json -w '%{http_code}' \
                 -H "Authorization: Bearer $TOKEN" -H "Accept: $ACCEPT" \
@@ -586,7 +600,14 @@ spec:
               [ "$CODE" = "200" ] && break
               echo "  attempt $attempt: anonymous manifest lookup -> HTTP $CODE"
             else
-              echo "  attempt $attempt: no anonymous pull token"
+              # GHCR issues NO token for a package that is private or does not
+              # exist: the token endpoint itself answers 401/403 (verified
+              # 2026-09-27: 403 DENIED for a package that does not exist yet,
+              # 401 UNAUTHORIZED for an existing private one). That answer IS
+              # the visibility signal, so it is the code we classify on — an
+              # unreachable endpoint reads 000 and is (correctly) an outage.
+              CODE="$TCODE"
+              echo "  attempt $attempt: anonymous token request -> HTTP $TCODE"
             fi
             sleep 20
           done

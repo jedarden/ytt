@@ -64,7 +64,15 @@ Legs:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import shutil
+import stat
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -482,6 +490,145 @@ def test_verify_has_no_retry_strategy():
     assert "retryStrategy" not in _template("verify-ghcr-public")
 
 
+def test_verify_classifies_on_the_token_request_status():
+    """GHCR issues NO token for a package that is private or does not exist —
+    the token endpoint itself answers 403 DENIED / 401 UNAUTHORIZED. An
+    earlier draft of this script treated "no token" as "no answer" (HTTP 000)
+    and told the operator it was a rate limit or outage, the opposite of the
+    truth for exactly the case the step exists to diagnose."""
+    source = _script_source("verify-ghcr-public")
+    assert "TCODE" in source and 'CODE="$TCODE"' in source, (
+        "a missing token is not classified by the token request's HTTP status"
+    )
+
+
+# --- behavior: the REAL script, run against a stubbed curl -----------------
+
+_FAKE_CURL = r"""#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+out = fmt = None
+i = 0
+while i < len(argv):
+    if argv[i] == "-o": out = argv[i + 1]; i += 2
+    elif argv[i] == "-w": fmt = argv[i + 1]; i += 2
+    elif argv[i] in ("-H", "-u", "--max-time"): i += 2
+    else: i += 1
+url = argv[-1]
+sc = json.loads(os.environ["FAKE_GHCR"])
+kind = "token" if "/token?" in url else "manifest" if "/manifests/" in url else "blob"
+code, body = sc[kind]
+if code != "000" and out:
+    open(out, "w").write(body)
+elif code != "000" and not out:
+    sys.stdout.write(body)
+if fmt:
+    sys.stdout.write(code)
+"""
+
+_MANIFEST = json.dumps(
+    {
+        "schemaVersion": 2,
+        "config": {"digest": "sha256:" + "c" * 64},
+        "layers": [{"digest": "sha256:" + "a" * 64}, {"digest": "sha256:" + "b" * 64}],
+    }
+)
+
+
+def _run_verify(tmp_path: Path, scenario: dict, expected: str | None = None):
+    """Run verify-ghcr-public's script verbatim (Argo placeholders filled,
+    /tmp redirected, apk/sleep stubbed) against a curl that replays *scenario*."""
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed (the script needs it, as does its alpine image)")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (
+        ("curl", _FAKE_CURL),
+        ("apk", "#!/bin/sh\nexit 0\n"),
+        ("sleep", "#!/bin/sh\nexit 0\n"),
+    ):
+        exe = bin_dir / name
+        exe.write_text(body)
+        exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    digest = expected or "sha256:" + hashlib.sha256(_MANIFEST.encode()).hexdigest()
+    work = tmp_path / "work"
+    work.mkdir()
+    script = (
+        _script_source("verify-ghcr-public")
+        .replace("{{inputs.parameters.version}}", "9.9.9")
+        .replace("{{inputs.parameters.digest}}", digest)
+        .replace("/tmp/", f"{work}/")
+    )
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_GHCR": json.dumps(scenario),
+    }
+    result = subprocess.run(
+        ["sh", "-c", script], capture_output=True, text=True, env=env, timeout=60
+    )
+    return result, work
+
+
+_TOKEN_OK = ["200", json.dumps({"token": "t"})]
+_DENIED = ["403", json.dumps({"errors": [{"code": "DENIED"}]})]
+_UNAUTHORIZED = ["401", json.dumps({"errors": [{"code": "UNAUTHORIZED"}]})]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"token": _DENIED, "manifest": ["000", ""], "blob": "000"}, id="token-403-package-does-not-exist-yet"),
+        pytest.param({"token": _UNAUTHORIZED, "manifest": ["000", ""], "blob": "000"}, id="token-401-package-exists-but-private"),
+        pytest.param({"token": _TOKEN_OK, "manifest": ["404", ""], "blob": "000"}, id="manifest-404"),
+    ],
+)
+def test_verify_names_a_not_yet_public_package_as_a_visibility_problem(tmp_path, scenario):
+    result, _ = _run_verify(tmp_path, {**scenario, "blob": ["000", ""]} if isinstance(scenario["blob"], str) else scenario)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1, out
+    assert "PRIVATE" in out and "Change visibility" in out and "DEPLOY-CHECKLIST" in out, out
+    assert "retry later" not in out, (
+        "a private package was reported as an outage:\n" + out
+    )
+
+
+def test_verify_names_an_unreachable_registry_as_an_outage_not_visibility(tmp_path):
+    result, _ = _run_verify(
+        tmp_path, {"token": ["000", ""], "manifest": ["000", ""], "blob": ["000", ""]}
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 1, out
+    assert "retry later" in out and "PRIVATE" not in out, out
+
+
+def test_verify_passes_and_records_tag_and_digest_for_a_public_package(tmp_path):
+    scenario = {"token": _TOKEN_OK, "manifest": ["200", _MANIFEST], "blob": ["307", ""]}
+    result, work = _run_verify(tmp_path, scenario)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "manifest OK" in out and "all 3 config/layer blobs authorized" in out, out
+    assert (work / "tested-tag").read_text().strip() == "ghcr.io/jedarden/ytt:9.9.9"
+    assert (work / "tested-digest").read_text().strip() == (
+        "sha256:" + hashlib.sha256(_MANIFEST.encode()).hexdigest()
+    )
+
+
+def test_verify_refuses_a_manifest_that_is_not_the_published_image(tmp_path):
+    scenario = {"token": _TOKEN_OK, "manifest": ["200", _MANIFEST], "blob": ["307", ""]}
+    result, work = _run_verify(tmp_path, scenario, expected="sha256:" + "0" * 64)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "hashes to" in out, out
+    assert not (work / "tested-digest").exists(), "a failed verify recorded a digest"
+
+
+def test_verify_fails_when_a_blob_is_not_anonymously_authorized(tmp_path):
+    scenario = {"token": _TOKEN_OK, "manifest": ["200", _MANIFEST], "blob": ["403", ""]}
+    result, work = _run_verify(tmp_path, scenario)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "answered HTTP 403 anonymously" in out, out
+    assert not (work / "tested-tag").exists()
+
+
 # ---------------------------------------------------------------------------
 # Leg 6 — failure semantics, deadlines, image pins, interpolation hygiene
 # ---------------------------------------------------------------------------
@@ -616,3 +763,107 @@ def test_smoke_asserts_health_and_the_documented_401_challenge():
         "the smoke never asserts the documented 401 + Bearer challenge on "
         "the MCP mount"
     )
+
+
+def test_smoke_does_not_rely_on_busybox_wget():
+    """Regression pin for ytt-build-xhg9d (release 0.2.26): the smoke used
+    alpine's busybox ``wget``, which prints only the status line for an error
+    response, so the 401's ``WWW-Authenticate: Bearer`` header could never be
+    observed and a healthy server failed the step. The challenge needs a real
+    curl."""
+    source = _script_source("quick-start-smoke")
+    assert "wget" not in source.replace("busybox wget", "").replace("alpine's wget", ""), (
+        "quick-start-smoke shells out to wget again — busybox wget cannot show "
+        "the response headers of a 401"
+    )
+    assert "apk add --no-cache curl" in source and "curl -s -D -" in source
+
+
+# --- behavior: the REAL smoke script against a stub server + real curl -----
+
+
+class _StubYtt(BaseHTTPRequestHandler):
+    """Just enough of a ytt server for the smoke: /ytt/health and the MCP mount."""
+
+    health_code = 200
+    mount_code = 401
+    mount_challenge: str | None = 'Bearer error="invalid_token"'
+
+    def do_GET(self):  # noqa: N802 — http.server API
+        if self.path == "/ytt/health":
+            body = b'{"status":"ok"}' if self.health_code == 200 else b"{}"
+            self.send_response(self.health_code)
+        else:
+            body = b"{}"
+            self.send_response(self.mount_code)
+            if self.mount_challenge:
+                self.send_header("WWW-Authenticate", self.mount_challenge)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # quiet
+        pass
+
+
+def _run_smoke(tmp_path: Path, **behavior):
+    if shutil.which("curl") is None:
+        pytest.skip("curl is not installed (the script needs it, as does its alpine image)")
+    handler = type("Stub", (_StubYtt,), behavior)
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name in ("apk", "sleep"):
+            exe = bin_dir / name
+            exe.write_text("#!/bin/sh\nexit 0\n")
+            exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+        work = tmp_path / "work"
+        work.mkdir()
+        script = (
+            _script_source("quick-start-smoke")
+            .replace("{{inputs.parameters.version}}", "9.9.9")
+            .replace("http://127.0.0.1:8080/ytt", f"http://127.0.0.1:{server.server_port}/ytt")
+            .replace("/tmp/", f"{work}/")
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+            timeout=120,
+        )
+        return result, work
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_smoke_passes_when_health_is_ok_and_the_mount_challenges_with_bearer(tmp_path):
+    result, work = _run_smoke(tmp_path)
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "QUICK-START-SMOKE OK" in out
+    assert (work / "smoke-tag").read_text().strip() == "ghcr.io/jedarden/ytt:9.9.9"
+
+
+def test_smoke_fails_on_a_401_that_carries_no_bearer_challenge(tmp_path):
+    result, work = _run_smoke(tmp_path, mount_challenge=None)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "without a Bearer WWW-Authenticate challenge" in out, out
+    assert not (work / "smoke-tag").exists()
+
+
+def test_smoke_fails_when_the_mount_is_not_401(tmp_path):
+    result, _ = _run_smoke(tmp_path, mount_code=200)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "documented behavior is 401" in out, out
+
+
+def test_smoke_fails_when_health_never_reports_ok(tmp_path):
+    result, _ = _run_smoke(tmp_path, health_code=503)
+    out = result.stdout + result.stderr
+    assert result.returncode == 1 and "never answered" in out, out
+
