@@ -22,6 +22,16 @@ the prefix rule routes everything, *every unauthenticated response body must
 be safe to expose publicly* — which is why ``/ytt/metrics`` carries only
 aggregate series with a bounded label set and ``/ytt/health`` a fixed body.
 
+That the two unauthenticated reads ride the public prefix rule at all is a
+**recorded decision, not an accident**: accepted on bead ``ytt-8303946b``
+(2026-09-27, the same shape as the declined WAF allowlist ``ytt-761fb151``
+in ``docs/notes/auth.md``) after weighing restriction — whose ingress-level
+shapes are either fail-open here (path-normalization divergence: the
+deployed chain resolves ``/ytt//metrics`` and ``/ytt/./metrics`` onto the
+canonical route) or an app restructure (loom's never-routed internal
+metrics port). The carrier test below pins the accepted outcome so a
+well-meaning narrowing fails here and points at the decision.
+
 Nothing else holds the manifest side: the endpoint-contract suite
 (``test_endpoint_contract.py``) drives the ASGI app and stays green if the
 route manifest drifts — a new rule exposing an internal path, a lost
@@ -36,6 +46,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml  # via fastmcp (runtime dependency) — always present in the venv
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -167,27 +178,42 @@ def test_wellknown_rules_carry_priority_1000():
 
 
 # ---------------------------------------------------------------------------
-# The public prefix rule carries everything — /ytt/metrics included
+# The public prefix rule carries everything — /ytt/metrics and /ytt/health
 # ---------------------------------------------------------------------------
 
 
-def test_public_prefix_rule_is_the_sole_carrier_of_metrics():
-    """``/ytt/metrics`` is publicly routed, and solely by the broad prefix
-    rule. A dedicated ``/ytt/metrics`` router — narrowing, gating, or
-    re-homing the scrape path — is the drift that would make the
-    public-safety invariant accidental: as long as the prefix rule is the
-    sole carrier, *every* unauthenticated body under the prefix must stay
-    public-safe (docs/notes/http-endpoints.md §Visibility model)."""
-    metrics_path = "/ytt/metrics"
+#: The unauthenticated reads whose public reachability is the accepted
+#: visibility decision (bead ytt-8303946b): the Prometheus scrape and the
+#: liveness probe. Both ride the broad prefix rule and nothing else.
+PUBLIC_UNAUTHENTICATED_PATHS = (
+    ("/ytt/metrics", "the Prometheus scrape path"),
+    ("/ytt/health", "the liveness probe path"),
+)
+
+
+@pytest.mark.parametrize(("public_path", "what"), PUBLIC_UNAUTHENTICATED_PATHS)
+def test_public_prefix_rule_is_the_sole_carrier_of_the_public_reads(
+    public_path, what
+):
+    """``/ytt/metrics`` and ``/ytt/health`` are publicly routed *by decision*
+    (bead ytt-8303946b — accepted with rationale, not accidental), and solely
+    by the broad prefix rule. A dedicated router for either — narrowing,
+    gating, or re-homing it — is the drift that would silently overturn the
+    recorded decision: as long as the prefix rule is the sole carrier,
+    *every* unauthenticated body under the prefix must stay public-safe
+    (docs/notes/http-endpoints.md §Visibility model)."""
     carriers = [
         (match, path, route)
         for path, match, route in _routes()
-        if any(_covers(p, metrics_path) for p in _path_prefixes(match))
+        if any(_covers(p, public_path) for p in _path_prefixes(match))
     ]
     assert [match for match, _, _ in carriers] == [PUBLIC_RULE_MATCH], (
-        f"rules that can serve {metrics_path!r}: "
-        f"{[match for match, _, _ in carriers]!r} — the documented model "
-        f"routes it solely via the public prefix rule {PUBLIC_RULE_MATCH!r}"
+        f"rules that can serve {public_path!r} ({what}): "
+        f"{[match for match, _, _ in carriers]!r} — the accepted visibility "
+        f"decision (bead ytt-8303946b, docs/notes/http-endpoints.md "
+        f"§Visibility model) routes it solely via the public prefix rule "
+        f"{PUBLIC_RULE_MATCH!r}; narrowing or re-homing it is a decision "
+        "change, not a cleanup"
     )
     _, path, route = carriers[0]
     assert route.get("priority") is None, (

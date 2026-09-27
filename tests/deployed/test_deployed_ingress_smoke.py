@@ -6,7 +6,9 @@ Traefik's IngressRoute (``deploy/k8s/ardenone-cluster/ytt/ingressroute.yml``,
 `docs/notes/http-endpoints.md` promises for each family of the public surface:
 
 * **public, unauthenticated:** ``/ytt/health`` (fixed body) and ``/ytt/metrics``
-  (Prometheus exposition, bounded label surface);
+  (Prometheus exposition, bounded label surface) — public *by decision*
+  (bead ``ytt-8303946b``, ``docs/notes/http-endpoints.md`` §Visibility
+  model), so these legs pin the accepted outcome rather than an accident;
 * **protected, unauthenticated caller:** the MCP transport (``/ytt`` — the only
   route that can trigger transcript work) and ``/ytt/admin/egress`` both 401
   with a ``WWW-Authenticate: Bearer …`` challenge whose ``resource_metadata``
@@ -275,7 +277,12 @@ def _assert_bearer_challenge(resp: httpx.Response, prm_url: str, what: str) -> N
 
 
 def test_health_is_public_with_fixed_body(client, base_url, prefix):
-    """``/ytt/health``: no auth, body exactly ``{"status":"ok"}`` (GET and HEAD)."""
+    """``/ytt/health``: no auth, body exactly ``{"status":"ok"}`` (GET and HEAD).
+
+    Public reachability is the accepted visibility decision (bead
+    ``ytt-8303946b``): a 404/403 here would mean the decision was overturned
+    without its record being revisited.
+    """
     url = _url(base_url, prefix, "/health")
     resp = client.get(url)
     assert resp.status_code == 200
@@ -290,7 +297,13 @@ def test_health_is_public_with_fixed_body(client, base_url, prefix):
 
 
 def test_metrics_are_public_aggregates_with_bounded_labels(client, base_url, prefix):
-    """``/ytt/metrics``: public exposition, aggregate-only, bounded labels."""
+    """``/ytt/metrics``: public exposition, aggregate-only, bounded labels.
+
+    Public reachability is the accepted visibility decision (bead
+    ``ytt-8303946b``): the bounded content surface below is the load-bearing
+    control, and a non-200 here would mean the decision was overturned
+    without its record being revisited.
+    """
     url = _url(base_url, prefix, "/metrics")
     resp = client.get(url)
     assert resp.status_code == 200

@@ -470,7 +470,8 @@ def test_path_normalization_contract():
 
 
 def test_health_body_is_liveness_only():
-    """/ytt/health returns exactly {"status": "ok"} — publicly routed, so
+    """/ytt/health returns exactly {"status": "ok"} — publicly routed by
+    decision (bead ytt-8303946b, http-endpoints.md §Visibility model), so
     nothing else (version, subjects, config) may leak into it."""
     with _client() as client:
         resp = client.get("/ytt/health")
@@ -481,8 +482,11 @@ def test_health_body_is_liveness_only():
 def test_metrics_exposition_is_public_safe(monkeypatch):
     """The exposition body carries only aggregate series with the documented
     bounded label surface — never a subject email, a YouTube URL, or
-    transcript material. Mints a real rate-limited series first so the
-    subject_hash path is exercised, not just asserted in the abstract."""
+    transcript material. The endpoint is publicly routed by decision (bead
+    ytt-8303946b, http-endpoints.md §Visibility model): this content bound,
+    not the network boundary, is the load-bearing control. Mints a real
+    rate-limited series first so the subject_hash path is exercised, not
+    just asserted in the abstract."""
     from prometheus_client.parser import text_string_to_metric_families
 
     from ytt.server import _record_rate_limited

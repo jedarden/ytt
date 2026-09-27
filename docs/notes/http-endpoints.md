@@ -8,8 +8,9 @@ path-prefixed deployment); the behavior is pinned by
 the metrics label/cardinality bound by
 `tests/unit/test_metrics_cardinality.py`, the `YTT_PATH_PREFIX` startup
 validation and route-joining contract by
-`tests/unit/test_path_prefix_contract.py`, and, for the OAuth flow itself,
-`tests/unit/test_oauth_conformance.py`.
+`tests/unit/test_path_prefix_contract.py`, the ingress visibility model
+(manifest level) by `tests/unit/test_ingressroute_visibility.py`, and, for
+the OAuth flow itself, `tests/unit/test_oauth_conformance.py`.
 
 Related: `docs/notes/auth.md` (identity, allowlist, rate limits),
 `docs/notes/proxy-egress.md` (egress paths and credential redaction),
@@ -56,15 +57,51 @@ app:
 
 - **Public** (`Host(mcp.ardenone.com) && PathPrefix(/ytt)`): every path under
   the prefix — including `/ytt/metrics` and `/ytt/health`, which the app
-  serves without a token. Nothing at the app or the ingress narrows this; a
-  scrape of `/ytt/metrics` from anywhere on the internet succeeds today. The
-  Prometheus ServiceMonitor happens to scrape the ClusterIP directly, but
-  that is *not* what makes the endpoint reachable or unrechable.
+  serves without a token. The Prometheus ServiceMonitor also scrapes the
+  ClusterIP directly, but that is not what makes the endpoint reachable —
+  the ingress rule is.
 - **Public, dedicated rules** (priority 1000): the three path-inserted
   `/.well-known/*/ytt` metadata routes.
 - **In-cluster only**: the canary's metrics port (below) — a separate
   Deployment behind the ClusterIP Service `ytt-canary` :8081, with no
   IngressRoute rule at all.
+
+**The public metrics/health exposure is a decision, not an accident — and
+the decision is *accepted*** (bead `ytt-8303946b`, 2026-09-27, the same
+record-on-a-decision-bead shape as auth.md's declined WAF allowlist,
+`ytt-761fb151`). Both unauthenticated reads stay routed to the whole
+internet, deliberately:
+
+1. The load-bearing control is the public-safety invariant of the bodies
+   (below), not the network boundary — and it is pinned by regression
+   tests, so an unsafe future metric fails the gate before it ships.
+2. Public reachability is operationally load-bearing: the operator runbooks
+   drive health and metrics through the public URL
+   (`deploy/RUNBOOK.md`, `deploy/AUTH-ROTATION-RUNBOOK.md` §3.4 and its §7
+   "the public endpoints stay open through any rotation",
+   `deploy/TRANSCRIPT-DELETION-RUNBOOK.md`, `deploy/DEPLOY-CHECKLIST.md`
+   §5), and the public health read is the only probe that exercises the
+   whole chain — DNS, Cloudflare, tunnel, Traefik, app — which the
+   ClusterIP scrape cannot.
+3. An ingress-level exclusion would be fail-open here: the deployed chain
+   normalizes path spellings upstream of the app (`/ytt//metrics`,
+   `/ytt/./metrics` — pinned by the deployed smoke), so a `!PathPrefix`
+   negation's airtightness depends on which spelling the Traefik matcher
+   sees, which no manifest test can verify — the fail-open shape the
+   cluster's openbao-v2 deny middleware exists to avoid. The clean
+   alternative (loom's never-routed internal metrics port) is an app
+   restructure, not an ingress edit.
+4. It matches the plan's recorded posture for the analogous
+   `/admin/egress` question (`docs/plan/plan.md` "Diagnostic hygiene"):
+   app-level control accepted for v1; stricter isolation is a deliberate
+   later choice, not a drift fix.
+
+Revisit when a metric cannot stay within the bounded surface (the
+cardinality bound is the tripwire), public abuse is observed, or the app
+gains a separate internal metrics port anyway. If restriction is ever
+wanted, the fleet-proven shape is a dedicated higher-priority route with a
+fail-closed `ipAllowList` deny middleware (openbao-v2's
+`openbao-v2-deny-public`), not match-string negation.
 
 **Design consequence (the invariant the tests pin):** because the prefix rule
 routes everything, *every unauthenticated response body must be safe to
@@ -108,7 +145,8 @@ comment.
 ## `/ytt/metrics` — Prometheus exposition
 
 - `GET`/`HEAD`, no auth (Prometheus convention; and per the visibility model
-  it is publicly routed, so it must stay public-safe).
+  it is publicly routed — by the recorded decision above, not by accident —
+  so it must stay public-safe).
 - Body: the process-wide `prometheus_client` registry in text exposition
   format. The **label surface is bounded**: `ytt_fetch_blocks_total{outcome}`,
   `ytt_whisper_errors_total{reason}`, `ytt_rate_limited_total{subject_hash}`,
@@ -259,6 +297,12 @@ carries. The transport route is the only one accepting `POST`/`DELETE`
   exposition *and* the canary Deployment's fresh-process registry to the
   documented family set with per-family exact label keys and bounded label
   values (the `/ytt/metrics` and canary sections above);
+- the **visibility model at the manifest level**:
+  `tests/unit/test_ingressroute_visibility.py` holds the checked-in
+  IngressRoute to exactly the documented route set — the public prefix rule
+  as the sole carrier of `/ytt/metrics` and `/ytt/health` (the accepted
+  decision above, kept deliberate), the priority-1000 `.well-known` margins,
+  and no rule fronting the in-cluster canary Service;
 - slash/normalization/method behavior for every route class.
 
 The composed chain is smoked, not assumed:
