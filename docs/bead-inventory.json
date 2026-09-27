@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-09-27T12:29:59Z",
+  "generated_at": "2026-09-27T12:38:47Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 157,
-    "open": 8,
+    "total_beads": 160,
+    "open": 11,
     "in_progress": 3,
     "closed": 143,
     "other": 3,
@@ -175,6 +175,38 @@
       "updated_at": "2026-09-27T07:17:45.33051601Z"
     },
     {
+      "id": "ytt-7ce8d590",
+      "title": "Document the full canary CLI flag surface (--once/--gate/--via-proxy/--evidence-dir/--video-id) in the README",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-09-27T12:31:28.018785644Z",
+      "updated_at": "2026-09-27T12:31:28.018785644Z"
+    },
+    {
+      "id": "ytt-958dccc1",
+      "title": "Make canary-gate evidence artifacts survive their run environment (default /tmp dir, CI podGC) and give them an operator retention story",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-09-27T12:31:27.683137085Z",
+      "updated_at": "2026-09-27T12:31:27.683137085Z"
+    },
+    {
       "id": "ytt-96bb54f6",
       "title": "Verify yt-dlp 2026.8.19 clears the caption-track 429s in ardenone-cluster once a release carrying it is deployed",
       "status": "deferred",
@@ -232,6 +264,22 @@
       "revision": 3,
       "created_at": "2026-09-27T07:32:59.566489379Z",
       "updated_at": "2026-09-27T11:49:14.582408199Z"
+    },
+    {
+      "id": "ytt-e1036a3b",
+      "title": "Record an explicit accept-or-mitigate decision for the DNS-rebinding residual in the derived-URL allowlist (no DNS resolution in the gate)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-09-27T12:31:27.861224162Z",
+      "updated_at": "2026-09-27T12:31:27.861224162Z"
     },
     {
       "id": "ytt-317fa8df",

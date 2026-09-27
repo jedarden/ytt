@@ -1,7 +1,7 @@
 # Workspace Bead Inventory
 
 > **Point-in-time snapshot — do not trust for planning.** This file records
-> what the bead store looked like when it was generated (2026-09-27T12:29:59Z) and
+> what the bead store looked like when it was generated (2026-09-27T12:38:47Z) and
 > begins drifting the moment any worker opens, claims, or closes a bead. For
 > live state, run `bead list` yourself. It is deliberately **not** refreshed
 > by `scripts/definition-of-done.sh` — see the header of the regen script for
@@ -12,7 +12,7 @@
 > age` before citing — it prints this snapshot's age and exits nonzero once
 > it exceeds the freshness bound.
 
-Generated 2026-09-27T12:29:59Z from the live bead-rs store with:
+Generated 2026-09-27T12:38:47Z from the live bead-rs store with:
 
 ```text
 bead list --json --limit 1000
@@ -21,11 +21,11 @@ bead list --json --limit 1000
 via `scripts/regen-bead-inventory.sh` (the only supported way to regenerate —
 this file is fully generated, do not hand-edit).
 
-Summary at generation time: **8 open**, **3 in
-progress**, 143 closed, 3 deferred — 157 beads total. The
+Summary at generation time: **11 open**, **3 in
+progress**, 143 closed, 3 deferred — 160 beads total. The
 machine-readable copy is [docs/bead-inventory.json](bead-inventory.json).
 
-## Not-closed beads (14)
+## Not-closed beads (17)
 
 | ID | Title | Labels | Status |
 | --- | --- | --- | --- |
@@ -38,9 +38,12 @@ machine-readable copy is [docs/bead-inventory.json](bead-inventory.json).
 | `ytt-72dcf035` | Release 0.2.21: first image carrying the per-path canary metrics — activates the applied YttCanary* alert rules | `failure-count:3`, `observability`, `quarantine-until:2026-09-26T07:35:48.351711023+00:00` | open |
 | `ytt-7656c3a2` | Add an anonymous container-image pull release gate | `failure-count:2`, `quarantine-until:2026-09-25T23:34:14.292819353+00:00`, `weave-generated` | deferred |
 | `ytt-7829b244` | Add MCP Streamable HTTP session-lifecycle conformance tests | `deferred:2026-09-27T15:17:45.528610755+00:00`, `failure-count:3`, `quarantine-until:2026-09-27T07:37:44.635570145+00:00`, `weave-generated` | open |
+| `ytt-7ce8d590` | Document the full canary CLI flag surface (--once/--gate/--via-proxy/--evidence-dir/--video-id) in the README | `weave-generated` | open |
+| `ytt-958dccc1` | Make canary-gate evidence artifacts survive their run environment (default /tmp dir, CI podGC) and give them an operator retention story | `weave-generated` | open |
 | `ytt-96bb54f6` | Verify yt-dlp 2026.8.19 clears the caption-track 429s in ardenone-cluster once a release carrying it is deployed | `verification`, `yt-dlp` | deferred |
 | `ytt-ab79a7e8` | Test caption-only operation without YTT_WHISPER_URL | `failure-count:2`, `quarantine-until:2026-09-27T04:16:13.544954872+00:00`, `weave-generated` | open |
 | `ytt-b0afb5b4` | Pin the README claim that every YouTube URL form normalizes to the same cache entry | `deferred:2026-09-27T13:49:14.772314935+00:00`, `failure-count:1`, `quarantine-until:2026-09-27T11:54:13.878819040+00:00`, `weave-generated` | open |
+| `ytt-e1036a3b` | Record an explicit accept-or-mitigate decision for the DNS-rebinding residual in the derived-URL allowlist (no DNS resolution in the gate) | `weave-generated` | open |
 | `ytt-317fa8df` | Fix remaining exec-through-proxy instructions (deploy-ardenone.md integration path, CONTRIBUTING.md) | — | open |
 | `ytt-4d76a316` | Correct deploy/RUNBOOK.md exec-through-proxy claims (live RBAC forbids pods/exec on the credential-free endpoint) | `docs`, `k8s` | open |
 
@@ -78,4 +81,5 @@ do not by themselves hide a bead.
 - The bead that commissioned this regeneration quoted "~45 open beads" — that figure does not match the live store at generation time (9 open); it is closest to the closed count (54), suggesting a closed/total count was misread as "open". Cite `bead list` output, not this file, when the current count matters.
 - The previous machine-readable copy lived at `.beads/bead-inventory-open.json` and was removed: nothing under `.beads/` may be hand-edited, which made maintaining a snapshot there self-contradictory.
 - 2026-09-24T13:39:02Z: 8 open, 1 in progress, 75 closed.
-- 2026-09-27T12:29:59Z (this snapshot): 8 open, 3 in progress, 143 closed, 3 deferred.
+- 2026-09-27T12:29:59Z: 8 open, 3 in progress, 143 closed, 3 deferred.
+- 2026-09-27T12:38:47Z (this snapshot): 11 open, 3 in progress, 143 closed, 3 deferred.
