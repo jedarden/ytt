@@ -170,4 +170,9 @@ only if the release record's audience makes that necessary.
 - `TestEvidenceSpecDoc` drift-guards this document: every key, literal, and
   guarantee claimed above must still be true of the code, and every key the
   code emits must still be documented here — the doc and the code rot
-  together or not at all.
+  together or not at all;
+- `TestRunbookRemediationMirror` (bead `ytt-fefb4698`) drift-guards the other
+  mirror this note only used to record: every decision-bearing phrase
+  `remediation_for` emits must still be legible in `deploy/RUNBOOK.md` §3.1's
+  decision table, and §3.1 must keep naming the function — an edit to either
+  side alone now fails CI instead of silently diverging.

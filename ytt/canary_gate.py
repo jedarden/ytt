@@ -97,7 +97,8 @@ def remediation_for(
     names the concrete rollback path (a git revert of the declarative-config
     pin — never ``kubectl rollout undo``) or the escalation target, and points
     at the evidence JSON.  ``deploy/RUNBOOK.md`` §3.1 mirrors this table in
-    prose; the two are updated together.
+    prose; the two are updated together (drift-guarded by
+    ``TestRunbookRemediationMirror`` in ``tests/unit/test_canary_gate.py``).
     """
     lead = (
         "Transient single failures happen — re-run the gate once before "

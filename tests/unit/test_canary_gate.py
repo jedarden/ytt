@@ -11,11 +11,15 @@ failure output, secret exclusion — is specified in
 ``docs/notes/canary-gate-evidence.md`` (bead ytt-7f576b65);
 ``TestEvidenceSpecDoc`` drift-guards that document against this code, so a
 contract change fails here until the spec follows — and vice versa.
+``TestRunbookRemediationMirror`` (bead ytt-fefb4698) pins the other recorded
+mirror the same way: the rollback/escalation directives of
+``remediation_for`` against ``deploy/RUNBOOK.md`` §3.1's decision table.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -526,6 +530,162 @@ class TestRemediation:
         report = _gate(evidence_dir=tmp_path)
         report.pop("_calls")
         assert report["remediation"] is None
+
+
+# ---------------------------------------------------------------------------
+# RUNBOOK §3.1 — remediation_for's prose mirror (deploy/RUNBOOK.md ↔ code)
+# ---------------------------------------------------------------------------
+
+RUNBOOK = REPO_ROOT / "deploy" / "RUNBOOK.md"
+
+
+@pytest.fixture(scope="module")
+def runbook_31() -> str:
+    """``deploy/RUNBOOK.md`` §3.1 — the canary-gate decision table (TestRunbookRemediationMirror)."""
+    assert RUNBOOK.is_file(), "deploy/RUNBOOK.md went missing"
+    text = RUNBOOK.read_text(encoding="utf-8")
+    match = re.search(r"^### 3\.1 .*?(?=^## )", text, re.S | re.M)
+    assert match, "deploy/RUNBOOK.md lost its §3.1 decision-table section"
+    return match.group(0)
+
+
+class TestRunbookRemediationMirror:
+    """``deploy/RUNBOOK.md`` §3.1 is the prose twin of :func:`remediation_for`
+    — the one text an operator reads mid-incident on a failed gate; drift
+    there is a wrong rollback/escalation directive.  The doc condenses the
+    directives to prose (it does not quote them verbatim), so the mirror is
+    pinned at the level of the decision-bearing phrases: each phrase below
+    must still be emitted by ``remediation_for`` *and* still legible in §3.1
+    (case-insensitively — the table bolds its verbs).  An edit to either side
+    that drops one fails here instead of silently diverging: update both in
+    the same commit."""
+
+    @pytest.mark.parametrize(
+        ("failed_probe", "outcome", "proxy_configured", "phrases"),
+        [
+            # §3.1 row 1 — via_proxy / ip_blocked
+            (
+                "via_proxy", "ip_blocked", True,
+                [
+                    "the fallback egress path is broken",
+                    "residential IP is burned",
+                    "YTT_PROXY_URL",
+                    "declarative-config",
+                    "rollback will not help",
+                    "to the proxy/egress owner with the evidence JSON",
+                    "down for users",
+                    "as an incident",
+                ],
+            ),
+            # §3.1 row 2 — direct / ip_blocked with the proxy probe healthy
+            (
+                "direct", "ip_blocked", True,
+                [
+                    "to its proxied fallback",
+                    "rollback will not fix it",
+                    "to the egress owner with the evidence",
+                    "whether to keep or revert the tag",
+                ],
+            ),
+            # §3.1 row 3 — direct / ip_blocked, no proxy configured
+            (
+                "direct", "ip_blocked", False,
+                [
+                    "changed fetch code or bumped yt-dlp",
+                    "declarative-config",
+                    "re-gate on the previous tag",
+                    "is burned",
+                    "to the egress owner with the evidence",
+                ],
+            ),
+            # §3.1 row 4 — non-egress outcome, either probe (both shown)
+            (
+                "direct", "empty_body", False,
+                [
+                    "not an egress verdict",
+                    "known-good canary video",
+                    "yt-dlp/extractor regression shipped in the new image",
+                    "declarative-config",
+                    "re-gate on the previous tag",
+                    "changed no fetch code",
+                    "to the maintainers with the evidence",
+                    "the fixed canary video list itself may need updating",
+                ],
+            ),
+            (
+                "via_proxy", "rate_limited", True,
+                [
+                    "not an egress verdict",
+                    "known-good canary video",
+                    "re-gate on the previous tag",
+                    "to the maintainers with the evidence",
+                ],
+            ),
+            # §3.1 row 5 — gate_error, either probe (both shown)
+            (
+                "direct", GATE_ERROR, False,
+                [
+                    "gate crashed before",
+                    "a canary result",
+                    "fix the gate environment",
+                    "re-run",
+                    "with the evidence",
+                    "if it persists",
+                ],
+            ),
+            (
+                "via_proxy", GATE_ERROR, True,
+                [
+                    "gate crashed before",
+                    "a canary result",
+                    "fix the gate environment",
+                    "re-run",
+                    "with the evidence",
+                    "if it persists",
+                ],
+            ),
+        ],
+    )
+    def test_runbook_31_carries_every_directive_phrase(
+        self, runbook_31, failed_probe, outcome, proxy_configured, phrases
+    ):
+        directive = remediation_for(
+            failed_probe, outcome, proxy_configured=proxy_configured
+        )
+        for phrase in phrases:
+            assert phrase.lower() in directive.lower(), (
+                f"remediation_for({failed_probe}, {outcome}) lost {phrase!r} — "
+                "RUNBOOK §3.1 pins it; update the code and the runbook together"
+            )
+            assert phrase.lower() in runbook_31.lower(), (
+                f"RUNBOOK §3.1 lost {phrase!r} — remediation_for still emits it "
+                f"for ({failed_probe}, {outcome}); update both together"
+            )
+
+    def test_rerun_once_preamble_is_mirrored(self, runbook_31):
+        """'Re-run the gate once before acting' leads every egress and
+        non-egress directive (deliberately not the gate_error one — that is
+        row 5's own fix-and-rerun) and is §3.1's stated rule above the
+        table."""
+        for outcome in ("ip_blocked", "empty_body", "rate_limited"):
+            for probe, proxy in (("direct", False), ("via_proxy", True)):
+                directive = remediation_for(probe, outcome, proxy_configured=proxy)
+                assert "re-run the gate once before acting" in directive
+        assert "re-run the gate once before acting" in runbook_31
+
+    def test_section_names_the_implementation(self, runbook_31):
+        """§3.1 must keep pointing back at the code it mirrors, and must keep
+        naming the report fields an operator reads on a failure."""
+        assert "ytt.canary_gate.remediation_for" in runbook_31
+        assert "updated together" in runbook_31
+        assert "`report.failed_probe`" in runbook_31
+        assert "`report.verdict`" in runbook_31
+        # the example non-egress outcomes §3.1 quotes stay real outcome codes
+        assert "`empty_body`" in runbook_31
+        assert "`rate_limited`" in runbook_31
+        assert "§3.1" in (remediation_for.__doc__ or ""), (
+            "remediation_for's docstring stopped pointing at RUNBOOK §3.1"
+        )
 
 
 # ---------------------------------------------------------------------------

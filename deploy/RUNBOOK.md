@@ -263,11 +263,11 @@ on the **first failing probe** (`report.failed_probe`) and its
 
 | First failing probe | `outcome` | Action |
 |---|---|---|
-| `via_proxy` (proxy configured) | `ip_blocked` | The fallback path is broken. If the release changed `YTT_PROXY_URL`/proxy handling → **roll back** (revert the declarative-config change, push; §5) and re-gate. Otherwise the proxy's residential IP is burned or quota exhausted → **escalate** to the proxy/egress owner with the evidence JSON; rollback will not help. Direct probe failing too = fetches down for users → treat as an incident. |
+| `via_proxy` (proxy configured) | `ip_blocked` | The fallback egress path is broken. If the release changed `YTT_PROXY_URL`/proxy handling → **roll back** (revert the declarative-config change, push; §5) and re-gate. Otherwise the proxy's residential IP is burned or quota exhausted → **escalate** to the proxy/egress owner with the evidence JSON; rollback will not help. Direct probe failing too = fetches down for users → treat as an incident. |
 | `direct` (proxy configured, `via_proxy` passed) | `ip_blocked` | Native egress blocked, proxy healthy — the caption path degrades to its proxied fallback (bandwidth cost, still serving). Not a release defect; **rollback will not fix it**. **Escalate** to the egress owner with the evidence, and decide explicitly whether to keep or revert the tag. |
 | `direct` (no proxy configured) | `ip_blocked` | If the release changed fetch code or bumped yt-dlp → **roll back** (§5) and re-gate on the previous tag. Otherwise the egress IP is burned → **escalate** to the egress owner with the evidence. |
 | either probe | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
-| either probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the environment and re-run; escalate with the evidence only if it persists. |
+| either probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the gate environment and re-run; escalate with the evidence only if it persists. |
 
 **Retain the evidence either way.**  The `tee`d stdout copy (or
 `report.evidence_file` where the filesystem survives) goes into the release
