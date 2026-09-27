@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The README now documents the full `ytt canary` flag surface** (bead
+  `ytt-7ce8d590`): a five-row flag/default/effect table in the canary
+  section covering `--once`, `--gate`, `--video-id`, `--via-proxy` and
+  `--evidence-dir`, plus the modes the table cannot describe — bare
+  `ytt canary` is the Deployment's long-running probe loop
+  (`YTT_CANARY_INTERVAL_SEC` cadence), and invalid flag/mode combinations
+  are argparse usage rejections (exit `2`, contract in
+  `docs/notes/canary-gate-evidence.md`). Previously the gate flags were
+  specified only in that note, invisible to a self-hoster reading the
+  README. The table is drift-guarded by the new
+  `tests/unit/test_canary_flag_docs.py` the same way the `--once` verdict
+  vocabulary is pinned: the real `canary` subparser is walked, so a flag
+  added to (or removed from) the CLI fails the suite until the README row
+  follows, and the documented evidence-dir default, probe-ladder default,
+  mode-validity and mutual-exclusion claims are held to
+  `ytt/cli.py`/`ytt/canary_gate.py`. One consistency fix rode along:
+  `--video-id`'s `--help` string said "one-shot mode only" while the CLI's
+  own gatekeeping (and the gate) accept it with `--gate` too.
+
 - **Canary-gate evidence now has a durability contract** (bead
   `ytt-958dccc1`): `docs/notes/canary-gate-evidence.md` §4 separates
   retention (the gate never prunes, at any destination — a persistent

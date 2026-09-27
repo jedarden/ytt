@@ -67,7 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_can.add_argument(
         "--video-id",
         default=None,
-        help="override the canary video ID (one-shot mode only)",
+        help="override the canary video ID (with --once or --gate)",
     )
     p_can.add_argument(
         "--via-proxy",

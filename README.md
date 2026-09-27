@@ -81,6 +81,22 @@ the rollback/escalation directive on failure:
 ytt canary --gate    # release gate; exit 0 only on a full pass
 ```
 
+The full `ytt canary` flag surface (drift-guarded by
+`tests/unit/test_canary_flag_docs.py`):
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--once` | off | One-shot probe (above); mutually exclusive with `--gate`. |
+| `--gate` | off | Post-deploy acceptance gate (above); mutually exclusive with `--once`. |
+| `--video-id <ID>` | first `CANARY_VIDEO_IDS` entry | Probe target override; valid with `--once` or `--gate` (both gate probes fetch it). |
+| `--via-proxy` | off | Valid with `--once` only: dial the probe through `YTT_PROXY_URL` — the end-to-end check that the configured proxy actually carries YouTube traffic ([docs/notes/proxy-egress.md](docs/notes/proxy-egress.md)). The gate runs its own proxy leg when `YTT_PROXY_URL` is set, so passing `--via-proxy` to it is a usage error. |
+| `--evidence-dir <DIR>` | `/tmp/ytt-canary-evidence` | Valid with `--gate` only: directory for the JSON evidence artifact (what survives where: `docs/notes/canary-gate-evidence.md` §4). |
+
+With no flag at all, `ytt canary` is the long-running probe loop the canary
+Deployment runs (cadence `YTT_CANARY_INTERVAL_SEC`). Invalid flag/mode
+combinations are argparse usage rejections (exit `2`); the full exit-code
+contract is `docs/notes/canary-gate-evidence.md`.
+
 In Kubernetes the gate runs *inside* the server pod, so it needs a kubeconfig
 granting `pods/exec` on the namespace — the credential-free read-only
 `kubectl` proxy cannot exec (`auth can-i create pods/exec` → `no`; the gate
