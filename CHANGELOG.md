@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Default-language calls never hit the cache** (bead `ytt-83eaa5f6`): the
+  cache-first lookup keyed on `(video_id, "")` for every default-language
+  request, but fetches are stored under the *served* lang — `(video_id, "en")`
+  — so the exact key could never exist and the same video was re-fetched
+  upstream (and re-written over the same unit) on every call, defeating the
+  "all URL forms normalize to the same cache entry" promise.
+  `TranscriptCache.get` now treats an empty lang as *no language preference*:
+  any unit for the video resolves the lookup, preferring non-whisper units
+  and then the most-recently-touched one. Explicit-language lookups keep
+  exact-key semantics.
+
 ## [0.2.26] — 2026-09-27
 
 > First release published to **GHCR** as well as Docker Hub. The Docker Hub

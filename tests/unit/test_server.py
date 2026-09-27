@@ -234,6 +234,60 @@ async def test_get_youtube_transcript_cache_hit_paginated(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_default_lang_call_hits_served_lang_cache_entry(monkeypatch, tmp_path):
+    """Real cache + real tool path (only yt-dlp stubbed): a second
+    default-language call must hit the unit the first fetch stored under its
+    served lang — not re-fetch upstream (bead ytt-83eaa5f6).
+
+    Before the fix the cache-first lookup demanded the impossible
+    ``(video_id, "")`` key while fetches were stored under the served lang,
+    so every default-language call logged cache_miss, re-fetched, and
+    re-wrote the same unit.
+    """
+    from ytt import server
+    from ytt.cache import TranscriptCache
+    from ytt.fetch import FetchResult
+    from ytt.models import Segment
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    vid = "dQw4w9WgXcQ"
+    real_cache = TranscriptCache(tmp_path / "cache", max_bytes=64 << 20, reconcile_sec=0)
+    await real_cache.startup_scan()
+    monkeypatch.setattr(server, "transcript_cache", real_cache)
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0),
+        WhisperQuota(jobs_per_hour=10),
+    )
+
+    fetches = {"n": 0}
+
+    async def fake_fetch_transcript(video_id, lang, settings):
+        fetches["n"] += 1
+        return FetchResult(
+            segments=[Segment(start=0.0, duration=2.0, text="hello world")],
+            source="caption_auto",
+            served_lang="en",
+            requested_lang=None,
+            available_langs=["en"],
+            title="t",
+        )
+
+    monkeypatch.setattr("ytt.fetch.fetch_transcript", fake_fetch_transcript)
+
+    for _ in range(2):
+        result = await mcp.call_tool(
+            "get_youtube_transcript", {"url": f"https://youtu.be/{vid}"}
+        )
+        sc = result.structured_content
+        assert sc["status"] == "ok"
+
+    assert fetches["n"] == 1  # second call was served from the cache
+    assert real_cache.unit_count == 1  # one unit — not rewritten by a re-fetch
+    assert sc["lang"] == "en"  # the served lang of the stored unit
+
+
+@pytest.mark.asyncio
 async def test_get_transcript_job_not_found():
     """Polling for an unknown video_id returns not_found."""
     result = await mcp.call_tool(

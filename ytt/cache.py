@@ -293,15 +293,29 @@ class TranscriptCache:
     async def get(self, video_id: str, lang: str) -> CacheHit | None:
         """Look up a transcript unit.  Touch both files on hit.
 
-        A caption miss also checks the ``<id>.whisper.*`` fallback (plan:
-        "A caption miss also checks the <id>.whisper.* fallback before fetching").
+        An empty ``lang`` means *no language preference*: any unit for the
+        video resolves the lookup, preferring non-whisper units and then the
+        most-recently-touched one.  This is what makes a default-language
+        request hit the unit a previous fetch stored under its served lang
+        (e.g. ``(id, "en")``) — the tool's cache-first lookup passes
+        ``lang or ""`` (ytt/server.py), and fetches are always stored under
+        the *served* lang (ytt/fetch.py ``_select_track``), so an exact
+        ``(video_id, "")`` key could never exist and every default-language
+        call would re-fetch (bead ytt-83eaa5f6).
+
+        A non-empty ``lang`` keeps exact-key semantics; a caption miss also
+        checks the ``<id>.whisper.*`` fallback (plan: "A caption miss also
+        checks the <id>.whisper.* fallback before fetching").
 
         Log events: ``cache_hit`` (INFO), ``cache_miss`` (INFO).
         """
         async with self._lock:
-            pair = self._lookup_locked(video_id, lang)
-            if pair is None and lang != "whisper":
-                pair = self._lookup_locked(video_id, "whisper")
+            if lang == "":
+                pair = self._resolve_unspecified_lang_locked(video_id)
+            else:
+                pair = self._lookup_locked(video_id, lang)
+                if pair is None and lang != "whisper":
+                    pair = self._lookup_locked(video_id, "whisper")
 
             if pair is not None:
                 unit, hit = pair
@@ -494,17 +508,46 @@ class TranscriptCache:
         self, video_id: str, lang: str
     ) -> tuple[_CacheUnit, CacheHit] | None:
         """Find a unit in the registry and read it from disk.  Returns ``None`` on miss."""
-        key = (video_id, lang)
-        unit = self._units.get(key)
+        unit = self._units.get((video_id, lang))
         if unit is None:
             return None
 
+        hit = self._read_unit_locked(unit)
+        if hit is None:
+            return None
+        return unit, hit
+
+    def _resolve_unspecified_lang_locked(
+        self, video_id: str
+    ) -> tuple[_CacheUnit, CacheHit] | None:
+        """Resolve an empty-lang (no-preference) lookup to any unit for the video.
+
+        Preference order: non-whisper units first, then the most-recently-touched
+        (highest mtime).  Units whose body file has vanished are dropped from the
+        registry and skipped, so one dead unit cannot shadow a live one.
+
+        Must be called with ``_lock`` held.
+        """
+        candidates = [u for u in self._units.values() if u.video_id == video_id]
+        candidates.sort(key=lambda u: (u.lang == "whisper", -u.mtime))
+        for unit in candidates:
+            hit = self._read_unit_locked(unit)
+            if hit is not None:
+                return unit, hit
+        return None
+
+    def _read_unit_locked(self, unit: _CacheUnit) -> CacheHit | None:
+        """Read a unit's body + sidecar from disk.  Returns ``None`` on a vanished
+        body file (the unit is removed from the registry, byte counter corrected).
+
+        Must be called with ``_lock`` held.
+        """
         try:
             text = unit.txt_path.read_text(encoding="utf-8")
         except OSError:
             # File gone (external deletion) — remove from registry
             self._total_bytes -= unit.size_bytes
-            del self._units[key]
+            self._units.pop((unit.video_id, unit.lang), None)
             return None
 
         # Read sidecar for source + segments + metadata
@@ -521,15 +564,14 @@ class TranscriptCache:
             except (OSError, json.JSONDecodeError):
                 pass
 
-        hit = CacheHit(
-            video_id=video_id,
-            lang=lang,
+        return CacheHit(
+            video_id=unit.video_id,
+            lang=unit.lang,
             source=source,
             text=text,
             segments=segments,
             metadata=meta or None,
         )
-        return unit, hit
 
     def _touch_unit_locked(self, unit: _CacheUnit) -> None:
         """Bump mtime on both files and update the in-memory record.

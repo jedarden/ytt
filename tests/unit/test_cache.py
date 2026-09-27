@@ -281,6 +281,117 @@ async def test_whisper_get_no_double_fallback(cache: TranscriptCache) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Empty-lang (no-preference) resolution                                          #
+#                                                                               #
+# The tool's cache-first lookup passes ``lang or ""`` (ytt/server.py) while     #
+# fetches are stored under the *served* lang (ytt/fetch.py _select_track), so   #
+# an empty lang must resolve to ANY unit for the video — an exact               #
+# ``(video_id, "")`` key can never exist (bead ytt-83eaa5f6).                   #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_empty_lang_hits_served_lang_unit(cache: TranscriptCache) -> None:
+    """Default-language get after a fetch stored under (id, 'en') must hit it.
+
+    This is the regression at the heart of ytt-83eaa5f6: before the fix the
+    lookup demanded the impossible (video_id, "") key and always missed.
+    """
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID, "en", "english text", None, "caption_auto", None)
+
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None
+    assert hit.video_id == VIDEO_ID
+    assert hit.lang == "en"
+    assert hit.source == "caption_auto"
+    assert hit.text == "english text"
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_empty_cache_still_misses(cache: TranscriptCache) -> None:
+    """No units at all → empty-lang get is a plain miss."""
+    await cache.startup_scan()
+    assert await cache.get(VIDEO_ID, "") is None
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_never_crosses_videos(cache: TranscriptCache) -> None:
+    """No-preference resolution is scoped to the requested video_id."""
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID_2, "en", "other video", None, "caption_auto", None)
+
+    assert await cache.get(VIDEO_ID, "") is None
+    # ...and the other video still resolves to its own unit
+    hit = await cache.get(VIDEO_ID_2, "")
+    assert hit is not None and hit.text == "other video"
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_prefers_caption_over_whisper(cache: TranscriptCache) -> None:
+    """Both a caption unit and a whisper unit exist → the caption wins."""
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID, "whisper", "whisper text", None, "whisper", None)
+    await cache.put(VIDEO_ID, "en", "caption text", None, "caption_manual", None)
+
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None
+    assert hit.source == "caption_manual"
+    assert hit.lang == "en"
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_falls_back_to_whisper_only_unit(cache: TranscriptCache) -> None:
+    """Only a whisper unit exists → empty-lang get resolves to it (source=whisper)."""
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID, "whisper", "whisper text", None, "whisper", None)
+
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None
+    assert hit.source == "whisper"
+    assert hit.lang == "whisper"
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_prefers_most_recently_touched(
+    cache: TranscriptCache, cache_dir: Path
+) -> None:
+    """Multiple caption units → the most-recently-touched one wins (LRU semantics)."""
+    # Distinct mtimes make the preference deterministic regardless of
+    # filesystem timestamp resolution.
+    _write_unit(cache_dir, VIDEO_ID, "en", text="english", mtime=1000.0)
+    _write_unit(cache_dir, VIDEO_ID, "fr", text="french", mtime=2000.0)
+    await cache.startup_scan()
+
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None and hit.lang == "fr"  # newer mtime
+
+    # Touching the older unit flips the preference.
+    assert await cache.get(VIDEO_ID, "en") is not None
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None and hit.lang == "en"
+
+
+@pytest.mark.asyncio
+async def test_empty_lang_skips_dead_unit(
+    cache: TranscriptCache, cache_dir: Path
+) -> None:
+    """A preferred unit whose body file vanished is dropped and skipped, not a miss."""
+    await cache.startup_scan()
+    await cache.put(VIDEO_ID, "en", "survivor", None, "caption_auto", None)
+    await cache.put(VIDEO_ID, "es", "doomed", None, "caption_auto", None)
+
+    # The newest unit (es — preferred by LRU order) dies externally.
+    txt_name, _ = _unit_stems(VIDEO_ID, "es")
+    (cache_dir / txt_name).unlink()
+
+    hit = await cache.get(VIDEO_ID, "")
+    assert hit is not None
+    assert hit.lang == "en"
+    assert hit.text == "survivor"
+    assert cache.unit_count == 1  # dead unit removed from the registry
+
+
+# --------------------------------------------------------------------------- #
 # External deletion detection                                                   #
 # --------------------------------------------------------------------------- #
 

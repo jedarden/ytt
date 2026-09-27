@@ -741,9 +741,15 @@ def test_cursor_is_bound_to_content_and_video(session, cache, monkeypatch):
 
     # (b) The unit is refreshed under A (re-fetch overwrote the cache) —
     # A's old cursor must not serve page 2 of the new content.
+    # A default-language call now HITS the stored unit (ytt-83eaa5f6), so
+    # the refresh is forced through the path that really overwrites it:
+    # an explicit-lang miss (no "fr" unit) whose fetch re-serves "en" and
+    # re-writes the same (VIDEO, "en") key.
     refreshed_words = [w + "yy" for w in WORDLIST]
     _install(refreshed_words)
-    page_a2 = session.call_payload("get_youtube_transcript", {"url": VIDEO})
+    page_a2 = session.call_payload(
+        "get_youtube_transcript", {"url": VIDEO, "lang": "fr"}
+    )
     assert page_a2["status"] == "partial"  # new content, new page 1
     stale = session.call_payload(
         "get_youtube_transcript",
