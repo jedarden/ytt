@@ -61,23 +61,68 @@ Pinned here:
     code -32602, with the request's real id echoed (JSON-RPC 2.0 §4: the
     response id MUST match the request id) — the server-session error shape,
     distinct from the transport's.
+- **authenticated GET listen stream** — a GET on the MCP endpoint with the
+  established session opens a stream: HTTP 200 whose headers are observable
+  at ASGI ``http.response.start`` while the body is still open, with
+  ``Content-Type: text/event-stream`` (§transports "Listening for Messages
+  from the Server" item 3: the server MUST return text/event-stream or 405 —
+  this server offers the stream, so 200/event-stream is the pinned form)
+  plus the stack's full stream-header set (``Cache-Control: no-cache,
+  no-transform``, ``Connection: keep-alive``, the ``Mcp-Session-Id`` echo,
+  ``X-Accel-Buffering: no``). The stream stays open: the ASGI call does not
+  complete and no terminal body chunk arrives while the client holds the
+  connection, a second GET on the same session is rejected with 409
+  Conflict ("Only one SSE stream is allowed per session" — server-side
+  proof the first stream is live), and when the client disconnects the ASGI
+  call completes and the session itself keeps serving requests.
+- **GET failure shapes** — the three documented refusals, each at an exact
+  status with a well-formed body:
+  - GET without ``Mcp-Session-Id`` → HTTP 400, ``application/json`` JSON-RPC
+    error envelope (transport id "server-error", code -32600, message
+    "Bad Request: Missing session ID"). §transports "Session Management"
+    item 2 makes the header a MUST on all of the client's subsequent HTTP
+    requests, the listen-stream GET included.
+  - GET with an unknown session id → HTTP 404 with the same "Session not
+    found" envelope the POST side returns (§transports "Session Management"
+    item 3's 404 MUST, item 4's recover-by-re-initialize trigger).
+  - unauthenticated GET → HTTP 401 with the ``WWW-Authenticate: Bearer``
+    challenge (scheme Bearer, ``error="invalid_token"``,
+    ``resource_metadata`` advertised) and a JSON ``invalid_token`` body —
+    the same RFC 6750 §3 / RFC 9728 §5.1 shape ``test_oauth_conformance.py``
+    pins for the POST transport probe, and it 401s even when a valid session
+    id is presented: auth runs before session logic.
 
 Auth is stubbed (harness autouse fixtures): these tests exercise transport
 and session lifecycle, not OAuth — the 401/403 auth paths belong to
 ``test_endpoint_contract.py`` and the tool-level allowlist gate to
-``test_mcp_tool_contract.py``.
+``test_mcp_tool_contract.py``; the unauthenticated-GET test here pins the
+transport-level challenge itself because a 401-vs-404-vs-400 ordering is
+part of the GET contract under test.
+
+The listen-stream tests cannot ride ``httpx.ASGITransport``: it awaits the
+whole ASGI call before handing back a response, and an open-ended SSE stream
+never completes — the request would hang forever. ``open_listen_stream()``
+below drives the same app at the raw ASGI level (the scope dict the
+transport builds, called directly), which keeps the wire bytes identical to
+uvicorn's while making ``http.response.start`` observable mid-stream and
+letting the test deliver the ``http.disconnect`` a real client's hangup
+produces.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+from typing import AsyncIterator
 
+import anyio
 import httpx
 import pytest
 
 import ytt
 from tests.unit._mcp_asgi_harness import (
     ACCEPT,
+    BEARER,
     PROTOCOL_VERSION,
     AsgiMcpSession,
     initialize_request,
@@ -95,6 +140,10 @@ from tests.unit._mcp_asgi_harness import (  # noqa: F401
     authorized_bearer,
     hermetic_egress,
 )
+# The GET challenge test pins the same RFC 9728-shaped WWW-Authenticate the
+# OAuth suite pins for the POST probe; its quote-aware parser handles the
+# commas inside the challenge's quoted error_description.
+from tests.unit.test_oauth_conformance import _parse_www_authenticate
 
 
 def _fresh_session(client: httpx.AsyncClient) -> AsgiMcpSession:
@@ -462,5 +511,320 @@ async def test_initialize_requesting_an_unsupported_version_renegotiates():
         # requests carrying it as MCP-Protocol-Version are accepted (the
         # header MUST of §transports "Protocol Version Header").
         await session.initialized_notification()
+        live = await session.request("ping")
+        assert "result" in live
+
+
+# ---------------------------------------------------------------------------
+# GET — the server→client listen stream
+# ---------------------------------------------------------------------------
+
+
+class _ListenStream:
+    """A test's view of one open GET listen stream.
+
+    ``open_listen_stream`` fills ``status``/``headers`` the moment the ASGI
+    app emits ``http.response.start`` — while the body is still streaming —
+    and drives ``app_done`` when the ASGI call completes. ``response_ended``
+    records whether the *server* terminated the response (a terminal
+    ``more_body``-false body chunk) as opposed to the client hangup ending
+    the call.
+    """
+
+    def __init__(self) -> None:
+        self.status: int | None = None
+        self.headers: dict[str, str] = {}
+        self.app_done = anyio.Event()
+        self.response_ended = False
+
+
+async def _await_seen(ready, aborted, what: str, timeout: float = 10.0) -> None:
+    """Wait until *ready()* fires, failing loudly if *aborted()* fires first.
+
+    Plain ``await event.wait()`` would hang forever if the app died before
+    emitting the awaited signal (e.g. an exception with
+    ``raise_app_exceptions`` semantics); polling with an abort check and a
+    deadline turns every such surprise into an assertion instead. Both
+    arguments are zero-argument callables (an ``anyio.Event().is_set`` bound
+    method is one).
+    """
+    deadline = anyio.current_time() + timeout
+    while not ready():
+        if aborted():
+            raise AssertionError(f"listen stream: {what} never arrived")
+        if anyio.current_time() > deadline:
+            raise AssertionError(f"listen stream: timed out waiting for {what}")
+        await anyio.sleep(0.01)
+
+
+@contextlib.asynccontextmanager
+async def open_listen_stream(
+    session: AsgiMcpSession,
+) -> AsyncIterator[_ListenStream]:
+    """Open the GET listen stream on an established session and hold it open.
+
+    ``httpx.ASGITransport`` cannot host this request: it awaits the whole
+    ASGI call before returning a response, and an open-ended SSE stream never
+    completes — the request would hang forever. This driver is that
+    transport's own work one level down (same scope dict it builds, same
+    direct app call, minus the buffering): the wire bytes are still exactly
+    what uvicorn would put on the wire, ``http.response.start`` becomes
+    observable mid-stream, and ``client_closed`` lets the test deliver the
+    ``http.disconnect`` a real client's hangup produces.
+
+    On exit the client is deemed to hang up; the yielded context ends only
+    after the ASGI call has actually completed (so a test can assert the
+    teardown right after the ``async with``), and an app-side exception
+    propagates rather than masquerading as a closed stream.
+    """
+    # The session's own app instance — the one whose session manager holds
+    # this session's live stream registry.
+    app = session.client._transport.app
+    stream = _ListenStream()
+    client_closed = anyio.Event()
+    sent_request_body = False
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": session.path,
+        "raw_path": session.path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (name.lower().encode("latin-1"), value.encode("latin-1"))
+            for name, value in {**session.headers(), "host": "ytt.test"}.items()
+        ],
+        "client": ("testclient", 50000),
+        "server": ("ytt.test", 80),
+    }
+
+    async def receive() -> dict:
+        # uvicorn's shape for a bodyless request: one empty http.request
+        # message, then silence until the client goes away.
+        nonlocal sent_request_body
+        if not sent_request_body:
+            sent_request_body = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await client_closed.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        if message["type"] == "http.response.start":
+            stream.status = message["status"]
+            stream.headers = {
+                name.decode("latin-1").lower(): value.decode("latin-1")
+                for name, value in message["headers"]
+            }
+        elif message["type"] == "http.response.body" and not message.get(
+            "more_body", False
+        ):
+            stream.response_ended = True
+
+    async def run() -> None:
+        try:
+            await app(scope, receive, send)
+        finally:
+            stream.app_done.set()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run)
+        await _await_seen(
+            lambda: stream.status is not None,
+            stream.app_done.is_set,
+            "response start",
+        )
+        try:
+            yield stream
+        finally:
+            client_closed.set()
+            await _await_seen(
+                stream.app_done.is_set, lambda: False, "clean ASGI teardown"
+            )
+            tg.cancel_scope.cancel()
+
+
+async def test_authenticated_get_opens_a_listen_stream_that_stays_open():
+    """A GET on the MCP endpoint with the established session opens the
+    server→client listen stream: 200 + text/event-stream, headers observable
+    at response start, the stream held open until the client hangs up — and
+    the session keeps working after the stream closes.
+
+    §transports "Listening for Messages from the Server": item 1 (the client
+    MAY issue an HTTP GET to open an SSE stream the server can push on),
+    item 3 ("the server MUST either return Content-Type: text/event-stream
+    in response to this HTTP GET, or else return HTTP 405 Method Not
+    Allowed" — this server offers the stream, so 200/event-stream is the
+    pinned form), and item 6 ("the client MAY disconnect ... at any time").
+    §transports "Session Management" item 2 makes the established session id
+    (echoed on the stream response) part of that GET.
+    """
+    async with open_established_session() as session:
+        async with open_listen_stream(session) as stream:
+
+            # --- status + the pinned stream-header set ---------------------
+            assert stream.status == 200, stream.headers
+            assert stream.headers["content-type"] == "text/event-stream"
+            assert stream.headers["mcp-session-id"] == session.session_id
+            # The rest of the wire contract this stack emits for a stream
+            # (pinning so an upgrade that drops one is a visible change):
+            # proxy-safe no-transform caching, a keep-alive connection, and
+            # the X-Accel-Buffering "no" that keeps nginx from holding the
+            # stream's first bytes.
+            assert stream.headers["cache-control"] == "no-cache, no-transform"
+            assert stream.headers["connection"] == "keep-alive"
+            assert stream.headers["x-accel-buffering"] == "no"
+
+            # --- the stream is open, not a completed empty response -------
+            # An ended stream would complete the ASGI call (and deliver a
+            # terminal body chunk); neither happens while the client holds
+            # the connection open.
+            await anyio.sleep(0.25)
+            assert not stream.app_done.is_set(), (
+                "the listen stream ended on its own before the client closed it"
+            )
+            assert not stream.response_ended, (
+                "the listen stream delivered a terminal body chunk before the "
+                "client closed it"
+            )
+
+            # --- one listen stream per session -----------------------------
+            # §transports "Listening for Messages from the Server" item 5:
+            # the server MAY use the GET stream "for JSON-RPC requests and
+            # notifications" — a single stream per session is this stack's
+            # shape, and a second concurrent GET is refused in band. This is
+            # also server-side proof the first stream is really live and
+            # registered, not merely a header the app emitted.
+            second = await session.client.get(session.path, headers=session.headers())
+            assert second.status_code == 409, second.text[:200]
+            envelope = json_rpc_messages(second)[0]
+            well_formed_response_envelope(envelope)
+            assert envelope["error"]["code"] == -32600
+            assert "Only one SSE stream is allowed per session" in (
+                envelope["error"]["message"]
+            )
+
+        # The client hangup ended the ASGI call (open_listen_stream asserted
+        # completion) without the server having closed the stream itself.
+        assert not stream.response_ended
+
+        # --- closing the listen stream is not closing the session --------
+        # The stream is a server→client channel; the session (§transports
+        # "Session Management" — terminated by DELETE or server timeout,
+        # answered with 404 thereafter) must survive the client merely
+        # unplugging its ears.
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_get_without_a_session_id_is_a_400_missing_session_error():
+    """A GET that omits Mcp-Session-Id is refused with HTTP 400 and a
+    well-formed JSON-RPC error envelope — never a stream, a crash, or an
+    out-of-band 5xx — and the established session is unharmed.
+
+    §transports "Session Management" item 2: once the server assigned a
+    session id, "clients using the Streamable HTTP transport MUST include it
+    in the Mcp-Session-Id header on all of their subsequent HTTP requests" —
+    the listen-stream GET among them. The transport-level envelope id is the
+    same "server-error" stand-in the POST-side transport errors use (it
+    cannot know a request id for a message that failed before dispatch).
+    """
+    async with open_established_session() as session:
+        resp = await session.client.get(
+            session.path,
+            headers={
+                **ACCEPT,
+                "Authorization": BEARER,
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+
+        assert resp.status_code == 400, resp.text[:200]
+        # A refusal is a JSON document, not a stream: the client must not be
+        # left listening on an error.
+        assert resp.headers["content-type"].startswith("application/json")
+        envelope = json_rpc_messages(resp)[0]
+        well_formed_response_envelope(envelope)
+        assert envelope["error"]["code"] == -32600
+        assert envelope["error"]["message"] == "Bad Request: Missing session ID"
+        # The stateful session manager routes a session-less request through
+        # its "new session" case, so the refusing transport answers with the
+        # *fresh* id it minted for that never-initialized session — an
+        # artifact worth pinning: the 400 never hands back the caller's
+        # established session id.
+        assert resp.headers.get("mcp-session-id"), "expected the fresh session id"
+        assert resp.headers["mcp-session-id"] != session.session_id
+
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_get_with_an_unknown_session_id_is_404_session_not_found():
+    """A GET carrying a session id the server never issued gets HTTP 404
+    with the same well-formed "Session not found" envelope the POST side
+    answers — the listen stream is not a side door past session management.
+
+    §transports "Session Management" item 3: after termination "the server
+    MUST respond to requests containing that session ID with HTTP 404 Not
+    Found" (an id never issued is the degenerate case, and must meet the
+    same MUST); item 4 makes that 404 the client's trigger to re-initialize.
+    """
+    async with open_established_session() as session:
+        bogus = "b0gus-b0gus-b0gus-b0gus"
+        resp = await session.client.get(
+            session.path,
+            headers={
+                **ACCEPT,
+                "Authorization": BEARER,
+                "Mcp-Session-Id": bogus,
+                "MCP-Protocol-Version": PROTOCOL_VERSION,
+            },
+        )
+
+        assert resp.status_code == 404, resp.text[:200]
+        assert resp.headers["content-type"].startswith("application/json")
+        envelope = json_rpc_messages(resp)[0]
+        well_formed_response_envelope(envelope)
+        assert envelope["error"]["code"] == -32600
+        assert envelope["error"]["message"] == "Session not found"
+        # An unknown-session GET must not be read as a stream assignment.
+        assert "mcp-session-id" not in resp.headers
+
+        live = await session.request("ping")
+        assert "result" in live
+
+
+async def test_unauthenticated_get_is_a_401_bearer_challenge():
+    """A GET with no bearer token gets HTTP 401 with the WWW-Authenticate
+    Bearer challenge — including when a valid session id is presented: the
+    auth gate runs before any session logic.
+
+    Per ``test_oauth_conformance.py``'s transport-probe pins (RFC 6750 §3,
+    RFC 9728 §5.1): the challenge is scheme ``Bearer`` carrying
+    ``error="invalid_token"`` and the RFC 9728 ``resource_metadata`` URL the
+    client needs to self-configure, with a JSON ``invalid_token`` body —
+    never a stream, and never a 404/400 that would leak session state to an
+    unauthenticated caller.
+    """
+    async with open_established_session() as session:
+        for label, headers in [
+            ("bare", {**ACCEPT}),
+            ("with-session", {**ACCEPT, "Mcp-Session-Id": session.session_id}),
+        ]:
+            resp = await session.client.get(session.path, headers=headers)
+
+            assert resp.status_code == 401, (label, resp.text[:200])
+            scheme, params = _parse_www_authenticate(resp.headers["www-authenticate"])
+            assert scheme == "Bearer", label
+            assert params.get("error") == "invalid_token", label
+            assert "resource_metadata" in params, label
+            # The refusal is a JSON error document, not a stream.
+            assert resp.headers["content-type"].startswith("application/json"), label
+            assert resp.json()["error"] == "invalid_token", label
+
+        # And the authenticated session itself is still live afterwards.
         live = await session.request("ping")
         assert "result" in live
