@@ -7,7 +7,11 @@ Handles the caption-less code path:
    first available model if the configured model is not listed.
 3. **WhisperJobRegistry** — in-memory get-or-create registry (keyed by
    ``video_id``), asyncio.Lock-protected FSM transitions, TTL GC for
-   done/error jobs, stale-running GC.
+   done/error jobs, stale-running GC, and task-death reconciliation
+   (:func:`WhisperJobRegistry.note_task_done`: a job whose driving task dies
+   without reaching a terminal state is failed to a stable ``error`` at the
+   moment the task dies, so queued/running entries never outlive their
+   work).
 4. **run_whisper_job** — the background asyncio Task that drives the full
    audio lifecycle: download bestaudio → scratch → POST /v1/audio/transcriptions
    → write ``<id>.whisper.*`` cache → delete audio (context-manager, success or
@@ -388,6 +392,16 @@ def _sweep_video_scratch(video_id: str, scratch_dir: str) -> int:
 # WhisperJobRegistry (plan §Whisper fallback — Registry + FSM)
 # ---------------------------------------------------------------------------
 
+#: Message stamped on a job reconciled after its driving task died without
+#: reaching a terminal state (task-death reconciliation, ``note_task_done``).
+#: Fixed text, never an exception string — the job message is verbatim-
+#: relayable to the MCP client. ``get_transcript_job``'s error path appends
+#: the re-call-to-retry instruction, so this stays instruction-free.
+RECONCILED_MESSAGE = (
+    "Transcription was interrupted before it could finish "
+    "(service restart or job cancellation)."
+)
+
 
 class WhisperJobRegistry:
     """In-memory registry for the WhisperJob FSM.
@@ -406,6 +420,12 @@ class WhisperJobRegistry:
     ``docs/notes/whisper-lifecycle.md`` (§1).
 
     States: ``pending → running → done | error``
+
+    The FSM is closed under task death (:meth:`note_task_done`): a job whose
+    driving task ends without reaching a terminal state (cancellation,
+    wrapper-level failure) is reconciled to a stable terminal ``error`` at
+    the moment the task dies — a queued or running entry can never become a
+    zombie that outlives the work it represents.
 
     Every job records its creator's authenticated subject (``owner``, from
     ``ytt.server._request_subject``): the job handle is pollable only by that
@@ -586,6 +606,78 @@ class WhisperJobRegistry:
         """Remove a job entry from the registry (e.g. on evicted-result polling)."""
         async with self._lock:
             self._jobs.pop(video_id, None)
+
+    def note_task_done(
+        self,
+        job: WhisperJob,
+        task: "asyncio.Task[None] | None" = None,
+    ) -> None:
+        """Reconcile *job* after its driving task ended without a terminal state.
+
+        Task-death reconciliation (lifecycle §6 — "deterministically resume or
+        fail stale jobs"): a registry entry must never outlive its driving
+        task in a non-terminal state. Before this, a task killed by
+        cancellation (server shutdown, loop teardown) stranded its job —
+        ``run_whisper_job`` catches ``Exception`` but ``CancelledError`` is a
+        ``BaseException``, so no transition ever fired. A stranded ``running``
+        entry then polled a lying "in progress" until the stale GC reaped it
+        at ``whisper_timeout + job_ttl`` (≈108 min on defaults), and a
+        stranded ``pending`` entry — which has no TTL at all — polled
+        "queued" *forever*, stayed joinable (Invariant 2), held a
+        ``MAX_PENDING_WHISPER_JOBS`` slot permanently, and dead-ended every
+        documented re-kick until process restart.
+
+        Deterministic rules:
+
+        - If the registry no longer holds *this* record (a re-kick replaced
+          the terminal entry, or the evicted-result poll removed it), do
+          nothing — a dead task never clobbers a newer job.
+        - If the record is already terminal (``done``/``error``), do nothing
+          — the task finished its own transition first; reconciliation never
+          overwrites a real outcome.
+        - Otherwise fail it **in place**: ``error`` with the stable
+          ``asr_failed`` code and the fixed :data:`RECONCILED_MESSAGE`, logged
+          as ``whisper_job_reconciled_stale`` (``task_cancelled`` is ``None``
+          when no done task is observable — the coroutine-level call site is
+          the dying task itself). The owner (unchanged — see the ownership
+          rule above) then polls a stable, repeatable terminal error with the
+          standard re-kick instruction, the queue slot frees immediately
+          (``active_count``), and the documented re-kick starts fresh work
+          instead of joining a corpse. Reconciliation never silently
+          *resumes* a job: a re-kick is the resume, and it is
+          caller-initiated and quota-charged like any other new work.
+
+        Called from two places, which converge here: ``run_whisper_job``'s
+        ``CancelledError`` handler (cancellation *inside* the job body) and
+        the server's task done-callback (cancellation while the job is still
+        queued on the semaphore slot, before the body ever runs — plus a
+        backstop for any other wrapper-level death).
+
+        Synchronous and lock-free by design: done-callbacks and a cancelling
+        task cannot await, and the read-check-write above has no suspension
+        point, so under asyncio's cooperative scheduling no lock holder can
+        interleave (same argument as ``SingleFlightRegistry.run``). This is
+        also what makes the transition reliable *at shutdown*, where an
+        ``await`` inside a cancelling task would itself raise.
+        """
+        current = self._jobs.get(job.video_id)
+        if current is not job:
+            # Replaced by a re-kick's fresh job, or removed (evicted-result
+            # poll / TTL GC). Nothing to reconcile — and never touch the
+            # entry that took this one's place.
+            return
+        if current.status in ("done", "error"):
+            return  # the task drove its own terminal transition; keep it
+        old_status = current.status
+        current.status = "error"  # type: ignore[assignment]
+        current.error_code = errors.ASR_FAILED
+        current.message = RECONCILED_MESSAGE
+        log.warning(
+            "whisper_job_reconciled_stale",
+            video_id=current.video_id,
+            old_status=old_status,
+            task_cancelled=None if task is None else task.cancelled(),
+        )
 
     async def run_ttl_gc(self, settings: "Settings") -> int:
         """Expire done/error jobs older than TTL; remove stale running jobs.
@@ -824,6 +916,20 @@ async def run_whisper_job(
         result_ref = f"{video_id}.whisper"
         await registry.update_status(video_id, "done", result_ref=result_ref)
         log.info("whisper_job_done", video_id=video_id)
+
+    except asyncio.CancelledError:
+        # Task-death reconciliation (lifecycle §6): a cancelled job task —
+        # server shutdown, loop teardown — must leave a *terminal* record,
+        # not a zombie running entry no task will ever drive. CancelledError
+        # is a BaseException, so the handlers below never see it, and an
+        # await here would itself raise while the task is cancelling — the
+        # synchronous reconcile (see note_task_done) is the reliable form.
+        # Re-raise: cancellation always propagates; the finally below still
+        # runs the scratch sweep. (No task passed: this IS the dying task —
+        # its cancellation state isn't observable yet, and the reconcile
+        # context is self-evident.)
+        registry.note_task_done(job)
+        raise
 
     except YttError as exc:
         await registry.update_status(

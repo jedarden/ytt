@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Cancelled Whisper job tasks now land their registry entry in a stable
+  terminal error** (bead `ytt-c3037dd5`). A job task killed by cancellation —
+  server shutdown, loop teardown, or a cancellation while the job was still
+  queued on the `YTT_MAX_CONCURRENT_WHISPER` slot — previously stranded its
+  entry: `run_whisper_job` catches `Exception` but `CancelledError` is a
+  `BaseException`, so no transition ever fired. A stranded `running` entry
+  then polled a lying "in progress" until the stale GC reaped it at
+  `YTT_WHISPER_TIMEOUT_SEC + YTT_JOB_TTL_SEC` (≈108 min on defaults); a
+  stranded `pending` entry polled "queued" **forever** (`pending` has no
+  TTL), stayed joinable (Invariant 2), permanently held a
+  `YTT_MAX_PENDING_WHISPER_JOBS` slot, and dead-ended every documented
+  re-kick until process restart. The FSM is now closed under task death:
+  `run_whisper_job`'s `CancelledError` handler plus a done-callback backstop
+  on every server-started job task converge on
+  `WhisperJobRegistry.note_task_done`, which fails the record **in place**
+  with `error_code=asr_failed` and a fixed relayable message (log
+  `whisper_job_reconciled_stale`) — identity-checked, so a re-kick's fresh
+  job or an already-terminal record is never clobbered. Ownership is
+  preserved (a stranger's poll stays the byte-identical `not_found`), the
+  queue heals immediately, and the re-kick remains the sanctioned resume:
+  caller-initiated and quota-charged, never a silent auto-retry. The
+  stale-running GC keeps its old threshold as the unobserved-death backstop.
+  Contract in `docs/notes/whisper-lifecycle.md` §6.1; pinned by
+  `tests/unit/test_whisper_reconcile.py`.
 - **auth.md's registration guidance reconciled with the shipped OIDC
   federation** (bead `ytt-4283b5b5`). `docs/notes/auth.md` still offered
   "(or FastMCP self-issued tokens)" as an alternative registration path —

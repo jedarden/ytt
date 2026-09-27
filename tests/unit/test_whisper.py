@@ -64,6 +64,7 @@ from ytt import errors
 from ytt.errors import YttError
 from ytt.models import WhisperJob
 from ytt.whisper import (
+    RECONCILED_MESSAGE,
     WhisperJobRegistry,
     _do_download_audio,
     _projected_audio_size,
@@ -1235,10 +1236,16 @@ class TestRunWhisperJobScratchHygiene:
                 await task
 
         assert not partial.exists(), "cancelled job must still sweep its partial"
-        # The job never reached a terminal state (CancelledError is not an
-        # Exception) — the stale-running GC is its recovery path.
+        # Task-death reconciliation (lifecycle §6): CancelledError is not an
+        # Exception, so run_whisper_job's own handlers never see it — the
+        # dedicated handler reconciles the job to a stable terminal error
+        # synchronously (an await would re-raise while cancelling), and the
+        # stale-running GC is only the backstop for entries whose task death
+        # went unobserved.
         final = await registry.get(VIDEO_ID)
-        assert final is not None and final.status == "running"
+        assert final is not None and final.status == "error"
+        assert final.error_code == errors.ASR_FAILED
+        assert final.message == RECONCILED_MESSAGE
 
         release.set()  # let the zombie downloader thread exit
 

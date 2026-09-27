@@ -3,9 +3,10 @@
 This note specifies the async ASR job contract: the job state machine, what
 each tool call returns in every state, when jobs and files are cleaned up, and
 what a process restart does to the in-memory registry and the scratch volume.
-It is the reference for `tests/unit/test_whisper_contract.py`, which pins every
-clause below end to end (real registry + real cache + real `run_whisper_job`,
-download/POST stubbed, driven through the real MCP tools).
+It is the reference for `tests/unit/test_whisper_contract.py` and
+`tests/unit/test_whisper_reconcile.py`, which pin every clause below end to
+end (real registry + real cache + real `run_whisper_job`, download/POST
+stubbed, driven through the real MCP tools).
 
 Sources: plan §Whisper fallback / §Tools / §Response shape, `docs/notes/single-replica.md`,
 `docs/usage/configuration.md` (job TTL, scratch sweep).
@@ -26,13 +27,16 @@ created it — which the polling contract below binds the job handle to
 | `pending` → `running` | `run_whisper_job` first act | `started_at` set | `whisper_job_status_change` |
 | `running` → `done` | successful cache write | `result_ref = "<id>.whisper"` | `whisper_job_status_change`, `whisper_job_done` |
 | `running` → `error` | any failure (download, POST, unexpected) | stable `error_code` + verbatim-relayable `message` | `whisper_job_error` / `whisper_job_unexpected_error` |
+| `pending`/`running` → `error` | **task-death reconciliation** (`note_task_done`, §6.1) | stable `asr_failed` + `RECONCILED_MESSAGE`; `owner` unchanged | `whisper_job_reconciled_stale` |
 | `pending`/`running`/`done`/`error` → *(absent)* | TTL GC, or the evicted-result poll path | registry entry deleted | `whisper_job_ttl_gc`, `whisper_job_stale_running` |
 
 - `done` and `error` are **terminal**: no transition leaves them. The only way
   they leave the registry is removal (TTL GC, stale GC, evicted-result poll).
 - The FSM never skips `running`: every job that starts work passes through it.
-- Only the background job task drives `pending → running → terminal`; tool
-  handlers only read (plus the one removal on the evicted-result poll path).
+- Only the background job task drives `pending → running → terminal`; the
+  task-death reconciler (§6.1) drives only the one terminal `error` a dead
+  task's record deserves; tool handlers only read (plus the one removal on
+  the evicted-result poll path).
 - A `done`/`error` entry is **never joinable**: `get_or_create` replaces it
   with a fresh `pending` job (log event `whisper_job_replaced_terminal`). This
   is what makes the documented retry — *"re-call get_youtube_transcript"*
@@ -141,7 +145,7 @@ Expiration (`run_ttl_gc`, driven by the registry's GC loop every 60 s):
 |---|---|---|
 | `done` / `error` | age (`created_at`) > `YTT_JOB_TTL_SEC` | result lives on in the cache; only the handle expires |
 | `running` | age (`started_at`, else `created_at`) > `YTT_WHISPER_TIMEOUT_SEC + YTT_JOB_TTL_SEC` | a task that can no longer be alive; logged at ERROR (`whisper_job_stale_running`) |
-| `pending` | never (no TTL) | queued work is legitimate; the queue cap bounds it instead |
+| `pending` | never (no TTL) | queued work is legitimate; the queue cap bounds it instead — and a queued entry can no longer *strand*: its task's death reconciles it to `error` (§6.1), so "never" applies to live queued work, not to dead tasks |
 
 Until expiry, a terminal entry stays pollable (repeatable response, clause 3).
 
@@ -178,7 +182,63 @@ cache `startup_scan` (re-index pre-restart units so cache-first sees them) →
 registry starts empty → TTL GC loop starts. Client-visible restart recovery is
 then always: poll → `not_found` → re-kick → cached answer or fresh `pending`.
 
-## 7. Wiring status (2026-09-25)
+### 6.1 Task-death reconciliation — the crash that does *not* take the process down
+
+A process crash is the easy case above: the registry dies with the process and
+nothing can strand. The harder case is a **job task dying while the process
+lives on** — cancellation at server shutdown or loop teardown, or a
+wrapper-level failure outside the job body. `CancelledError` is a
+`BaseException`, so `run_whisper_job`'s `Exception` handlers never fired; the
+entry stayed `pending`/`running` with no task left to drive it — a stranded
+`running` entry polled a lying "in progress" until the stale GC reaped it at
+`WHISPER_TIMEOUT_SEC + JOB_TTL_SEC` (≈108 min on defaults), and a stranded
+`pending` entry polled "queued" *forever* (no TTL), stayed joinable
+(Invariant 2), held a `MAX_PENDING_WHISPER_JOBS` slot permanently, and
+dead-ended every documented re-kick until process restart.
+
+The guarantee (the FSM is **closed under task death**): a registry entry never
+outlives its driving task in a non-terminal state. Two mechanisms converge on
+`WhisperJobRegistry.note_task_done`, both deterministic:
+
+1. **Coroutine-level** — `run_whisper_job`'s `CancelledError` handler
+   reconciles synchronously (no `await` — one would re-raise while the task is
+   cancelling) and re-raises. Covers cancellation *inside* the job body; the
+   `finally` scratch sweep still runs.
+2. **Done-callback backstop** — the server attaches `note_task_done` to every
+   job task it starts. Covers cancellation *before* the body runs (a job
+   queued on the `YTT_MAX_CONCURRENT_WHISPER` slot is cancelled while still
+   `pending` — the coroutine handler never executes) and any other
+   wrapper-level death.
+
+Deterministic outcome rules:
+
+- **Non-terminal at task death → `error` in place**: stable
+  `error_code=asr_failed`, the fixed verbatim-relayable `RECONCILED_MESSAGE`
+  (never an exception string), logged `whisper_job_reconciled_stale`. The
+  poller gets exactly the §3 `error` row — a stable, repeatable terminal
+  result with the re-kick instruction — never a lying `running`/`pending`,
+  and never a bare `not_found`.
+- **Terminal at task death → untouched.** Reconciliation never overwrites a
+  real outcome (a `done` transcript, a specific recorded failure).
+- **Replaced/removed record → untouched.** The reconcile is identity-checked
+  against the record the dead task was driving: a re-kick's fresh job or an
+  evicted-result removal is never clobbered by a late callback.
+- **Ownership preserved.** The reconciled entry keeps its `owner`; a
+  cross-subject poll still gets the byte-identical `not_found` (§3). The
+  stable terminal error belongs to the subject whose job it was.
+- **The queue heals immediately.** `active_count` drops at the moment of
+  reconciliation, so a dead task can no longer ratchet
+  `MAX_PENDING_WHISPER_JOBS` shut.
+- **Reconciliation never resumes.** A silent auto-retry would spend the ASR
+  quota without a caller. The *resume* is the documented re-kick
+  (§4): caller-initiated, quota-charged, and — because the reconciled entry
+  is terminal — it starts fresh work instead of joining a corpse.
+
+The stale-running GC (§4) remains as the backstop for entries whose task death
+went unobserved (hand-built records, a lost callback); its threshold and
+remove-at-ERROR behavior are unchanged.
+
+## 7. Wiring status (2026-09-26)
 
 The contract above is enforced at two layers — the tool handlers and the job
 task — but the boot-time mechanisms are **specified, implemented as
@@ -189,6 +249,7 @@ components, unit-tested, and not yet wired into `serve()`**:
 | FSM transitions, get-or-create + terminal replacement, quota/queue gates | tool handlers | ✅ live |
 | Audio deletion + per-video scratch sweep | `run_whisper_job` `finally` | ✅ live |
 | Polling (all six shapes), evicted-result removal | `get_transcript_job` | ✅ live |
+| Task-death reconciliation (§6.1) | `run_whisper_job` `CancelledError` handler + the job-task done-callback | ✅ live |
 | `startup_sweep` | `serve()` | ❌ not called — stale scratch survives restarts in production |
 | TTL GC loop (`run_ttl_gc`, stale-running GC) | registry task started at boot | ❌ never started — terminal handles accumulate in memory only (a terminal handle holds no queue capacity — `active_count` totals `pending`+`running`, see deploy/ASR-RUNBOOK.md §9 — it just stays in the registry until the process ends), `running` handles are never reaped |
 | `check_model_guard` | `serve()` | ❌ not called — configured model is never self-corrected |
@@ -212,6 +273,14 @@ mechanisms so the wiring bead can land against an already-specified contract.
   `not_found`), restart (registry lost → `not_found` → re-kick; completed
   result survives in cache), stale scratch (sweep counts/bytes, idempotence,
   dirs untouched).
+- `tests/unit/test_whisper_reconcile.py` — task-death reconciliation (§6.1)
+  for every lifecycle state: `pending`/`running` at task death reconcile to
+  the stable terminal `error` (through the real tools, both the mid-run
+  coroutine handler and the queued-on-the-semaphore done-callback backstop),
+  idempotence, `done`/`error` records untouched, replacement/removed records
+  untouched, ownership preserved with the byte-identical stranger `not_found`,
+  the queue healing immediately, and the re-kick starting fresh quota-charged
+  work.
 - `tests/unit/test_whisper.py` — component internals (FSM unit transitions,
   GC unit math, model guard, download guards, sweep globs).
 - `tests/unit/test_server.py` — individual tool shapes and the quota/queue

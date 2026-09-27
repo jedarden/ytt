@@ -484,6 +484,24 @@ def _build_app():
                     )
                     _background_jobs.add(_task)
                     _task.add_done_callback(_background_jobs.discard)
+                    # Task-death reconciliation backstop (docs/notes/
+                    # whisper-lifecycle.md §6): run_whisper_job's own
+                    # CancelledError handler reconciles a cancellation that
+                    # lands *inside* the job body, but a job still queued on
+                    # the semaphore slot is cancelled before that body ever
+                    # runs — without this callback it would strand as
+                    # `pending` with no task and no TTL (pending entries are
+                    # never GC'd), dead-ending every re-kick and ratcheting
+                    # the MAX_PENDING_WHISPER_JOBS queue permanently shut.
+                    # The reconcile is identity-checked and idempotent, so a
+                    # job whose body already transitioned it is untouched.
+                    # The registry is bound now (not read at callback time):
+                    # this job lives in this registry even if a later test or
+                    # reload swaps the module global.
+                    _job_registry = whisper_registry
+                    _task.add_done_callback(
+                        lambda t, j=job, r=_job_registry: r.note_task_done(j, t)
+                    )
 
                 eta_str = (
                     f" (~{job.eta_sec:.0f}s)" if job.eta_sec is not None else ""
