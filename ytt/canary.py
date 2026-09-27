@@ -357,10 +357,11 @@ def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
 
     The lightweight Proof-Obligation canary (plan §Proof Obligations —
     "Residential egress is 'decisive, free'"): fetches captions for one
-    known-good video from wherever the command runs and reports ``ok`` vs
-    ``ip_blocked``.  Complements the long-running probe loop above; intended
-    for one-shot use inside ardenone-cluster (``kubectl exec``, a probe pod,
-    or an Argo step) and by self-hosters verifying their egress.
+    known-good video from wherever the command runs and reports ``ok`` or a
+    stable :mod:`ytt.errors` error code (``ip_blocked``, ``empty_body``,
+    ``rate_limited``, …).  Complements the long-running probe loop above;
+    intended for one-shot use inside ardenone-cluster (``kubectl exec``, a
+    probe pod, or an Argo step) and by self-hosters verifying their egress.
 
     ``via_proxy=True`` (``ytt canary --once --via-proxy``) runs the caption
     probe **through** ``YTT_PROXY_URL`` — the end-to-end check that the

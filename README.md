@@ -66,7 +66,8 @@ Verify the egress assumption from wherever the server runs:
 
 ```bash
 ytt canary --once    # fetches captions for one known-good video; JSON report,
-                     # verdict "ok" vs "ip_blocked", exit 0/1
+                     # verdict "ok" or a stable ytt.errors error code
+                     # (ip_blocked, empty_body, rate_limited, …), exit 0 iff "ok"
 ```
 
 After changing the image or the egress config, run the acceptance gate

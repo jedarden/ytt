@@ -3,7 +3,7 @@ fixed-video coverage set it shares with the probe loop.
 
 The one-shot mode is the lightweight Proof-Obligation canary (plan §Proof
 Obligations: residential egress): one known-good video, one caption fetch,
-verdict ``ok`` vs ``ip_blocked``.  The per-cycle probe
+verdict ``ok`` or a stable ``ytt.errors`` error code.  The per-cycle probe
 (``_probe_all_once``) fetches **every** video in the fixed internal list
 for the loop (bead ytt-1b1c6ac4 — a coverage set, not a stop-at-first-
 success ladder); its per-path metric recording is tested in
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -486,3 +487,153 @@ class TestFallbackVideo:
 
     def test_once_defaults_to_the_first_ladder_entry(self):
         assert _run_once_ok()["video_id"] == CANARY_VIDEO_IDS[0]
+
+
+# ---------------------------------------------------------------------------
+# README ↔ code drift — the documented `ytt canary --once` verdict vocabulary
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+README = REPO_ROOT / "README.md"
+EVIDENCE_SPEC = REPO_ROOT / "docs" / "notes" / "canary-gate-evidence.md"
+
+
+def _canary_outcome_codes() -> set[str]:
+    """Every outcome the one-shot canary can report as ``verdict``.
+
+    ``"ok"`` on a caption-bearing fetch; otherwise the range of
+    ``ytt.fetch.classify_ydl_error`` — the seed-map codes plus its
+    ``empty_body`` fallback, which is also the literal
+    ``probe_once_detail`` returns for a caption-less known-good video.
+    This is the set the README's verdict documentation must stay inside.
+    """
+    from ytt import errors
+    from ytt.fetch import SEED_MAP
+
+    return {"ok"} | {code for _, code in SEED_MAP} | {errors.EMPTY_BODY}
+
+
+@pytest.fixture(scope="module")
+def once_usage_block() -> str:
+    """README's fenced ``ytt canary --once`` usage block (TestReadmeVerdictDoc)."""
+    text = README.read_text(encoding="utf-8")
+    for block in re.findall(r"^```[^\n]*\n(.*?)^```", text, re.S | re.M):
+        if "ytt canary --once" in block:
+            return block
+    raise AssertionError("README.md lost its `ytt canary --once` usage block")
+
+
+def _usage_comments(block: str) -> str:
+    """The block's bash comment lines joined into one prose string."""
+    return " ".join(
+        line.split("#", 1)[1].strip()
+        for line in block.strip().splitlines()
+        if "#" in line
+    )
+
+
+def _verdict_clause(block: str) -> str:
+    match = re.search(r"verdict (.*?), exit", _usage_comments(block))
+    assert match, "README's --once comment no longer states a verdict vocabulary"
+    return match.group(1)
+
+
+class TestReadmeVerdictDoc:
+    """The README's ``ytt canary --once`` comment is the first thing a
+    self-hoster reads about the one-shot canary, and it historically
+    documented a two-value vocabulary — ``verdict "ok" vs "ip_blocked"`` —
+    while the implementation reports ``"ok"`` or any stable ``ytt.errors``
+    error code (bead ytt-066781cf; ``docs/notes/canary-gate-evidence.md`` §2
+    already defined ``caption_fetch.outcome`` that way).  Same shape as
+    ``TestEvidenceSpecDoc``: the doc and the code rot together or not at
+    all.  These legs pin the reconciled wording from both sides — no
+    invented code, no relapse into a closed pair, and the taxonomy claim
+    the README now makes stays true of the implementation."""
+
+    def test_documented_examples_are_real_outcome_codes(self, once_usage_block):
+        """Every verdict value the README names must be one the canary can
+        actually report — a renamed seed-map code or a wishful example
+        fails here instead of misdirecting an operator mid-diagnosis."""
+        clause = _verdict_clause(once_usage_block)
+        examples = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", clause))
+        assert examples, "README's verdict clause lost its example codes"
+        for example in examples:
+            assert example in _canary_outcome_codes(), (
+                f"README documents verdict {example!r}, which no canary path "
+                f"can report (real outcomes: {sorted(_canary_outcome_codes())})"
+            )
+
+    def test_headline_verdicts_stay_documented(self, once_usage_block):
+        """Reconciling the vocabulary must not drop the two verdicts the
+        command exists for: ``"ok"`` — the pass — and ``ip_blocked`` — the
+        egress failure this canary is the proof against."""
+        clause = _verdict_clause(once_usage_block)
+        assert '"ok"' in clause
+        assert "ip_blocked" in clause
+
+    def test_vocabulary_is_the_error_taxonomy_not_a_closed_pair(self, once_usage_block):
+        """The documented set must be presented as open-ended — anchored on
+        ``"ok" or a stable ytt.errors error code`` with an elided example
+        list — because ``SEED_MAP`` is pinned to a yt-dlp version and grows
+        with it (fetch.py: "update on version bumps").  A closed list here
+        goes stale the moment a code is added; "ok vs X" phrasing is the
+        two-value relapse this class exists to keep dead."""
+        clause = _verdict_clause(once_usage_block)
+        assert "ytt.errors" in clause, (
+            "README's verdict clause must point at the ytt.errors taxonomy "
+            "as the source of truth"
+        )
+        assert "error code" in clause
+        assert "…" in clause, "README's example list must stay open-ended (…)"
+        assert '"ok" vs' not in clause
+
+    def test_two_value_vocabulary_gone_from_the_readme(self):
+        """The stale pair must not merely move house: no README line may
+        still document the --once verdict as ``"ok" vs "ip_blocked"``."""
+        text = README.read_text(encoding="utf-8")
+        assert '"ok" vs "ip_blocked"' not in text
+        assert "ok vs ip_blocked" not in text
+
+    def test_gate_error_is_not_documented_as_an_once_outcome(self, once_usage_block):
+        """``gate_error`` is synthesized by the gate when a probe *crashes*
+        (``canary_gate.GATE_ERROR``); ``--once`` has no such path — an
+        unexpected crash is a traceback, not a verdict.  It must not creep
+        into the --once vocabulary."""
+        from ytt.canary_gate import GATE_ERROR
+
+        assert GATE_ERROR not in _canary_outcome_codes()
+        assert GATE_ERROR not in once_usage_block
+
+    def test_every_real_outcome_is_a_stable_taxonomy_code(self):
+        """``a stable ytt.errors error code`` is now a claim about the
+        implementation: every non-ok outcome the canary can report must be
+        a ``ytt.errors`` taxonomy constant, not an ad-hoc string —
+        otherwise the README's wording (and the evidence spec's) goes false
+        without either document changing."""
+        from ytt import errors
+
+        taxonomy = {
+            value
+            for name, value in vars(errors).items()
+            if name.isupper() and isinstance(value, str)
+        }
+        assert _canary_outcome_codes() - {"ok"} <= taxonomy
+
+    def test_vocabulary_agrees_with_the_evidence_spec(self):
+        """The evidence spec (§2) defines the same field one level down —
+        ``caption_fetch.outcome`` — and its definition is what this bead
+        reconciled the README against: the two documents must keep stating
+        the same vocabulary."""
+        spec = EVIDENCE_SPEC.read_text(encoding="utf-8")
+        assert "`\"ok\"` or a stable `ytt.errors` error code" in spec
+
+    def test_exit_contract_documented_matches_the_cli(self, once_usage_block):
+        """The exit rule hangs off ``verdict == "ok"`` alone — any non-ok
+        outcome exits 1 (pinned behaviorally by ``TestReportSchema``'s CLI
+        tests).  The README's phrasing must keep naming ``"ok"`` as the
+        sole passing verdict, and the CLI's own summary must state the
+        same rule."""
+        from ytt.cli import _run_canary_once
+
+        assert 'exit 0 iff "ok"' in _usage_comments(once_usage_block)
+        assert "exit 0 iff verdict is ok" in (_run_canary_once.__doc__ or "")

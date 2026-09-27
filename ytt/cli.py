@@ -60,7 +60,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "one-shot probe: fetch captions for one known-good video, print a "
-            "JSON report (verdict: ok vs ip_blocked), exit 0/1"
+            "JSON report (verdict: ok or a stable ytt.errors error code — "
+            "e.g. ip_blocked, empty_body, rate_limited), exit 0 iff ok"
         ),
     )
     p_can.add_argument(

@@ -175,4 +175,10 @@ only if the release record's audience makes that necessary.
   mirror this note only used to record: every decision-bearing phrase
   `remediation_for` emits must still be legible in `deploy/RUNBOOK.md` §3.1's
   decision table, and §3.1 must keep naming the function — an edit to either
-  side alone now fails CI instead of silently diverging.
+  side alone now fails CI instead of silently diverging;
+- `tests/unit/test_canary_once.py` (`TestReadmeVerdictDoc`, bead
+  `ytt-066781cf`) drift-guards the README's `ytt canary --once` verdict line
+  against this section's outcome definition: the documented vocabulary must
+  stay `"ok"` or a stable `ytt.errors` error code, with the taxonomy as the
+  source of truth — never a relapse into a closed `ok` vs `ip_blocked` pair,
+  and never an example code the canary cannot actually report.
