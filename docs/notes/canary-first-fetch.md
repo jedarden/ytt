@@ -141,3 +141,19 @@ The cost of the coverage is one extra yt-dlp metadata fetch per path per
 cycle in the healthy state; the ladder already walked the whole list
 whenever everything failed.  Everything above the 2026-09-24 postscript is
 a 2026-09-18 evidence record for 0.2.20 and is unchanged.
+
+## Postscript — 2026-09-27 (bead `ytt-56679d29`)
+
+The +4h arithmetic this note performs is no longer needed going forward.
+From the release carrying the change, every canary log line carries its own
+ISO-8601 **UTC** stamp inside the message — the third probe above would
+read `2026-09-18T23:14:05.156+00:00 INFO:ytt.canary:…`, matching the
+`ytt_canary_last_success_timestamp_seconds` gauge (1789773245.156) with no
+conversion.  The `-04:00` stamps quoted above came from the *node's*
+container runtime via `kubectl logs --timestamps` — nothing in the image
+can move that prefix, so it stays node-local EDT and is for ordering only;
+correlate on the in-message stamp (procedure now in
+`deploy/CANARY-MONITORING-RUNBOOK.md` §3).  The image also pins `TZ=UTC`,
+and the one-shot/gate evidence surfaces stamp their stderr diagnostics the
+same way.  Everything above the 2026-09-26 postscript is a 2026-09-18
+evidence record for 0.2.20 and is unchanged.

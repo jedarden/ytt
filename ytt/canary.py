@@ -60,6 +60,7 @@ from typing import Any
 from prometheus_client import REGISTRY, Counter, Gauge, start_http_server
 
 from ytt.observability import (
+    configure_stdlib_logging,
     redact_credentials,
     ytt_canary_failures_total,
     ytt_canary_last_success_timestamp_seconds,
@@ -423,11 +424,12 @@ def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
 
 def main() -> int:
     """Start the canary probe loop with a Prometheus metrics server on :8081."""
-    import logging as _logging
-
     from ytt.config import get_settings
 
-    _logging.basicConfig(level=_logging.INFO)
+    # Probe lines are evidence (docs/notes/canary-first-fetch.md) — stamp
+    # each one in-message with UTC so it matches the ytt_canary_* epoch
+    # gauges without node-timezone arithmetic.
+    configure_stdlib_logging()
 
     settings = get_settings()
     interval = settings.canary_interval_sec

@@ -167,7 +167,11 @@ def _run_canary_once(video_id: str | None, via_proxy: bool = False) -> int:
     import json
 
     from ytt.canary import run_once
+    from ytt.observability import configure_stdlib_logging
 
+    # The report is retained as evidence (RUNBOOK §3) — its stderr
+    # diagnostics get the same in-message UTC stamps as the probe loop.
+    configure_stdlib_logging()
     report = run_once(video_id=video_id, via_proxy=via_proxy)
     print(json.dumps(report, indent=2))
     if report["verdict"] != "ok":
@@ -190,7 +194,9 @@ def _run_canary_gate(video_id: str | None, evidence_dir: str | None) -> int:
     import json
 
     from ytt.canary_gate import run_gate
+    from ytt.observability import configure_stdlib_logging
 
+    configure_stdlib_logging()
     report = run_gate(video_id=video_id, evidence_dir=evidence_dir)
     print(json.dumps(report, indent=2))
     if report["gate"] != "pass":

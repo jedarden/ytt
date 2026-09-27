@@ -20,7 +20,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.11.23 /uv /usr/local/bin/uv
-ENV UV_COMPILE_BYTECODE=1 \
+# TZ=UTC (bead ytt-56679d29): everything the *process* renders in local time —
+# stdlib logging fallbacks, third-party libs — must render UTC, matching every
+# other evidence source (docs/notes/canary-first-fetch.md).  This does NOT
+# change the `kubectl logs --timestamps` prefix: that stamp is written by the
+# node's container runtime in the node's timezone and nothing in the image can
+# move it, which is why the app's own log lines carry in-message UTC stamps
+# (ytt.observability.UTCISO8601Formatter) — correlate on those, not the prefix.
+ENV TZ=UTC \
+    UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     PATH="/app/.venv/bin:${PATH}"

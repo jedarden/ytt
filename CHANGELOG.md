@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior changed — the gate's destination, schema and write path are
   untouched.
 
+### Changed
+
+- Canary and one-shot/gate log lines now carry an in-message ISO-8601 **UTC**
+  timestamp (`2026-09-18T23:14:05.156+00:00 INFO:ytt.canary:…`), matching the
+  epoch-valued `ytt_canary_*` gauges with no timezone arithmetic, and the
+  image pins `TZ=UTC`.  Evidence collection was previously forced to convert
+  by hand: `kubectl logs --timestamps` prefixes are stamped by the node's
+  container runtime in the node's timezone (EDT), which
+  `docs/notes/canary-first-fetch.md` compensated for line by line.  The
+  runtime-stamped prefix is node-local and unchanged — correlate on the
+  in-message stamp (bead `ytt-56679d29`).
+
 ### Fixed
 
 - **Default-language calls never hit the cache** (bead `ytt-83eaa5f6`): the

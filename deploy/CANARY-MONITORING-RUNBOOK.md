@@ -189,6 +189,19 @@ kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt-canary -c ytt-canary -- ytt ca
 kubectl --kubeconfig="$KC" exec -n ytt deploy/ytt-canary -c ytt-canary -- ytt canary --once --via-proxy   # only if YTT_PROXY_URL is set
 ```
 
+**Timestamps — correlate on the in-message stamp, not the `--timestamps`
+prefix.**  From the release carrying the UTC log stamping (bead
+`ytt-56679d29`), every canary log line carries its own ISO-8601 **UTC**
+stamp inside the message — `2026-09-18T23:14:05.156+00:00 INFO:ytt.canary:…`
+— which matches the epoch-valued `ytt_canary_*` gauges directly.  The
+`--timestamps` prefix in step 1 is a different stamp written by the *node's*
+container runtime in the **node's** timezone (EDT on the mini-PC agents);
+nothing in the image can move it, so use it for ordering only, never for
+correlation.  The image also pins `TZ=UTC`, so anything else the process
+renders in local time renders UTC.  On releases predating the stamping, the
+lines carry no in-message timestamp at all and the +4h arithmetic recorded
+in `docs/notes/canary-first-fetch.md` is still required.
+
 In-pod ground truth needs a kubeconfig granting `pods/exec` on ns `ytt` —
 the credential-free proxy cannot exec (`unable to upgrade connection:
 Forbidden`; RUNBOOK §7), so the one-shot probes are an operator action and

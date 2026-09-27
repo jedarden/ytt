@@ -44,7 +44,10 @@ calls.  Use ``get_logger(__name__)`` (structlog) in each module.
 
 from __future__ import annotations
 
+import logging
 import re
+import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -280,6 +283,92 @@ def configure_logging() -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,  # allow reconfiguration in tests
     )
+
+
+class UTCISO8601Formatter(logging.Formatter):
+    """stdlib formatter whose timestamps are always ISO-8601 UTC (+00:00).
+
+    The stdlib default stamps records in the process's *local* time with no
+    offset at all, and the other timestamp a canary log line collects under
+    ``kubectl logs --timestamps`` is stamped a third way — by the node's
+    container runtime, in the **node's** timezone.  On an EDT node that
+    made correlating a probe line with the epoch-valued ``ytt_canary_*``
+    gauges a manual +4h exercise (docs/notes/canary-first-fetch.md did that
+    arithmetic for three lines).  This formatter removes the application's
+    own contribution to the mess: every line carries an in-message
+    ``+00:00`` stamp that matches the gauges directly, whatever the local
+    timezone claims.  The image pins ``TZ=UTC`` as the belt to these
+    braces — anything that still renders local time renders UTC.
+
+    ``%(levelname)s:%(name)s:%(message)s`` is kept as the tail so greps over
+    log shapes recorded in the notes and runbooks keep matching.
+    """
+
+    def formatTime(
+        self, record: logging.LogRecord, datefmt: str | None = None
+    ) -> str:
+        return datetime.fromtimestamp(
+            record.created, tz=timezone.utc
+        ).isoformat(timespec="milliseconds")
+
+
+class CurrentStderrHandler(logging.StreamHandler):
+    """A ``StreamHandler`` on whichever object is *currently* ``sys.stderr``.
+
+    A plain ``StreamHandler()`` snapshots ``sys.stderr`` at construction and
+    keeps it for the handler's lifetime.  In a container that is fine — the
+    object never changes — but under pytest every test's capture swaps
+    ``sys.stderr`` and closes the outgoing object, so a handler attached
+    during one test (the one-shot / gate helpers wire it when a test calls
+    them) raised ``ValueError: I/O operation on closed file`` from every
+    later record that reached the root logger, spilling logging errors into
+    unrelated test modules.  Resolving the stream on every access removes
+    the stale snapshot; in production nothing rebinds ``sys.stderr``, so
+    behavior is identical to the plain handler.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    @property
+    def stream(self) -> Any:
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value: Any) -> None:
+        # Accepted and ignored.  StreamHandler.__init__ assigns the stream
+        # it was handed, and setStream() assigns after flushing the outgoing
+        # one — both intents ("write to stderr") are already satisfied by
+        # the property, so there is nothing to store.
+        return None
+
+
+def configure_stdlib_logging(level: int = logging.INFO) -> None:
+    """Route the root logger through :class:`UTCISO8601Formatter`.
+
+    For the canary surfaces whose stderr lines are retained as evidence:
+    the probe loop (``ytt canary``) and the one-shot / gate helpers, whose
+    diagnostic lines previously came out through ``basicConfig`` (local
+    time, no offset) or the no-handler last-resort path (no timestamp at
+    all).  Attaches one :class:`CurrentStderrHandler` to the root logger —
+    add, never replace, so calling this where handlers already exist
+    (pytest's) is harmless.  Idempotent like :func:`configure_logging`: a
+    second call only re-applies the level — attaching again would stack a
+    duplicate handler and print every evidence line twice.
+    """
+    root = logging.getLogger()
+    if any(
+        isinstance(existing.formatter, UTCISO8601Formatter)
+        for existing in root.handlers
+    ):
+        root.setLevel(level)
+        return
+    handler = CurrentStderrHandler()
+    handler.setFormatter(
+        UTCISO8601Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")
+    )
+    root.setLevel(level)
+    root.addHandler(handler)
 
 
 def get_logger(name: str) -> Any:
