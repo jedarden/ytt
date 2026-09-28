@@ -20,7 +20,16 @@ Requirements: Python 3.12, `uv`, `ffmpeg` (for the audio path in Whisper tests).
 uv run pytest -m "not integration" -q
 
 # Integration tests (only pass in-cluster — ardenone-cluster residential egress):
-# kubectl exec -n ytt deploy/ytt-test -- ytt test --integration
+# KC=<a kubeconfig with pods/exec on ns ytt> kubectl --kubeconfig="$KC" \
+#   exec -it -n ytt deploy/<pod-with-checkout> -- \
+#   env YTT_TEST_TOKEN=<bearer-token> ytt test --integration
+#
+# Exec needs an operator kubeconfig — the credential-free read-only proxy
+# forbids pods/exec (deploy/RUNBOOK.md §7) — and there is no `ytt-test`
+# Deployment any more (the pre-0.1.0 canary harness is gone; see
+# deploy/DEPLOY-CHECKLIST.md).  Run from a pod in the cluster that has a
+# checkout: `ytt test --integration` needs `tests/`, which the published
+# image does not ship.
 ```
 
 Integration tests hit real YouTube URLs and the in-cluster Whisper service.

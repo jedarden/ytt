@@ -157,10 +157,19 @@ Never `kubectl rollout undo` (ArgoCD selfHeal reverts it immediately).
 `ytt test --integration` shells out to pytest, so it needs a checkout (the
 published image ships without `tests/`) and residential egress — run it from
 a pod in `ardenone-cluster` with the repo available, not from a datacenter
-machine:
+machine.
+
+Exec-ing into the pod is an **operator** step: the credential-free read-only
+proxy (`http://traefik-ardenone-cluster:8001`) forbids `pods/exec`, so it
+cannot run this for you (verified live 2026-09-25 — an exec attempt through
+the proxy fails with `unable to upgrade connection: Forbidden`; the boundary
+is documented in
+[deploy/RUNBOOK.md §7](../../deploy/RUNBOOK.md)).
+Use a kubeconfig that grants `pods/exec` on ns `ytt` — the same pattern as
+the canary gate, cache, OAuth-state, and transcript-deletion runbooks:
 
 ```bash
-kubectl --server=http://traefik-ardenone-cluster:8001 \
-  exec -it -n ytt deploy/<pod-with-checkout> -- \
+KC=<a kubeconfig with pods/exec on ns ytt>   # the read-only proxy cannot exec — RUNBOOK §7
+kubectl --kubeconfig="$KC" exec -it -n ytt deploy/<pod-with-checkout> -- \
   env YTT_TEST_TOKEN=<bearer-token> ytt test --integration
 ```
