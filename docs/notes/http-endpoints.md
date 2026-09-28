@@ -31,7 +31,11 @@ transport mounts at the bare prefix — the single trailing slash stripped
 exactly once (`/ytt/` → `/ytt`) — which is what keeps `POST /ytt` the
 transport and `/ytt/mcp` a 404 under any prefix. All of this is pinned by
 `tests/unit/test_path_prefix_contract.py`, including a full app rebuild under
-a non-default prefix:
+a non-default prefix, and the protocol-level half of the contrast — the same
+authenticated `initialize` answered with a real InitializeResult at
+`POST <prefix>` and a router 404 at `POST <prefix>/mcp`, under the default and
+a non-default prefix alike — by `tests/unit/test_mcp_path_prefix_mounting.py`
+over the real ASGI transport:
 
 | Path | Method(s) | Auth | Purpose |
 |---|---|---|---|
