@@ -1,88 +1,36 @@
 {
-  "generated_at": "2026-09-27T12:38:47Z",
+  "generated_at": "2026-09-28T12:38:48Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 160,
-    "open": 11,
-    "in_progress": 3,
-    "closed": 143,
-    "other": 3,
+    "total_beads": 180,
+    "open": 1,
+    "in_progress": 1,
+    "closed": 176,
+    "other": 2,
     "other_statuses": {
-      "deferred": 3
+      "deferred": 2
     }
   },
   "beads_not_closed": [
     {
-      "id": "ytt-397baf79",
-      "title": "Operator: flip ghcr.io/jedarden/ytt to Public on GitHub, then verify anonymous pull (ytt-build cannot; GitHub UI only)",
-      "status": "deferred",
-      "effective_status": "deferred",
+      "id": "ytt-cd9e04a5",
+      "title": "Run same-egress caption retest for videos that hit upstream 429s",
+      "status": "in_progress",
+      "effective_status": "in_progress",
       "priority": 1,
-      "assignee": null,
+      "assignee": "codex",
       "labels": [
-        "ghcr",
-        "operator"
+        "captions",
+        "deployment",
+        "diagnostics"
       ],
       "manual_blocked": false,
       "dependencies": [],
       "revision": 3,
-      "created_at": "2026-09-27T05:57:26.118192423Z",
-      "updated_at": "2026-09-27T06:03:22.25150484Z"
-    },
-    {
-      "id": "ytt-058f0004",
-      "title": "Roll ardenone-cluster and the deploy/ mirror off the burned 0.2.22 pin onto 0.2.23 and record rollout evidence",
-      "status": "in_progress",
-      "effective_status": "in_progress",
-      "priority": 2,
-      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
-      "labels": [
-        "deferred:2026-09-26T21:38:12.565744678+00:00",
-        "failure-count:1",
-        "quarantine-until:2026-09-26T19:43:11.767691437+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 4,
-      "created_at": "2026-09-26T17:41:24.081696355Z",
-      "updated_at": "2026-09-26T21:42:27.02501006Z"
-    },
-    {
-      "id": "ytt-134402d8",
-      "title": "Give docs/bead-inventory.md a regeneration cadence so the snapshot cannot silently go stale",
-      "status": "in_progress",
-      "effective_status": "in_progress",
-      "priority": 2,
-      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
-      "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 2,
-      "created_at": "2026-09-27T07:32:59.746490205Z",
-      "updated_at": "2026-09-27T12:11:28.332792511Z"
-    },
-    {
-      "id": "ytt-183dc6ac",
-      "title": "Ship the derived-URL SSRF allowlist in a released image and roll ardenone-cluster off 0.2.20",
-      "status": "in_progress",
-      "effective_status": "in_progress",
-      "priority": 2,
-      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
-      "labels": [
-        "failure-count:2",
-        "quarantine-until:2026-09-26T15:43:23.825205721+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 6,
-      "created_at": "2026-09-26T09:49:00.613039856Z",
-      "updated_at": "2026-09-26T21:43:28.293695817Z"
+      "created_at": "2026-09-28T04:42:44.308250318Z",
+      "updated_at": "2026-09-28T05:22:34.478898181Z"
     },
     {
       "id": "ytt-4f1c45c2",
@@ -102,42 +50,6 @@
       "updated_at": "2026-09-24T12:47:07.218198368Z"
     },
     {
-      "id": "ytt-56679d29",
-      "title": "Normalize container log timestamps to UTC (canary/server pods log in node-local EDT)",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "failure-count:1",
-        "quarantine-until:2026-09-27T09:16:47.898413609+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 3,
-      "created_at": "2026-09-27T06:49:20.934116101Z",
-      "updated_at": "2026-09-27T09:11:48.440805266Z"
-    },
-    {
-      "id": "ytt-72dcf035",
-      "title": "Release 0.2.21: first image carrying the per-path canary metrics \u2014 activates the applied YttCanary* alert rules",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "failure-count:3",
-        "observability",
-        "quarantine-until:2026-09-26T07:35:48.351711023+00:00"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 7,
-      "created_at": "2026-09-25T11:01:38.665010473Z",
-      "updated_at": "2026-09-26T07:15:48.905001975Z"
-    },
-    {
       "id": "ytt-7656c3a2",
       "title": "Add an anonymous container-image pull release gate",
       "status": "deferred",
@@ -151,60 +63,9 @@
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 8,
+      "revision": 9,
       "created_at": "2026-09-25T16:20:04.669053281Z",
-      "updated_at": "2026-09-27T05:57:49.667171115Z"
-    },
-    {
-      "id": "ytt-7829b244",
-      "title": "Add MCP Streamable HTTP session-lifecycle conformance tests",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "deferred:2026-09-27T15:17:45.528610755+00:00",
-        "failure-count:3",
-        "quarantine-until:2026-09-27T07:37:44.635570145+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 7,
-      "created_at": "2026-09-26T12:32:28.077384677Z",
-      "updated_at": "2026-09-27T07:17:45.33051601Z"
-    },
-    {
-      "id": "ytt-7ce8d590",
-      "title": "Document the full canary CLI flag surface (--once/--gate/--via-proxy/--evidence-dir/--video-id) in the README",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-27T12:31:28.018785644Z",
-      "updated_at": "2026-09-27T12:31:28.018785644Z"
-    },
-    {
-      "id": "ytt-958dccc1",
-      "title": "Make canary-gate evidence artifacts survive their run environment (default /tmp dir, CI podGC) and give them an operator retention story",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-27T12:31:27.683137085Z",
-      "updated_at": "2026-09-27T12:31:27.683137085Z"
+      "updated_at": "2026-09-28T02:04:44.995369343Z"
     },
     {
       "id": "ytt-96bb54f6",
@@ -222,95 +83,6 @@
       "revision": 3,
       "created_at": "2026-09-26T22:21:25.935836095Z",
       "updated_at": "2026-09-27T05:57:49.855073192Z"
-    },
-    {
-      "id": "ytt-ab79a7e8",
-      "title": "Test caption-only operation without YTT_WHISPER_URL",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "failure-count:2",
-        "quarantine-until:2026-09-27T04:16:13.544954872+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 5,
-      "created_at": "2026-09-26T23:25:44.415756222Z",
-      "updated_at": "2026-09-27T04:06:14.146937956Z"
-    },
-    {
-      "id": "ytt-b0afb5b4",
-      "title": "Pin the README claim that every YouTube URL form normalizes to the same cache entry",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "deferred:2026-09-27T13:49:14.772314935+00:00",
-        "failure-count:1",
-        "quarantine-until:2026-09-27T11:54:13.878819040+00:00",
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [
-        {
-          "blocker": "ytt-83eaa5f6",
-          "kind": "blocks"
-        }
-      ],
-      "revision": 3,
-      "created_at": "2026-09-27T07:32:59.566489379Z",
-      "updated_at": "2026-09-27T11:49:14.582408199Z"
-    },
-    {
-      "id": "ytt-e1036a3b",
-      "title": "Record an explicit accept-or-mitigate decision for the DNS-rebinding residual in the derived-URL allowlist (no DNS resolution in the gate)",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 2,
-      "assignee": null,
-      "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-27T12:31:27.861224162Z",
-      "updated_at": "2026-09-27T12:31:27.861224162Z"
-    },
-    {
-      "id": "ytt-317fa8df",
-      "title": "Fix remaining exec-through-proxy instructions (deploy-ardenone.md integration path, CONTRIBUTING.md)",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 3,
-      "assignee": null,
-      "labels": [],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-25T14:18:31.405382675Z",
-      "updated_at": "2026-09-25T14:18:31.405382675Z"
-    },
-    {
-      "id": "ytt-4d76a316",
-      "title": "Correct deploy/RUNBOOK.md exec-through-proxy claims (live RBAC forbids pods/exec on the credential-free endpoint)",
-      "status": "open",
-      "effective_status": "open",
-      "priority": 3,
-      "assignee": null,
-      "labels": [
-        "docs",
-        "k8s"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 1,
-      "created_at": "2026-09-25T04:54:50.68831051Z",
-      "updated_at": "2026-09-25T04:54:50.68831051Z"
     }
   ],
   "pluck_label_analysis": {
@@ -320,65 +92,11 @@
       "blocked",
       "escalation"
     ],
-    "beads_matching_default_excludes": [
-      {
-        "id": "ytt-058f0004",
-        "matching_labels": [
-          "deferred:2026-09-26T21:38:12.565744678+00:00"
-        ]
-      },
-      {
-        "id": "ytt-7829b244",
-        "matching_labels": [
-          "deferred:2026-09-27T15:17:45.528610755+00:00"
-        ]
-      },
-      {
-        "id": "ytt-b0afb5b4",
-        "matching_labels": [
-          "deferred:2026-09-27T13:49:14.772314935+00:00"
-        ]
-      }
-    ],
+    "beads_matching_default_excludes": [],
     "quarantine_windows": [
-      {
-        "id": "ytt-058f0004",
-        "until": "2026-09-26T19:43:11.767691437+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-183dc6ac",
-        "until": "2026-09-26T15:43:23.825205721+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-56679d29",
-        "until": "2026-09-27T09:16:47.898413609+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-72dcf035",
-        "until": "2026-09-26T07:35:48.351711023+00:00",
-        "state": "expired"
-      },
       {
         "id": "ytt-7656c3a2",
         "until": "2026-09-25T23:34:14.292819353+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-7829b244",
-        "until": "2026-09-27T07:37:44.635570145+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-ab79a7e8",
-        "until": "2026-09-27T04:16:13.544954872+00:00",
-        "state": "expired"
-      },
-      {
-        "id": "ytt-b0afb5b4",
-        "until": "2026-09-27T11:54:13.878819040+00:00",
         "state": "expired"
       }
     ]
