@@ -495,6 +495,7 @@ class TestFallbackVideo:
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README = REPO_ROOT / "README.md"
+CONFIG_GUIDE = REPO_ROOT / "docs" / "usage" / "configuration.md"
 EVIDENCE_SPEC = REPO_ROOT / "docs" / "notes" / "canary-gate-evidence.md"
 
 
@@ -637,3 +638,116 @@ class TestReadmeVerdictDoc:
 
         assert 'exit 0 iff "ok"' in _usage_comments(once_usage_block)
         assert "exit 0 iff verdict is ok" in (_run_canary_once.__doc__ or "")
+
+
+@pytest.fixture(scope="module")
+def config_guide_canary_paragraph() -> str:
+    """configuration.md's canary paragraph (probe loop + ``--once``).
+
+    Its presence is part of the contract: without it the one-shot egress
+    check is undocumented in the full configuration reference.
+    """
+    text = CONFIG_GUIDE.read_text(encoding="utf-8")
+    m = re.search(r"The long-running probe loop .*?(?=\n\n)", text, re.DOTALL)
+    assert m, (
+        "configuration.md lost its canary paragraph — the one-shot "
+        "(`ytt canary --once`) and loop (`ytt canary`) probes are "
+        "undocumented in the configuration reference"
+    )
+    return m.group(0)
+
+
+def _guide_verdict_clause(paragraph: str) -> str:
+    """The paragraph's ``verdict`` clause — the span describing what the
+    JSON report's ``verdict`` field can hold (the guide-side twin of the
+    README's ``_verdict_clause``)."""
+    m = re.search(r"verdict`:\s*(.*?) plus the ipinfo", paragraph, re.DOTALL)
+    assert m, "configuration.md's canary paragraph no longer states a verdict vocabulary"
+    return m.group(1)
+
+
+class TestConfigGuideVerdictDoc:
+    """``docs/usage/configuration.md``'s canary paragraph restates the same
+    ``--once`` verdict contract the README's usage block does, and it was
+    missed when bead ytt-066781cf reconciled the closed ``ok`` vs
+    ``ip_blocked`` pair out of the README — the guide went on documenting
+    the stale two-value vocabulary next to a README the suite already held
+    to the taxonomy.  Same shape as ``TestReadmeVerdictDoc``: the guide's
+    paragraph and the code rot together or not at all, and the closed pair
+    must not merely move house between the two documents."""
+
+    def test_documented_examples_are_real_outcome_codes(
+        self, config_guide_canary_paragraph
+    ):
+        """Every verdict value the paragraph names must be one the canary
+        can actually report — a renamed seed-map code or a wishful example
+        fails here instead of misdirecting an operator mid-diagnosis."""
+        clause = _guide_verdict_clause(config_guide_canary_paragraph)
+        examples = set(re.findall(r"\b[a-z]+(?:_[a-z]+)+\b", clause))
+        assert examples, "configuration.md's verdict clause lost its example codes"
+        for example in examples:
+            assert example in _canary_outcome_codes(), (
+                f"configuration.md documents verdict {example!r}, which no "
+                f"canary path can report (real outcomes: "
+                f"{sorted(_canary_outcome_codes())})"
+            )
+
+    def test_headline_verdicts_stay_documented(self, config_guide_canary_paragraph):
+        """Reconciling the vocabulary must not drop the two verdicts the
+        command exists for: ``ok`` — the pass — and ``ip_blocked`` — the
+        egress failure this canary is the proof against."""
+        clause = _guide_verdict_clause(config_guide_canary_paragraph)
+        assert "`ok`" in clause
+        assert "ip_blocked" in clause
+
+    def test_vocabulary_is_the_error_taxonomy_not_a_closed_pair(
+        self, config_guide_canary_paragraph
+    ):
+        """The paragraph must present the set as open-ended — anchored on
+        ``ok`` or a stable ``ytt.errors`` error code with an elided example
+        list — because ``SEED_MAP`` grows with the pinned yt-dlp version;
+        "ok vs X" phrasing is the two-value relapse
+        ``TestReadmeVerdictDoc`` keeps dead in the README."""
+        clause = _guide_verdict_clause(config_guide_canary_paragraph)
+        assert "ytt.errors" in clause, (
+            "configuration.md's verdict clause must point at the "
+            "ytt.errors taxonomy as the source of truth"
+        )
+        assert "error code" in clause
+        assert "…" in clause, "configuration.md's example list must stay open-ended (…)"
+        assert "`ok` vs" not in clause
+
+    def test_two_value_vocabulary_gone_from_the_guide(self):
+        """The stale pair must not merely move house: no configuration.md
+        line may still document the --once verdict as ``ok`` vs
+        ``ip_blocked`` — in either the backticked or the bare form."""
+        text = CONFIG_GUIDE.read_text(encoding="utf-8")
+        assert "`ok` vs" not in text
+        assert '"ok" vs' not in text
+        assert "ok vs ip_blocked" not in text
+
+    def test_gate_error_is_not_documented_as_an_once_outcome(
+        self, config_guide_canary_paragraph
+    ):
+        """``gate_error`` is synthesized by the gate when a probe *crashes*
+        (``canary_gate.GATE_ERROR``); ``--once`` has no such path — an
+        unexpected crash is a traceback, not a verdict.  It must not creep
+        into the guide's --once vocabulary either."""
+        from ytt.canary_gate import GATE_ERROR
+
+        assert GATE_ERROR not in config_guide_canary_paragraph
+
+    def test_exit_contract_documented_matches_the_cli(
+        self, config_guide_canary_paragraph
+    ):
+        """The exit rule hangs off ``verdict == "ok"`` alone — any non-ok
+        outcome exits 1.  The guide's phrasing must name ``ok`` as the sole
+        passing verdict; the ambiguous ``exits 0/1`` it replaced could read
+        as one exit code per verdict value."""
+        assert re.search(
+            r"exits 0 iff .*?`ok`", config_guide_canary_paragraph, re.DOTALL
+        ), (
+            "configuration.md's canary paragraph must state the exit rule "
+            "as 'exits 0 iff the verdict is ok' (any non-ok outcome exits 1)"
+        )
+        assert "exits 0/1" not in config_guide_canary_paragraph

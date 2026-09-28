@@ -162,10 +162,11 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
 The long-running probe loop (`ytt canary`) serves `ytt_canary_*` metrics on
 :8081. For a one-off egress check there is also `ytt canary --once`: it
 fetches captions for one known-good video from wherever it runs, prints a
-JSON report (`verdict`: `ok` vs `ip_blocked`, plus the ipinfo egress
-classification as context), and exits 0/1 — usable from an in-cluster
-`kubectl exec`, a debug pod, or a self-host smoke test without deploying
-anything.
+JSON report (`verdict`: `ok` or a stable `ytt.errors` error code —
+`ip_blocked`, `empty_body`, `rate_limited`, … — plus the ipinfo egress
+classification as context), and exits 0 iff the verdict is `ok` (1
+otherwise) — usable from an in-cluster `kubectl exec`, a debug pod, or a
+self-host smoke test without deploying anything.
 
 ## Size format
 
