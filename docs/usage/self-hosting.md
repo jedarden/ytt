@@ -394,13 +394,21 @@ in `deploy/k8s/ardenone-cluster/ytt/`:
 ## No-Whisper mode
 
 If you don't have a Whisper endpoint, ytt still works for all captioned videos.
-Videos without captions will return:
-```json
-{"status": "error", "error_code": "no_captions_asr_failed", "message": "..."}
-```
+Caption-less videos fail the documented way:
 
-To disable Whisper entirely, set `YTT_WHISPER_URL` to an unreachable address.
-The `no_captions_asr_failed` error is user-relayable (safe to show to the end user).
+1. `get_youtube_transcript` → `status="pending"` (no `error_code` field) —
+   starting the job never probes the Whisper endpoint;
+2. the job downloads the audio, fails at the ASR call, and
+   `get_transcript_job` → `status="error"` with `error_code="asr_failed"`
+   and a user-relayable message (safe to show to the end user).
+
+`no_captions_asr_failed` labels metrics only — it is never returned as a
+tool `error_code` (see [tools.md](tools.md#no_captions_asr_failed-is-not-a-tool-error-code)).
+
+To disable ASR deliberately, set `YTT_WHISPER_URL` to an unreachable address
+or to an empty value — captions are unaffected either way. Leaving the
+variable unset is *not* disabled: it selects the built-in reference-endpoint
+default. Regression coverage: `tests/unit/test_caption_only_no_whisper.py`.
 
 ## Residential proxy setup (if needed)
 
