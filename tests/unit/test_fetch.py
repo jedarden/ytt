@@ -29,11 +29,9 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import pathlib
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yt_dlp
@@ -47,13 +45,11 @@ from ytt.fetch import (
     FetchResult,
     _do_fetch,
     _find_json3_url,
-    _normalize_lang_key,
     _select_track,
     classify_ydl_error,
     fetch_transcript,
     get_available_langs,
 )
-from ytt.models import Segment
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +495,47 @@ class TestDoFetch:
         assert result.source == "caption_manual"
         assert result.served_lang == "en"
 
+    @pytest.mark.parametrize("live_status", ["is_live", "is_upcoming"])
+    def test_in_progress_live_status_never_enters_caption_or_whisper_fallback(
+        self, live_status
+    ):
+        """Active streams/premieres fail before no-captions can start ASR."""
+        info = _make_info(duration=None)
+        info["live_status"] = live_status
+        mock_ctx, mock_ydl = _stub_ydl(info, _make_json3_response())
+
+        with patch("ytt.fetch.yt_dlp.YoutubeDL", return_value=mock_ctx):
+            with pytest.raises(YttError) as exc_info:
+                _do_fetch("dQw4w9WgXcQ", None, self._settings(), None)
+
+        assert exc_info.value.error_code == errors.IS_LIVESTREAM
+        assert "No Whisper audio job was started" in exc_info.value.message
+        mock_ydl.urlopen.assert_not_called()
+
+    def test_boolean_is_live_without_status_is_also_rejected(self):
+        """Older/fixture-shaped metadata may expose only the live boolean."""
+        info = _make_info(duration=None)
+        info["is_live"] = True
+
+        with patch("ytt.fetch.yt_dlp.YoutubeDL") as ydl_factory:
+            mock_ctx, mock_ydl = _stub_ydl(info, _make_json3_response())
+            ydl_factory.return_value = mock_ctx
+            with pytest.raises(YttError) as exc_info:
+                _do_fetch("dQw4w9WgXcQ", None, self._settings(), None)
+
+        assert exc_info.value.error_code == errors.IS_LIVESTREAM
+        mock_ydl.urlopen.assert_not_called()
+
+    @pytest.mark.parametrize("live_status", ["was_live", "post_live"])
+    def test_ended_stream_status_fetches_as_vod(self, live_status):
+        """Replays of ended streams remain eligible for normal captions."""
+        info = _make_info(subtitles={"en": _manual(MANUAL_EN_URL)})
+        info["live_status"] = live_status
+        result = self._run(info, lang="en")
+
+        assert result.source == "caption_manual"
+        assert result.served_lang == "en"
+
     def test_auto_caption_sets_source_caption_auto(self):
         info = _make_info(automatic_captions={"en": _auto(AUTO_EN_URL)})
         result = self._run(info, lang="en")
@@ -780,7 +817,6 @@ class TestFetchTranscriptAsync:
             if call_count == 1:
                 raise YttError(errors.IP_BLOCKED, "blocked")
             # Second call (with proxy) succeeds
-            info = _make_info(subtitles={"en": _manual(MANUAL_EN_URL)})
             return FetchResult(
                 segments=[],
                 source="caption_manual",

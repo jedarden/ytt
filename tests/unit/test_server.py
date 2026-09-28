@@ -504,6 +504,46 @@ def _limited_count(subject: str) -> float:
     return ytt_rate_limited_total.labels(subject_hash=h)._value.get()
 
 
+@pytest.mark.asyncio
+async def test_live_stream_error_never_starts_whisper(monkeypatch):
+    """An in-progress /live/ item is terminal, not a caption-less ASR job."""
+    from ytt import server
+    from ytt.errors import IS_LIVESTREAM, YttError
+    from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
+
+    _install_limits(
+        monkeypatch,
+        SubjectRateLimiter(capacity=10, refill_rate_per_sec=10.0),
+        WhisperQuota(jobs_per_hour=0),
+    )
+    _cache_miss(monkeypatch)
+    _fetch_raises(
+        monkeypatch,
+        YttError(
+            IS_LIVESTREAM,
+            "This live stream is still in progress; transcripts are unavailable "
+            "until it becomes a replay. No Whisper audio job was started.",
+        ),
+    )
+
+    async def must_not_create(*args, **kwargs):
+        raise AssertionError("in-progress streams must not create Whisper jobs")
+
+    monkeypatch.setattr(server.whisper_registry, "get_or_create", must_not_create)
+
+    sc = (
+        await mcp.call_tool(
+            "get_youtube_transcript",
+            {"url": "https://www.youtube.com/live/dQw4w9WgXcQ"},
+        )
+    ).structured_content
+
+    assert sc["video_id"] == "dQw4w9WgXcQ"
+    assert sc["status"] == "error"
+    assert sc["error_code"] == IS_LIVESTREAM
+    assert "No Whisper audio job was started" in sc["message"]
+
+
 def test_request_subject_falls_back_to_anonymous():
     """No auth context (direct tool calls, local runs) → one shared bucket,
     so the limiter still bounds total volume."""

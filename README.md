@@ -69,7 +69,7 @@ self-hosting guide (BYO Whisper, BYO residential egress/proxy, BYO OAuth subject
 | `get_youtube_transcript` | Fetch the transcript of a YouTube video by URL. Returns inline text for short videos; paginated chunks + `next_cursor` for long videos. Auto-starts Whisper ASR if no captions exist. |
 | `get_transcript_job` | Poll a Whisper ASR job. When done, returns the same bounded transcript shape: short results are inline; long results are `status="partial"` chunks with `next_cursor`. Pass that cursor back as `cursor` with the same `video_id` until `is_final=true`. |
 
-Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-char ID — all normalize to the same cache entry.
+Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-char ID — all normalize to the same cache entry. The `/live/` path is only a URL alias: yt-dlp metadata decides whether the item is currently live or an upcoming premiere. In-progress streams/premieres return `status="error"`, `error_code="is_livestream"`, and never start Whisper or download audio. Once a stream has ended (`was_live`/`post_live`), its replay is treated as a normal VOD and fetches captions or uses the existing bounded Whisper fallback.
 
 ## Requirements and caveats
 

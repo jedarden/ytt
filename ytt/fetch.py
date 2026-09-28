@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
 import yt_dlp
@@ -161,6 +161,38 @@ SEED_MAP: list[tuple[str, str]] = [
     ("Did not get any data blocks", errors.IP_BLOCKED),
     ("audio_too_large", errors.TOO_LONG_FOR_ASR),
 ]
+
+# yt-dlp's live_status is more reliable than waiting for an extractor error:
+# an active stream or scheduled premiere can successfully return metadata with
+# no caption track and no finite duration.  Those states must stop before the
+# no-captions Whisper fallback, while ended streams remain ordinary VODs.
+_IN_PROGRESS_LIVE_STATUSES = frozenset({"is_live", "is_upcoming"})
+
+
+def _is_in_progress_stream(info: dict) -> bool:
+    """Return whether yt-dlp says *info* is a live stream or upcoming premiere.
+
+    ``live_status`` is the canonical yt-dlp field.  ``is_live`` is retained as
+    a compatibility fallback for extractor/test payloads that expose the
+    boolean without the derived status string.  ``was_live`` and ``post_live``
+    are deliberately not included: both describe an ended stream/replay that
+    may be fetched like any other VOD.
+    """
+    return (
+        info.get("live_status") in _IN_PROGRESS_LIVE_STATUSES
+        or info.get("is_live") is True
+    )
+
+
+def _in_progress_stream_error(info: dict) -> YttError:
+    """Build the stable caller-facing error for an active stream or premiere."""
+    status = info.get("live_status")
+    kind = "upcoming live event" if status == "is_upcoming" else "live stream"
+    return YttError(
+        errors.IS_LIVESTREAM,
+        f"This {kind} is still in progress; transcripts are unavailable until "
+        "it becomes a replay. No Whisper audio job was started.",
+    )
 
 
 def classify_ydl_error(exc_msg: str) -> str:
@@ -371,6 +403,14 @@ def _do_fetch(
             info = ydl.extract_info(url, download=False)
             if not info:
                 raise YttError(errors.EMPTY_BODY, "yt-dlp returned no info.")
+
+            # Active streams and scheduled premieres can have successful
+            # metadata extraction but no finite duration or caption track.
+            # Reject before _select_track can produce NoCaptionsError, which
+            # would otherwise enter the Whisper path and attempt an unbounded
+            # audio download. Ended streams (was_live/post_live) are allowed.
+            if _is_in_progress_stream(info):
+                raise _in_progress_stream_error(info)
 
             available = get_available_langs(info)
             track_url, kind, served_lang, fallback_msg = _select_track(info, lang)

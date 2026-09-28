@@ -76,7 +76,12 @@ get_youtube_transcript(url, lang?, mode?, cursor?, start?, end?, query?)
 `m.`/`music.` subdomains, `youtube-nocookie.com`, and the bare 11-character
 video id all canonicalize to the same video and therefore the same cache unit.
 Playlist, channel, handle, and search URLs are rejected with
-`error_code="bad_url"`.
+`error_code="bad_url"`. The `/live/` path does not by itself mean the item is
+currently live: yt-dlp's metadata controls the outcome. An active stream or
+upcoming premiere returns `status="error", error_code="is_livestream"` before
+caption-less fallback, so no Whisper job or audio download is started. An
+ended stream (`was_live`/`post_live`) is a replay and follows the normal VOD
+caption/Whisper path.
 
 ### Language selection
 
