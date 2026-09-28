@@ -331,6 +331,7 @@ def build_page(
     filter_args: dict[str, Any],
     settings: "Settings",
     cursor: str | None = None,
+    cursor_restart_tool: str = "get_youtube_transcript",
 ) -> dict[str, Any]:
     """Build a TranscriptResult dict from a :class:`~ytt.cache.CacheHit`.
 
@@ -344,6 +345,7 @@ def build_page(
         filter_args: Active filter args (any of ``query``, ``start``, ``end``).
         settings:    Server settings (``inline_char_limit``, ``chunk_chars``).
         cursor:      Opaque continuation cursor (``None`` for first page).
+        cursor_restart_tool: Tool name to use when a cursor is stale.
 
     Returns:
         A TranscriptResult-shaped dict.
@@ -394,7 +396,7 @@ def build_page(
                 "error_code": errors.CURSOR_STALE,
                 "message": (
                     "Pagination cursor is stale — the transcript was refreshed or evicted. "
-                    "Re-call get_youtube_transcript without a cursor to restart pagination."
+                    f"Re-call {cursor_restart_tool} without a cursor to restart pagination."
                 ),
             }
         offset = validated

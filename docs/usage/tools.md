@@ -270,12 +270,13 @@ carries the retry hint when one is known.
 Poll the status of a Whisper ASR transcription job. Signature:
 
 ```
-get_transcript_job(video_id)
+get_transcript_job(video_id, cursor?)
 ```
 
 | Argument | Type | Default | Meaning |
 |---|---|---|---|
 | `video_id` | str | *required* | The canonical 11-char id exactly as returned by the earlier `pending` response. |
+| `cursor` | str \| null | `null` | Continuation cursor from a previous long-result `next_cursor`; pass it back with the same `video_id` until `is_final=true`. |
 
 Jobs move `pending → running → done | error`; terminal entries are garbage
 collected after `YTT_JOB_TTL_SEC` (default `3600` s), and a `running` entry
@@ -291,7 +292,8 @@ cannot be probed across subjects (pinned by
 |---|---|---|
 | `status="pending"`, `eta_sec` | Queued — waiting for a Whisper slot | Relay the ETA, stop; call again later |
 | `status="running"`, `eta_sec` | Transcription in progress | Relay the ETA, stop; call again later |
-| `status="ok"` (+ full transcript fields) | Done — the transcript is delivered **directly in this response** | Done; no further call needed |
+| `status="ok"` (+ full transcript fields) | Done — the complete transcript, or the final page, is delivered **directly in this response** | Done; no further call needed |
+| `status="partial"` (+ `next_cursor`) | Done — the transcript is longer than the inline bound and this is a non-final page | Call `get_transcript_job` again with the same `video_id` and `cursor=next_cursor` |
 | `status="error"`, `error_code`, `message` | The job failed; the job's own code is relayed | Re-call `get_youtube_transcript` with the original URL to retry |
 | `status="error"`, `error_code="not_found"` | No such job — unknown id, expired/GC'd, started by a different OAuth subject, or the done transcript was evicted | Re-call `get_youtube_transcript` with the original URL |
 
@@ -325,9 +327,10 @@ cannot be probed across subjects (pinned by
 ```
 
 A **long** ASR transcript is delivered as `status="partial"` +
-`next_cursor` exactly like any other long transcript; continue it by calling
-`get_youtube_transcript` with the cursor (no `lang` needed — the `whisper`
-cache unit satisfies any language).
+`next_cursor` exactly like any other long transcript. Continue it by calling
+`get_transcript_job` again with the same `video_id` and `cursor=next_cursor`.
+The cursor is content-bound and opaque; no `lang` is needed because the
+`whisper` cache unit is addressed by the job's video id.
 
 A failed job relays the job's own error:
 
@@ -365,7 +368,7 @@ text. `message` is always safe to relay verbatim.
 | `too_long_for_asr` | both | Video exceeds `YTT_MAX_ASR_DURATION_SEC` (or the audio-size cap) — refused before any job starts; the caption path is unaffected. Via `get_transcript_job` when the download-time backstop catches it. |
 | `asr_failed` | `get_transcript_job` | The Whisper job failed — service unreachable, 5xx, or timed out. Retry by re-calling `get_youtube_transcript`. |
 | `not_found` | `get_transcript_job` | Unknown video id, job expired/GC'd, started by a different OAuth subject, or done-but-evicted transcript. |
-| `cursor_stale` | `get_youtube_transcript` | Pagination cursor no longer valid — restart without the cursor. |
+| `cursor_stale` | both transcript tools | Pagination cursor no longer valid — restart the same tool without the cursor. |
 
 ### `no_captions_asr_failed` is not a tool error code
 

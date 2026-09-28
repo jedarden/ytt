@@ -72,6 +72,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -526,7 +527,24 @@ def test_tools_list_advertises_exactly_the_readme_tools(session):
 
     job_tool = by_name["get_transcript_job"]
     assert job_tool["description"], "tool description must not be empty"
-    assert job_tool["inputSchema"]["required"] == ["video_id"]
+    job_schema = job_tool["inputSchema"]
+    assert job_schema["required"] == ["video_id"]
+    assert set(job_schema["properties"]) == {"video_id", "cursor"}
+    assert "cursor" not in job_schema["required"]
+
+    # README's table is the short contract shown to connector users. Keep its
+    # long-result promise tied to the live schema: adding/removing cursor
+    # pagination must update both surfaces in the same change.
+    readme = (Path(__file__).parents[2] / "README.md").read_text()
+    rows = [
+        line
+        for line in readme.splitlines()
+        if line.startswith("| `get_transcript_job` |")
+    ]
+    assert len(rows) == 1, "README must have exactly one get_transcript_job row"
+    row = rows[0]
+    for term in ("cursor", "partial", "next_cursor", "is_final"):
+        assert term in row, f"README job-table row lost its {term!r} contract"
 
 
 # ---------------------------------------------------------------------------

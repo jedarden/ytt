@@ -67,7 +67,7 @@ self-hosting guide (BYO Whisper, BYO residential egress/proxy, BYO OAuth subject
 | Tool | Description |
 |------|-------------|
 | `get_youtube_transcript` | Fetch the transcript of a YouTube video by URL. Returns inline text for short videos; paginated chunks + `next_cursor` for long videos. Auto-starts Whisper ASR if no captions exist. |
-| `get_transcript_job` | Poll a Whisper ASR job. When done, returns the transcript directly. |
+| `get_transcript_job` | Poll a Whisper ASR job. When done, returns the same bounded transcript shape: short results are inline; long results are `status="partial"` chunks with `next_cursor`. Pass that cursor back as `cursor` with the same `video_id` until `is_final=true`. |
 
 Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-char ID — all normalize to the same cache entry.
 

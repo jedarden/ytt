@@ -588,8 +588,10 @@ def _build_app():
             "Jobs are private to the OAuth subject that started them: polling "
             "from any other subject — or with an unknown video_id — returns the "
             "same not_found error. "
-            "When the job is done, returns the full transcript (same shape as "
-            "get_youtube_transcript). "
+            "When the job is done, returns the transcript using the same bounded "
+            "shape as get_youtube_transcript: short results are inline and long "
+            "results are status='partial' with next_cursor. Pass that cursor "
+            "back as cursor with the same video_id to continue. "
             "On status='pending' or 'running', relay the ETA and stop. "
             "On status='error' or error_code='not_found', call get_youtube_transcript "
             "again with the original URL to restart the request."
@@ -597,6 +599,7 @@ def _build_app():
     )
     async def get_transcript_job(
         video_id: str,
+        cursor: Optional[str] = None,
     ) -> dict:
         """Poll the WhisperJob registry for a running/done job.
 
@@ -604,7 +607,8 @@ def _build_app():
         - pending/running: return status + ETA.
         - error: return status=error + error_code + message.
         - done: Phase 7 — deliver the transcript via build_page (same shape as
-          get_youtube_transcript, mode=full). Replaces the Phase 6 stub.
+          get_youtube_transcript, mode=full), including cursor continuation for
+          long transcripts. Replaces the Phase 6 stub.
         - not found: return not_found with re-call instruction.
 
         Ownership (docs/notes/auth.md §Job ownership): the poller's
@@ -711,7 +715,14 @@ def _build_app():
                 ),
             }
 
-        return pagination.build_page(hit, mode="full", filter_args={}, settings=settings)
+        return pagination.build_page(
+            hit,
+            mode="full",
+            filter_args={},
+            settings=settings,
+            cursor=cursor,
+            cursor_restart_tool="get_transcript_job",
+        )
 
     # -----------------------------------------------------------------------
     # Custom route: /ytt/health (unauthenticated liveness probe)
