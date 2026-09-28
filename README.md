@@ -18,10 +18,19 @@ docker run --rm \
   -e YTT_ALLOWED_SUBJECTS=your-oauth-subject \
   -e YTT_OAUTH_CLIENT_ID=your-oauth-client-id \
   -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
-  -e YTT_WHISPER_URL=http://your-whisper:8000 \
   -p 8080:8080 \
   ghcr.io/jedarden/ytt:0.2.26
 ```
+
+`YTT_WHISPER_URL` is optional for captioned videos, so the quick start above
+leaves it out. Leaving it unset uses ytt's built-in reference Whisper endpoint
+when a caption-less video needs ASR. For an explicit caption-only deployment,
+set `YTT_WHISPER_URL` to an empty value: caption-less requests first return
+`status="pending"` from `get_youtube_transcript`, then
+`status="error"` with `error_code="asr_failed"` from
+`get_transcript_job`. `no_captions_asr_failed` is a metrics-only label, not a
+tool error code. Add `-e YTT_WHISPER_URL=http://your-whisper:8000` to
+transcribe caption-less videos.
 
 The OAuth client pair and `YTT_PUBLIC_URL` are startup-required — the server
 exits 1 without them, and `YTT_PUBLIC_URL` has **no fallback**: the OAuth
@@ -58,7 +67,7 @@ Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-
 | Requirement | Notes |
 |-------------|-------|
 | **Residential egress IP** | YouTube blocks datacenter IPs. Self-hosted on a home server or residential VPS works natively. For VPS/cloud, set `YTT_PROXY_URL` to a residential proxy (e.g. Webshare). |
-| **Whisper endpoint** | Required only for videos without captions. Point `YTT_WHISPER_URL` at any OpenAI-compatible ASR service (`/v1/audio/transcriptions`). Run [whisper-openai](https://github.com/stpb/whisper-openai) locally, or skip and accept `no_captions_asr_failed` for caption-less videos. |
+| **Whisper endpoint** | Optional for captioned videos. Leaving `YTT_WHISPER_URL` unset uses the built-in reference endpoint; set it to any reachable OpenAI-compatible ASR service (`/v1/audio/transcriptions`) to transcribe caption-less videos. For explicit caption-only mode, set it to an empty value; caption-less requests end with `asr_failed` after the initial `pending` response. |
 | **Single replica** | In-process state (LRU cache, single-flight, Whisper job registry). Scale-out requires a redesign. |
 | **Auth required** | OAuth 2.1 with a subject allowlist. Empty allowlist = deny all. |
 
