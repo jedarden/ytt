@@ -1,0 +1,162 @@
+---
+# One-pass, same-egress diagnostic for the caption-track HTTP 429 incident.
+#
+# This is deliberately a Deployment rather than a Job: Jobs are banned in this
+# GitOps tree, while a Deployment remains continuously owned and prunable by
+# ArgoCD.  The probe is idempotent with respect to application state: it reads
+# a fixed video-ID set, never mounts or writes the ytt cache, logs no transcript
+# text, and waits forever after its single pass.  A pod replacement can repeat
+# the read-only probe, so requests are paced eight seconds apart and replicas
+# stay at one.
+#
+# The fixed IDs are the 36 unique cache_miss entries correlated in
+# VictoriaLogs with the retained upstream caption-track HTTP 429 failures.
+# Results are JSON lines with only video ID, status/error classification,
+# served language, source, segment/character counts, and elapsed time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-caption-retest
+  namespace: ytt
+  labels:
+    app: ytt-caption-retest
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: diagnostic
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytt-caption-retest
+  template:
+    metadata:
+      labels:
+        app: ytt-caption-retest
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: diagnostic
+      annotations:
+        ytt.ardenone.com/caption-retest-run: "20260928-v1"
+    spec:
+      automountServiceAccountToken: false
+      # Match the live ytt server's node so the diagnostic uses the same host
+      # network path as the failures being investigated.
+      nodeSelector:
+        kubernetes.io/hostname: k3s-agent-minisforum
+      imagePullSecrets:
+        - name: docker-hub-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: caption-retest
+          image: ronaldraygun/ytt:0.2.26
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-u", "-c"]
+          args:
+            - |
+              import asyncio
+              import json
+              import threading
+              import time
+
+              from ytt.config import Settings
+              from ytt.fetch import fetch_transcript
+              from ytt.observability import redact_credentials
+
+              run_id = "20260928-v1"
+              video_ids = [
+                  "1DaMkTuiCEQ", "3lUyMZpAb6g", "75tja_RxKn4", "82u2qUjnJ6E",
+                  "86ptx1cYv5c", "8DgRqDukf-U", "8zHUvixZAtg", "9KOau7CLCCU",
+                  "9kacICxX8AY", "BA_fC95p43c", "DlQyXhjH2jE", "GFtFIxrAjIs",
+                  "GlW4N7p5KS8", "IG3ZYezz7b0", "MnwCQZ_6Ssg", "Oa3MUGsFays",
+                  "SCBJVRFX_D8", "T1H_TWuaYao", "TwT8oJpZYM0", "UGDIdJh0w_0",
+                  "XG6pZQvum8Q", "YcuCM3IF_VU", "YrO9TArSK6o", "ZH6zuWDcEGg",
+                  "a9YpxcbBI9g", "cmnXNkby2SE", "d2W4C2lBfaM", "f25UQrHhZo8",
+                  "h-mDRcIRD5Y", "iWmTuDAHl7Q", "iqEFMb1aKNU", "izoYwxgMv8s",
+                  "t-zltcuUasM", "wfn9DU6Yxdc", "xYULUSKqQIk", "zlit6xVbf_o",
+              ]
+              delay_sec = 8.0
+              settings = Settings()
+              outcomes = {}
+
+              print(json.dumps({
+                  "event": "caption_retest_started",
+                  "run_id": run_id,
+                  "video_count": len(video_ids),
+                  "delay_sec": delay_sec,
+              }), flush=True)
+
+              for index, video_id in enumerate(video_ids, start=1):
+                  started = time.monotonic()
+                  try:
+                      # Use the same timeout-bounded public caption fetch path
+                      # as the MCP tool, but bypass cache/rate-limit state and
+                      # never persist the returned transcript.
+                      result = asyncio.run(fetch_transcript(video_id, None, settings))
+                      status = "ok"
+                      outcomes[status] = outcomes.get(status, 0) + 1
+                      record = {
+                          "event": "caption_retest_result",
+                          "run_id": run_id,
+                          "index": index,
+                          "video_id": video_id,
+                          "status": status,
+                          "source": result.source,
+                          "served_lang": result.served_lang,
+                          "segments": len(result.segments),
+                          "chars": sum(len(segment.text) for segment in result.segments),
+                          "seconds": round(time.monotonic() - started, 2),
+                      }
+                  except Exception as exc:
+                      error_code = getattr(exc, "error_code", type(exc).__name__)
+                      status = f"error:{error_code}"
+                      outcomes[status] = outcomes.get(status, 0) + 1
+                      record = {
+                          "event": "caption_retest_result",
+                          "run_id": run_id,
+                          "index": index,
+                          "video_id": video_id,
+                          "status": "error",
+                          "error_code": error_code,
+                          "message": redact_credentials(str(exc))[:300],
+                          "seconds": round(time.monotonic() - started, 2),
+                      }
+
+                  print(json.dumps(record, sort_keys=True), flush=True)
+                  if index != len(video_ids):
+                      time.sleep(delay_sec)
+
+              print(json.dumps({
+                  "event": "caption_retest_completed",
+                  "run_id": run_id,
+                  "video_count": len(video_ids),
+                  "outcomes": outcomes,
+              }, sort_keys=True), flush=True)
+
+              # Deployment pods must remain running.  Waiting after the single
+              # pass prevents the controller from turning completion into a
+              # hot restart loop that repeatedly calls YouTube.
+              threading.Event().wait()
+          env:
+            - name: YTT_PUBLIC_URL
+              value: "https://mcp.ardenone.com/ytt"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+              ephemeral-storage: "50Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+              ephemeral-storage: "200Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
