@@ -33,11 +33,13 @@ from starlette.testclient import TestClient
 
 def test_metrics_exist():
     """All required Prometheus metrics must be registered with the correct names."""
+    from ytt.canary import (  # noqa: F401
+        ytt_canary_failures_total,
+        ytt_canary_last_success_timestamp_seconds,
+    )
     from ytt.observability import (  # noqa: F401
         ytt_cache_bytes,
         ytt_cache_evictions_total,
-        ytt_canary_failures_total,
-        ytt_canary_last_success_timestamp_seconds,
         ytt_egress_is_residential,
         ytt_fetch_blocks_total,
         ytt_fetch_empty_body_total,
@@ -61,6 +63,8 @@ def test_metrics_exist():
         "ytt_queue_depth",          # Gauge
         "ytt_rate_limited",         # Counter
         "ytt_egress_is_residential",  # Gauge
+        # canary pair — registered by ytt.canary (imported above), never by
+        # ytt.observability: the server process must not export them
         "ytt_canary_last_success_timestamp_seconds",  # Gauge
         "ytt_canary_failures",      # Counter
     }

@@ -74,11 +74,18 @@ Four properties of these series that matter when reading them:
   healthy state — a cycle in which everything failed already walked the
   whole list.
 
-The **server** pod also exports the overall pair — registered at import,
-never updated (the server process runs no probe loop).  Only the
-`job="ytt-canary"` series are meaningful; the server's copies sit at their
-boot values.  Series from an image **older** than this change carry only
-the overall pair (see §6).
+The **server** pod exports **no** canary series.  All four metrics are
+registered by `ytt/canary.py`, which only the canary process imports — the
+server process imports `ytt.observability` but never `ytt/canary.py`, so
+its `/ytt/metrics` carries no `ytt_canary_*` series at all.  A
+`ytt_canary_*` series labelled with a server pod/job is a deployment bug,
+not a reading problem: the overall pair once lived in `ytt.observability`,
+so the server published a zero-valued
+`ytt_canary_last_success_timestamp_seconds` whose staleness satisfied
+`YttCanaryFailed` permanently (observed live 2026-09-27 as the single
+permanently-firing critical alert; fixed by moving the pair into
+`ytt/canary.py` — bead `ytt-e919c8d1`).  A server image **older** than
+that fix exports the bogus series until it rolls (see §6).
 
 ## 2. Alert catalog
 
@@ -238,7 +245,9 @@ alert that resolved itself.
 Three artifacts must agree, and the suite enforces it
 (`tests/unit/test_canary_monitoring.py`):
 
-1. **Code** — `ytt/canary.py` defines the metric names, the
+1. **Code** — `ytt/canary.py` defines every `ytt_canary_*` metric name (the
+   overall pair and the per-path pair — none of them in
+   `ytt.observability`, which the server process imports), the
    `direct`/`via_proxy` vocabulary (pinned equal to
    `ytt.canary_gate.PROBE_ORDER`) and the outcome labels.
 2. **Rules** — `deploy/k8s/ardenone-cluster/ytt/prometheusrule.yml` (and
@@ -277,3 +286,16 @@ When the monitoring image is pinned, nothing here needs re-doing — the
 canary Deployment (it is deliberately unset in production; adding it is an
 operator decision, and until then the proxy-path alerts remain dormant by
 design, not by omission).
+
+The **server** Deployment has its own compatibility axis.  On images
+≤ 0.2.26 the overall pair is defined in `ytt.observability`, so the server
+pod publishes a zero-valued
+`ytt_canary_last_success_timestamp_seconds{job="ytt"}` that
+`YttCanaryFailed` matches forever — the alert fires even while the canary
+pod's own series is fresh.  The expression is deliberately left unchanged
+(the fix is to stop publishing the series, not to filter it in the rule),
+so the alert clears on its own once the server rolls to a fixed image: the
+bogus series stops being scraped, goes stale within a few scrape
+intervals, and an instant-vector expression no longer matches it.  Until
+that roll, ignore the `job="ytt"` copy of the alert's labels and triage on
+the `job="ytt-canary"` series (§3).

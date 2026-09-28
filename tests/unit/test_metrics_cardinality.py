@@ -20,7 +20,7 @@ family to the documented surface:
   one) without an entry in :data:`YTT_DOCUMENTED_SURFACE` — the exposition
   and the docs cannot drift apart silently.
 
-Two scrapes, one per deployment that serves ``ytt_*`` series:
+Three scrapes, one per deployment that serves ``ytt_*`` series:
 
 1. the real ASGI app's unauthenticated ``GET /ytt/metrics`` — the body the
    public internet can read (Starlette ``TestClient``, as
@@ -31,7 +31,18 @@ Two scrapes, one per deployment that serves ``ytt_*`` series:
    ServiceMonitor scrapes.  In-process scraping cannot isolate that
    registry: the pytest process has usually imported both modules into its
    own default registry already, so a subprocess is the only faithful
-   "canary registry".
+   "canary registry";
+3. a fresh interpreter shaped like the server Deployment (``import
+   ytt.server``, scrape ``/ytt/metrics`` through the real app) — same
+   isolation problem, opposite direction: this is the leg that proves the
+   server process registers **no** ``ytt_canary_*`` family.  It used to:
+   the overall pair lived in ``ytt.observability``, so the server published
+   a zero-valued ``ytt_canary_last_success_timestamp_seconds`` whose
+   staleness satisfied ``YttCanaryFailed`` permanently (bead
+   ``ytt-e919c8d1``).  The in-process legs above cannot catch that class of
+   leak — the pytest process registers both modules' metrics into one
+   shared registry — so the per-process shape is pinned where it is
+   observable.
 
 The reserved structural labels the exposition format itself attaches
 (``le`` on histogram buckets, ``quantile`` on summaries) are library-owned
@@ -61,7 +72,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: label keys that family may carry.  A family or key outside this table is a
 #: test failure, not a docs update: the public-safe claim is load-bearing.
 YTT_DOCUMENTED_SURFACE: dict[str, frozenset[str]] = {
-    # --- ytt.observability (registered in both processes) -------------------
+    # --- ytt.observability (registered in the server process too) -----------
     "ytt_fetch_blocks": frozenset({"outcome"}),
     "ytt_fetch_empty_body": frozenset(),
     "ytt_whisper_errors": frozenset({"reason"}),
@@ -71,19 +82,23 @@ YTT_DOCUMENTED_SURFACE: dict[str, frozenset[str]] = {
     "ytt_queue_depth": frozenset(),
     "ytt_rate_limited": frozenset({"subject_hash"}),
     "ytt_egress_is_residential": frozenset(),
+    # --- ytt.canary (registered in the canary Deployment's process only) ---
     "ytt_canary_last_success_timestamp_seconds": frozenset(),
     "ytt_canary_failures": frozenset(),
-    # --- ytt.canary (registered in the canary Deployment's process only) ---
     "ytt_canary_probe_last_success_timestamp_seconds": frozenset({"probe"}),
     "ytt_canary_probes": frozenset({"probe", "outcome"}),
 }
 
-#: Families only ``ytt.canary`` registers.  Optional on the main server's
-#: scrape (present iff that process imported ``ytt.canary`` — production
-#: never does; a pytest run that collected any canary test module always
-#: does), required on the canary's own.
+#: Families only ``ytt.canary`` registers — defined in ``ytt/canary.py``,
+#: which only the canary process imports.  Required on the canary's own
+#: ``:8081`` scrape, **forbidden** on the main server's: a canary metric
+#: registered in the server process publishes a default-value series that
+#: never updates, and a zero ``ytt_canary_last_success_timestamp_seconds``
+#: satisfies ``YttCanaryFailed`` forever (bead ``ytt-e919c8d1``).
 CANARY_ONLY_FAMILIES = frozenset(
     {
+        "ytt_canary_last_success_timestamp_seconds",
+        "ytt_canary_failures",
         "ytt_canary_probe_last_success_timestamp_seconds",
         "ytt_canary_probes",
     }
@@ -136,6 +151,17 @@ _CANARY_SCRAPE_SNIPPET = (
     "print(generate_latest(REGISTRY).decode(), end='')\n"
 )
 
+#: The server Deployment's whole ytt import surface is ``ytt.server``
+#: (``CMD ["ytt", "serve"]``); its scrape is the app's own ``/ytt/metrics``
+#: route.  The fresh interpreter must carry no ``ytt_canary_*`` family.
+_SERVER_SCRAPE_SNIPPET = (
+    "import ytt.server  # the server Deployment's whole ytt import surface\n"
+    "from starlette.testclient import TestClient\n"
+    "from ytt.server import build_asgi_app\n"
+    "with TestClient(build_asgi_app(), raise_server_exceptions=True) as client:\n"
+    "    print(client.get('/ytt/metrics').text, end='')\n"
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -165,7 +191,11 @@ def _identifier_shaped(label_key: str) -> bool:
 
 
 def _assert_bounded_public_surface(
-    body: str, *, required_families: frozenset[str], context: str
+    body: str,
+    *,
+    required_families: frozenset[str],
+    context: str,
+    forbidden_families: frozenset[str] = frozenset(),
 ) -> None:
     """Hold one exposition body to the documented aggregate surface.
 
@@ -173,8 +203,11 @@ def _assert_bounded_public_surface(
     library default), each sample labelled with exactly that family's
     documented keys, and every label value a bounded vocabulary token (an
     8-hex ``subject_hash`` where subjects appear at all).  Also asserts no
-    required family went missing.  Violations accumulate so one run reports
-    every problem instead of the first.
+    required family went missing and no *forbidden* family appeared (used
+    where the producing process is known precisely — a fresh interpreter —
+    so a family that process must never register is a failure, not an
+    accident).  Violations accumulate so one run reports every problem
+    instead of the first.
     """
     problems: list[str] = []
     seen: set[str] = set()
@@ -245,7 +278,41 @@ def _assert_bounded_public_surface(
             "change, not an accident"
         )
 
+    forbidden = forbidden_families & seen
+    if forbidden:
+        problems.append(
+            f"{context}: canary-only families on a scrape that must not "
+            f"carry them ({sorted(forbidden)}) — ytt_canary_* series belong "
+            "to the canary Deployment's process only; a server-side "
+            "registration publishes a never-updated default-value series "
+            "(the permanently-firing YttCanaryFailed bug, bead "
+            "ytt-e919c8d1)"
+        )
+
     assert not problems, "\n".join(problems)
+
+
+def _subprocess_scrape(snippet: str, shape: str) -> str:
+    """The exposition body from a fresh interpreter shaped like one Deployment.
+
+    A subprocess is the only faithful way to observe either process's
+    registry from the suite: this pytest process has usually imported both
+    modules into its own default registry already, so an in-process scrape
+    cannot tell which process would carry which family.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"the {shape}-shaped interpreter failed to produce a registry scrape "
+        f"(exit {proc.returncode}):\n{proc.stderr[-2000:]}"
+    )
+    return proc.stdout
 
 
 def _canary_registry_scrape() -> str:
@@ -254,23 +321,25 @@ def _canary_registry_scrape() -> str:
     The canary Deployment's process is ``import ytt.canary`` (plus its
     transitive ``ytt.observability``) and nothing else; the ServiceMonitor's
     ``:8081`` scrape is ``generate_latest`` of exactly that default
-    registry.  A subprocess is the only faithful way to observe it from the
-    suite — this pytest process may already hold both modules' registrations
-    in its own default registry.
+    registry.
     """
-    proc = subprocess.run(
-        [sys.executable, "-c", _CANARY_SCRAPE_SNIPPET],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
+    return _subprocess_scrape(
+        _CANARY_SCRAPE_SNIPPET, "canary (import ytt.canary)"
     )
-    assert proc.returncode == 0, (
-        "the canary-shaped interpreter failed to produce a registry scrape "
-        f"(exit {proc.returncode}):\n{proc.stderr[-2000:]}"
-    )
-    return proc.stdout
+
+
+def _server_registry_scrape() -> str:
+    """The ``/ytt/metrics`` body from a fresh interpreter shaped like the server.
+
+    The server Deployment's process is ``CMD ["ytt", "serve"]`` — ``import
+    ytt.server``, which pulls in ``ytt.observability`` for its own metrics
+    but never ``ytt.canary``.  The app itself serves the scrape
+    (``generate_latest(REGISTRY)``), so the body is fetched through the real
+    ASGI app exactly as the ServiceMonitor sees it — in a fresh interpreter,
+    so the canary registrations this pytest process may already hold cannot
+    mask a server-side leak.
+    """
+    return _subprocess_scrape(_SERVER_SCRAPE_SNIPPET, "server (import ytt.server)")
 
 
 # ---------------------------------------------------------------------------
@@ -315,4 +384,20 @@ def test_canary_registry_scrape_is_bounded_to_the_documented_surface():
         _canary_registry_scrape(),
         required_families=CANARY_REQUIRED_FAMILIES,
         context="canary :8081 registry (fresh import of ytt.canary)",
+    )
+
+
+def test_server_registry_scrape_carries_no_canary_series():
+    """The server Deployment's ``/ytt/metrics`` — a fresh interpreter shaped
+    like ``CMD ["ytt", "serve"]`` — exports every server family and **no**
+    ``ytt_canary_*`` family.  The canary metrics are the probe loop's
+    signal: registered in the server process they would sit at their
+    default values forever, and the zero-valued overall gauge satisfies
+    ``YttCanaryFailed`` unconditionally (the permanently-firing critical
+    alert this pins shut, bead ``ytt-e919c8d1``)."""
+    _assert_bounded_public_surface(
+        _server_registry_scrape(),
+        required_families=SERVER_REQUIRED_FAMILIES,
+        forbidden_families=CANARY_ONLY_FAMILIES,
+        context="server /ytt/metrics (fresh import of ytt.server)",
     )

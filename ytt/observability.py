@@ -134,21 +134,15 @@ ytt_egress_is_residential = Gauge(
     "1 if the current egress IP is classified as residential, 0 if datacenter.",
 )
 
-# ---------------------------------------------------------------------------
-# Canary metrics (consumed by the standalone canary Deployment — plan §Canary)
-# ---------------------------------------------------------------------------
-
-#: Unix timestamp of the last successful canary probe.
-ytt_canary_last_success_timestamp_seconds = Gauge(
-    "ytt_canary_last_success_timestamp_seconds",
-    "Unix timestamp of the last successful canary yt-dlp probe.",
-)
-
-#: Cumulative canary probe failures.
-ytt_canary_failures_total = Counter(
-    "ytt_canary_failures_total",
-    "Total canary yt-dlp probe failures.",
-)
+# NOTE: the canary metrics (``ytt_canary_last_success_timestamp_seconds``,
+# ``ytt_canary_failures_total`` and the per-path pair) are deliberately NOT
+# defined here.  This module is imported by the server process (rate limiter,
+# egress gauge) which never runs the probe loop — a metric registered here
+# leaks a default-value series into the server's ``/ytt/metrics`` scrape, and
+# a zero ``ytt_canary_last_success_timestamp_seconds`` satisfies
+# ``YttCanaryFailed`` forever (the permanently-firing alert fixed by moving
+# the pair into ``ytt.canary``, bead ``ytt-e919c8d1``).  All four live in
+# ``ytt/canary.py``, which only the canary process imports.
 
 # ---------------------------------------------------------------------------
 # Structlog redaction filter

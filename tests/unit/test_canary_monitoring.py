@@ -3,10 +3,17 @@
 Binds the three artifacts of standing canary monitoring together so they
 cannot drift apart silently (bead ytt-2b3ca59e):
 
-1. **Code** — ``ytt/canary.py``: the per-path probe metrics
+1. **Code** — ``ytt/canary.py``: all four ``ytt_canary_*`` metrics — the
+   overall pair (``ytt_canary_last_success_timestamp_seconds``,
+   ``ytt_canary_failures_total``) and the per-path pair
    (``ytt_canary_probe_last_success_timestamp_seconds{probe}``,
-   ``ytt_canary_probes_total{probe, outcome}``), the shared
+   ``ytt_canary_probes_total{probe, outcome}``) — the shared
    ``direct|via_proxy`` vocabulary and the boot-initialization semantics.
+   All four register here and nowhere else: the server process imports
+   ``ytt.observability`` but never this module, so a server scrape carries
+   no canary series (a zero-valued overall gauge on the server pinned
+   ``YttCanaryFailed`` firing permanently until the pair moved — bead
+   ``ytt-e919c8d1``).
 2. **Rules** — ``deploy/k8s/ardenone-cluster/ytt/prometheusrule.yml``: the
    four ``YttCanary*`` alerts, their expressions and severities.
 3. **Runbook** — ``deploy/CANARY-MONITORING-RUNBOOK.md``: the signal
@@ -316,6 +323,29 @@ def test_outcome_labels_are_ok_plus_real_error_codes():
     assert set(CANARY_PROBE_OUTCOMES[1:]) <= real_codes
 
 
+def test_canary_metrics_register_in_the_canary_process_only():
+    """Every canary metric lives in ``ytt.canary`` — none in
+    ``ytt.observability``.  The server process imports the latter (rate
+    limiter, egress gauge) but never the former, so this is what keeps a
+    ``ytt_canary_*`` series off the server's scrape: the pair used to be
+    defined in ``ytt.observability``, the server published the gauge at its
+    default 0, and that never-updating series satisfied
+    ``YttCanaryFailed`` permanently (bead ``ytt-e919c8d1``)."""
+    import ytt.observability
+
+    for name in (
+        "ytt_canary_last_success_timestamp_seconds",
+        "ytt_canary_failures_total",
+        "ytt_canary_probe_last_success_timestamp_seconds",
+        "ytt_canary_probes_total",
+    ):
+        assert not hasattr(ytt.observability, name), (
+            f"{name} is back in ytt.observability — the server process "
+            "would publish a dead series for it again"
+        )
+        assert hasattr(canary, name), f"{name} missing from ytt.canary"
+
+
 # ---------------------------------------------------------------------------
 # Drift guards — rules ↔ runbook ↔ code
 # ---------------------------------------------------------------------------
@@ -365,19 +395,19 @@ class TestPrometheusRule:
         assert probes <= set(canary.PROBE_LABELS)
 
     def test_every_rule_metric_is_defined_in_code(self):
-        """Each ytt_canary_* name an alert references must be a metric the
-        code actually defines — a renamed metric would otherwise silence
-        the alert (empty operand) instead of failing anything."""
+        """Each ytt_canary_* name an alert references must be a metric
+        ``ytt/canary.py`` actually defines — a renamed metric would
+        otherwise silence the alert (empty operand) instead of failing
+        anything.  canary.py is the only legitimate home: a definition in
+        ``ytt/observability.py`` leaks the series into the server process
+        (see test_canary_metrics_register_in_the_canary_process_only)."""
         canary_src = (REPO_ROOT / "ytt" / "canary.py").read_text(encoding="utf-8")
-        observability_src = (REPO_ROOT / "ytt" / "observability.py").read_text(
-            encoding="utf-8"
-        )
         for alert in CANARY_ALERTS:
             for name in set(
                 re.findall(r"\byt\w*canary\w*_\w+\b", _rules()[alert]["expr"])
             ):
-                assert name in canary_src or name in observability_src, (
-                    f"{alert} references {name}, defined nowhere in code"
+                assert name in canary_src, (
+                    f"{alert} references {name}, defined nowhere in ytt/canary.py"
                 )
 
 

@@ -40,7 +40,11 @@ PrometheusRule: fire ``YttCanaryFailed`` if
 
 The canary Deployment is separate from the main ytt server; it has its own
 ``/metrics`` port (8081 by default) scraped by a ``ServiceMonitor`` referencing
-``app=ytt-canary``.
+``app=ytt-canary``.  All four ``ytt_canary_*`` metrics are registered by *this*
+module, which only the canary process imports — the server's scrape therefore
+carries no canary series at all, and a ``ytt_canary_*`` series labelled with a
+server pod is a deployment bug (a zero-valued overall gauge there pins
+``YttCanaryFailed`` firing forever).
 
 Usage (within the canary Deployment):
     CMD ["ytt", "canary"]   — or directly: python -m ytt.canary
@@ -62,8 +66,6 @@ from prometheus_client import REGISTRY, Counter, Gauge, start_http_server
 from ytt.observability import (
     configure_stdlib_logging,
     redact_credentials,
-    ytt_canary_failures_total,
-    ytt_canary_last_success_timestamp_seconds,
 )
 
 log = logging.getLogger(__name__)
@@ -95,10 +97,25 @@ PROBE_DIRECT = "direct"
 PROBE_VIA_PROXY = "via_proxy"
 PROBE_LABELS: tuple[str, ...] = (PROBE_DIRECT, PROBE_VIA_PROXY)
 
-# These two live here rather than in ytt.observability (the home of the
-# overall pair above) because only this module's probe loop emits them: the
-# canary process registers them, the server process never does, and a
-# missing series on the server scrape means exactly that.
+# All four metrics live here rather than in ytt.observability (the home of
+# the server's own series) because only this module's probe loop emits them:
+# this module registers them and only the canary process imports this module,
+# so the server's scrape carries no ytt_canary_* series at all.  The overall
+# pair used to be defined in ytt.observability — the server process imports
+# that module for its own metrics, so it published the gauge at its default
+# 0, and that always-stale series satisfied YttCanaryFailed permanently (bead
+# ytt-e919c8d1).
+ytt_canary_last_success_timestamp_seconds = Gauge(
+    "ytt_canary_last_success_timestamp_seconds",
+    "Unix timestamp of the last successful canary yt-dlp probe.",
+)
+
+#: Cumulative canary probe failures.
+ytt_canary_failures_total = Counter(
+    "ytt_canary_failures_total",
+    "Total canary yt-dlp probe failures.",
+)
+
 ytt_canary_probe_last_success_timestamp_seconds = Gauge(
     "ytt_canary_probe_last_success_timestamp_seconds",
     "Unix timestamp of the last successful canary probe by path "

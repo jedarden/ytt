@@ -59,6 +59,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The server pod no longer exports a dead zero
+  `ytt_canary_last_success_timestamp_seconds` series** (bead
+  `ytt-e919c8d1`): the overall canary
+  pair was registered at import of `ytt.observability`, which the server
+  process imports for its own metrics (rate limiter, egress gauge) while
+  never running the probe loop — so its public `/ytt/metrics` published the
+  gauge at the prometheus_client default of 0, and that never-updating
+  series satisfied `YttCanaryFailed`
+  (`time() - ytt_canary_last_success_timestamp_seconds > 1800`)
+  unconditionally: the critical alert fired permanently off a server-side
+  artifact while a real canary outage would have added zero new signal.
+  The pair moved into `ytt/canary.py` beside the per-path pair, which only
+  the canary Deployment's process imports — the server scrape now carries
+  no `ytt_canary_*` series at all.  The alert expression is unchanged (the
+  fix stops publishing the series instead of filtering it in the rule);
+  the alert clears by itself once the server rolls to a fixed image and
+  the bogus series goes stale.  Pinned three ways:
+  `tests/unit/test_canary_monitoring.py` asserts the metrics register in
+  `ytt.canary` and nowhere else, and
+  `tests/unit/test_metrics_cardinality.py` scrapes fresh server-shaped and
+  canary-shaped interpreters, requiring every documented family on the
+  canary's `:8081` registry and no canary family on the server's
+  `/ytt/metrics`.
+
 - **Default-language calls never hit the cache** (bead `ytt-83eaa5f6`): the
   cache-first lookup keyed on `(video_id, "")` for every default-language
   request, but fetches are stored under the *served* lang — `(video_id, "en")`

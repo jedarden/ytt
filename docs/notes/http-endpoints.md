@@ -176,6 +176,16 @@ comment.
   re-probed by each authenticated `/ytt/admin/egress` call (next section) —
   never by a scrape. It is registered at import time, so the series is
   always present at 0 or 1.
+- **No canary series.** Every `ytt_canary_*` metric is registered by
+  `ytt/canary.py`, which only the canary Deployment's process imports; this
+  body carries none of them.  The overall pair used to be defined in
+  `ytt.observability` — imported here for the rate limiter and the egress
+  gauge — so the server published a zero-valued
+  `ytt_canary_last_success_timestamp_seconds` whose staleness satisfied
+  `YttCanaryFailed` permanently (the permanently-firing critical alert,
+  bead `ytt-e919c8d1`).  The per-process split is pinned, not conventional:
+  `tests/unit/test_metrics_cardinality.py` also scrapes this body from a
+  fresh server-shaped interpreter and fails on any canary family.
 - **Side effects: none.** A scrape is a read-only snapshot of counters that
   the fetch/ASR path increments; it never starts work (a monitor scraping
   more often cannot speed up — or break — the pipeline).
@@ -242,11 +252,13 @@ nothing outside the cluster can reach it. Two properties matter:
   on the same process-wide registry the probes write.
 - That registry is process-wide: because the canary imports
   `ytt.observability`, :8081 serves every registered `ytt_*` series (the
-  `ytt_canary_*` gauges the alert fires on, plus the library's counters) —
-  all aggregate-only, so the public-safe invariant holds there too (pinned by
-  the same module: a fresh canary-shaped registry — `import ytt.canary` and
-  nothing else, the exact import surface of the Deployment's process — must
-  expose exactly the documented family set). Its
+  shared server-side counters, plus all four `ytt_canary_*` metrics the
+  alerts fire on — registered by `ytt/canary.py` alone, so this process is
+  their only exporter) — all aggregate-only, so the public-safe invariant
+  holds there too (pinned by the same module: a fresh canary-shaped
+  registry — `import ytt.canary` and nothing else, the exact import surface
+  of the Deployment's process — must expose exactly the documented family
+  set, and the server-shaped one must expose none of these). Its
   Kubernetes liveness probe deliberately targets `/metrics` (always-200
   while the process serves HTTP).
 
