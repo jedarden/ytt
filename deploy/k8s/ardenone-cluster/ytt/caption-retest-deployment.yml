@@ -39,10 +39,6 @@ spec:
         ytt.ardenone.com/caption-retest-run: "20260928-v1"
     spec:
       automountServiceAccountToken: false
-      # Match the live ytt server's node so the diagnostic uses the same host
-      # network path as the failures being investigated.
-      nodeSelector:
-        kubernetes.io/hostname: k3s-agent-minisforum
       imagePullSecrets:
         - name: docker-hub-registry
       securityContext:
