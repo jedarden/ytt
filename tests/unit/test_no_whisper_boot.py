@@ -59,20 +59,13 @@ from __future__ import annotations
 
 import httpx
 
-from ytt.config import Settings, get_settings
+from ytt.config import DEFAULT_WHISPER_URL, Settings, get_settings
 from tests.unit._mcp_asgi_harness import open_asgi_client
 from tests.unit._mcp_asgi_harness import (  # noqa: F401
     allowlisted_subject,
     authorized_bearer,
     hermetic_egress,
 )
-
-#: The declared default — the reference in-cluster endpoint the runbook's
-#: §5 "unset never means disabled" sentence names; the same literal
-#: ``test_asr_runbook.py`` pins as ``DEFAULT_WHISPER_URL`` against the
-#: Settings schema. Here it is the value an env-free *runtime* resolution
-#: must arrive at.
-DEFAULT_WHISPER_URL = "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
 
 #: The liveness probe path the deployment's httpGet targets — unauthenticated
 #: by contract (docs/notes/http-endpoints.md §"/ytt/health — liveness").

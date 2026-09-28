@@ -1,12 +1,15 @@
-"""Egress-boundary regression guard: no third-party transcript API, no PoToken provider.
+"""Egress-boundary regression guard: no managed transcript API, no PoToken provider.
 
 The documentation promise this module enforces:
 
-- README intro: "All transcript fetching happens **inside the server** — no
-  third-party transcript APIs." Transcripts come from exactly two places —
-  yt-dlp talking to YouTube (cookie-free, PoToken-avoiding player clients,
-  ``docs/notes/yt-dlp-player-client.md``) and the configured
-  ``YTT_WHISPER_URL`` ASR service for caption-less videos.
+- README intro: transcript retrieval is orchestrated inside the server and
+  does not call managed/third-party YouTube transcript APIs. Captions come
+  from yt-dlp talking to YouTube (cookie-free, PoToken-avoiding player
+  clients, ``docs/notes/yt-dlp-player-client.md``); caption-less audio goes
+  to the explicitly sanctioned ``YTT_WHISPER_URL`` ASR service. Its unset
+  default is the project-operated reference endpoint, not a managed
+  transcript provider; the audio-egress disclosure is in
+  ``docs/notes/reference-asr.md``.
 - ``docs/notes/proxy-egress.md``: the full traffic table — what dials where,
   what may ride the residential proxy, what never does.
 - ``docs/research/managed-transcript-apis.md``: the managed transcript APIs
@@ -161,24 +164,31 @@ def _assert_recorded_hosts_are_sanctioned(
     *,
     whisper_url: str | None = None,
 ) -> None:
-    """Every recorded URL must be YouTube- or (for ASR) the configured Whisper."""
+    """Every URL is YouTube or the explicitly sanctioned ASR endpoint.
+
+    The ASR endpoint is an intentional exception to the managed-transcript
+    API guard: its unset value is the project-operated reference service, and
+    a non-empty override is an operator decision documented by
+    ``docs/notes/reference-asr.md``.
+    """
     whisper_hosts = {urlparse(whisper_url).hostname} if whisper_url else set()
     for url in urls:
         host = urlparse(url).hostname or ""
         forbidden = _forbidden_host_pattern(host)
         assert not forbidden, (
             f"{what} recorded egress to {host!r} (matched forbidden pattern "
-            f"{forbidden!r}) — a third-party transcript API / PoToken "
+            f"{forbidden!r}) — a managed/third-party transcript API / PoToken "
             "provider / out-of-scope host on the transcript path. This "
-            "breaks the documented no-third-party promise (README intro, "
-            "docs/notes/proxy-egress.md)."
+            "breaks the scoped no-managed-transcript-API promise (README "
+            "intro, docs/notes/reference-asr.md, docs/notes/proxy-egress.md)."
         )
         assert _host_is_youtube(host) or host in whisper_hosts, (
             f"{what} recorded egress to {host!r}, which is neither a "
             "YouTube-controlled host nor the configured Whisper service "
             f"({sorted(h for h in whisper_hosts if h)}). The transcript "
-            "paths may only talk to YouTube (yt-dlp) and YTT_WHISPER_URL — "
-            "see docs/notes/proxy-egress.md."
+            "paths may only talk to YouTube (yt-dlp) and the explicitly "
+            "configured/reference YTT_WHISPER_URL ASR endpoint — see "
+            "docs/notes/reference-asr.md and docs/notes/proxy-egress.md."
         )
 
 
@@ -340,7 +350,7 @@ class TestDependencySurface:
             f"pyproject.toml declares {hits} — a managed transcript API or "
             "PoToken provider dependency. These were evaluated and rejected "
             "(docs/research/managed-transcript-apis.md); shipping one "
-            "contradicts the documented cookie-free, no-third-party "
+            "contradicts the documented cookie-free, no-managed-transcript-API "
             "posture."
         )
 

@@ -13,6 +13,7 @@ Related docs:
 | Doc | Covers |
 |---|---|
 | [docs/notes/whisper-lifecycle.md](../docs/notes/whisper-lifecycle.md) | The job FSM/polling/restart contract this runbook operates — clause-level reference, pinned by `tests/unit/test_whisper_contract.py` |
+| [docs/notes/reference-asr.md](../docs/notes/reference-asr.md) | The unset `YTT_WHISPER_URL` endpoint provenance, response/error contract, audio-egress disclosure, and the reference-vs-BYO policy boundary |
 | [RUNBOOK.md](RUNBOOK.md) | Upgrade/rollback swaps, §2.1 "in-flight ASR jobs are lost", forbidden kubectl |
 | [CACHE-RUNBOOK.md](CACHE-RUNBOOK.md) | The cache volume ASR results are written to; scratch-volume §7 |
 | [CANARY-MONITORING-RUNBOOK.md](CANARY-MONITORING-RUNBOOK.md) | Fetch-path (caption) failures — the canary never probes ASR |
@@ -153,32 +154,40 @@ the caller-visible symptom wall in §6.  `ytt_whisper_errors_total`,
 registered-but-uninstrumented by the acceptance suite so a future
 instrumentation change updates this section in the same commit.
 
-## 5. Scenario — Whisper unset (no-Whisper mode)
+## 5. Scenario — reference ASR default and explicit caption-only mode
 
 `YTT_WHISPER_URL` has a default (the reference in-cluster endpoint,
 `http://whisper-openai.whisper-stt.svc.cluster.local:8000`) — *unset never
-means disabled*, it means "point at the reference service".  Deliberate
-no-Whisper operation is a deployment choice: set the variable to an
-unreachable address (documented in docs/usage/configuration.md), or to an
-empty value.
+means disabled*, it means "point at the reference service". Deliberate
+caption-only operation is a deployment choice: set the variable to an empty
+value. The endpoint's project-operated provenance, operator override, first
+call shape, stable outage code, audio egress, and unchanged quota/proxy/
+ownership/lifecycle rules are specified in
+[docs/notes/reference-asr.md](../docs/notes/reference-asr.md). An unreachable
+non-empty URL is an outage, not caption-only mode.
 
-What callers see, either way:
+What callers see on a reference endpoint that is reachable, or on any
+operator-selected endpoint:
 
 1. Caption-less video → `pending` (the job gates never probe Whisper — job
    creation succeeds with Whisper down or absent).
-2. The job runs, downloads audio, then the POST fails immediately
-   (`request failed`) → poll returns `asr_failed`.
+2. The job runs, downloads audio, then the POST succeeds → the poll returns
+   the transcript; a long result uses the normal pagination shape.
 3. Captioned videos are unaffected, always.
+
+If the endpoint is unreachable or rejects work, the poll returns `asr_failed`.
+For explicit empty-value caption-only behavior, the first response remains
+`pending`, the later poll is `asr_failed`, and no HTTP(S) Whisper endpoint is
+dialed.
 
 Operator expectations: startup is **not** blocked by an absent/unreachable
 Whisper (the boot-time model guard swallows connection errors by design),
 health stays green, and the only signals are `whisper_job_error` /
-`asr_failed` on caption-less requests.  If you *meant* to disable ASR,
-nothing to fix; if not, restore `YTT_WHISPER_URL` via declarative-config
-(GitOps door — RUNBOOK §7).  Failed jobs still spend their quota slot
-(refunds happen only on joins/caps/registry faults), so a busy no-Whisper
-deployment also burns subjects' hourly budgets — one more reason to disable
-deliberately (`YTT_WHISPER_JOBS_PER_HOUR=0`) instead of letting jobs fail.
+`asr_failed` on caption-less requests. Failed jobs still spend their quota
+slot (refunds happen only on joins/caps/registry faults), so a busy outage
+also burns subjects' hourly budgets. If the reference endpoint is not
+intended for a self-hosted deployment, override or empty `YTT_WHISPER_URL`
+deliberately rather than relying on an unreachable cluster-local default.
 
 ## 6. Scenario — Whisper unreachable (down)
 

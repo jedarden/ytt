@@ -18,7 +18,7 @@ URL, unrewritten, to the outside world.
 |-----------|-------------|-------|
 | **Residential egress IP** | Required | YouTube blocks datacenter IPs. Home servers and residential VPS work natively. For cloud VPS, use `YTT_PROXY_URL` with a residential proxy (Webshare, etc.). Most commercial proxies are datacenter IPs and will NOT help. |
 | **HTTPS** | Required | The Anthropic MCP backend (the actual connector client) requires HTTPS. Use a reverse proxy (Traefik, Caddy, nginx) with a valid TLS cert. |
-| **Whisper endpoint** | Optional | Required only for videos without captions. Without it, caption-less videos return `no_captions_asr_failed`. |
+| **Whisper endpoint** | Optional | With `YTT_WHISPER_URL` unset, caption-less audio is sent to the project-operated reference endpoint. Set your own endpoint or use the empty value for explicit caption-only operation. |
 | **`ffmpeg`** | Bundled | The Docker image includes `ffmpeg` (needed by yt-dlp for audio remuxing in the Whisper path). |
 
 ---
@@ -271,6 +271,31 @@ its trailing slash also refuses to boot. Container-level checks (PVC vs cache
 budget, Whisper timeout invariant) run at serve time — read the startup log
 once before exposing anything.
 
+### Whisper default and audio egress
+
+The quick-start/default configuration leaves `YTT_WHISPER_URL` unset. That
+does **not** mean “no ASR”: it selects the project-operated reference service
+at `http://whisper-openai.whisper-stt.svc.cluster.local:8000`. On a
+caption-less request, ytt downloads the video's audio and sends it to that
+network endpoint; the endpoint is not bundled in the ytt image and the
+cluster-local name is not expected to resolve in a generic self-hosted
+deployment. Treat this as a default audio-egress disclosure, not as a local
+processing guarantee.
+
+Choose deliberately:
+
+- set `YTT_WHISPER_URL` to an OpenAI-compatible endpoint you operate or trust;
+- set it to an empty value (`YTT_WHISPER_URL=`) for caption-only operation; or
+- leave it unset only when the project-operated reference service is reachable
+  and acceptable for the audio you send.
+
+The first caption-less tool call is always `pending` and is completed by
+`get_transcript_job`; an unreachable or rejecting reference endpoint produces
+`asr_failed` on the poll. Quota, YouTube audio-download proxy behavior,
+subject-bound job handles, restart loss, cache retention, and TTLs are the
+same for reference and overridden ASR. See the complete
+[reference-ASR contract](../notes/reference-asr.md).
+
 ## Step 6 — Allow your subjects
 
 `YTT_ALLOWED_SUBJECTS` is checked against the token's **verified email claim**
@@ -405,10 +430,15 @@ Caption-less videos fail the documented way:
 `no_captions_asr_failed` labels metrics only — it is never returned as a
 tool `error_code` (see [tools.md](tools.md#no_captions_asr_failed-is-not-a-tool-error-code)).
 
-To disable ASR deliberately, set `YTT_WHISPER_URL` to an unreachable address
-or to an empty value — captions are unaffected either way. Leaving the
-variable unset is *not* disabled: it selects the built-in reference-endpoint
-default. Regression coverage: `tests/unit/test_caption_only_no_whisper.py`.
+To disable ASR deliberately, set `YTT_WHISPER_URL` to an empty value — captions are unaffected,
+and caption-less jobs take the documented `pending` then
+`asr_failed` path without dialing an HTTP(S) Whisper endpoint. An unreachable address
+(a non-empty URL) is an outage configuration, not caption-only mode: it follows
+the same `asr_failed` taxonomy as a reference-service outage and still spends
+the new-job quota. Leaving the variable unset selects the built-in reference-endpoint
+default, as described above. Regression coverage:
+`tests/unit/test_caption_only_no_whisper.py` guards this section and
+`tests/unit/test_no_whisper_captionless.py` guards the transport.
 
 ## Residential proxy setup (if needed)
 

@@ -4,10 +4,15 @@ A remote [MCP](https://modelcontextprotocol.io/) server that reliably downloads
 transcripts from pasted YouTube links, usable as a custom connector in Claude
 mobile and Claude desktop.
 
-All transcript fetching happens **inside the server** — no third-party transcript
-APIs.  Captions are extracted with [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-(json3, with rolling-caption dedup).  If a video has no captions, a
-[Whisper](https://github.com/openai/whisper)-compatible ASR service transcribes it.
+All transcript retrieval is orchestrated **inside the server** — no
+third-party transcript APIs are used for YouTube. ytt does not call managed
+transcript providers. Captions are extracted with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) (json3, with rolling-caption dedup).
+If a video has no captions, ytt downloads its audio and sends it to a
+Whisper-compatible ASR service: the project-operated reference endpoint by
+default, or the endpoint selected with `YTT_WHISPER_URL`. That default is
+network egress; it is not a model bundled in this image. See the
+[reference-ASR contract](docs/notes/reference-asr.md).
 
 ## Quick start (self-hosted)
 
@@ -23,14 +28,18 @@ docker run --rm \
 ```
 
 `YTT_WHISPER_URL` is optional for captioned videos, so the quick start above
-leaves it out. Leaving it unset uses ytt's built-in reference Whisper endpoint
-when a caption-less video needs ASR. For an explicit caption-only deployment,
-set `YTT_WHISPER_URL` to an empty value: caption-less requests first return
-`status="pending"` from `get_youtube_transcript`, then
-`status="error"` with `error_code="asr_failed"` from
-`get_transcript_job`. `no_captions_asr_failed` is a metrics-only label, not a
-tool error code. Add `-e YTT_WHISPER_URL=http://your-whisper:8000` to
-transcribe caption-less videos.
+leaves it out. Leaving it unset selects the project-operated reference service
+at `http://whisper-openai.whisper-stt.svc.cluster.local:8000` when a
+caption-less video needs ASR. This sends downloaded caller audio to that
+network endpoint; it is not local to the `ytt` container and may not be
+reachable from a generic self-hosted cluster. Set `YTT_WHISPER_URL` to an
+endpoint you operate or trust, or set it to an empty value for explicit
+caption-only operation. The first caption-less call still returns
+`status="pending"`; a reference-service outage or rejection is reported by
+`get_transcript_job` as `status="error"`, `error_code="asr_failed"`.
+`no_captions_asr_failed` is a metrics-only label, not a tool error code. The
+full endpoint, quota, proxy, ownership, retention, and egress contract is in
+the [reference-ASR note](docs/notes/reference-asr.md).
 
 The OAuth client pair and `YTT_PUBLIC_URL` are startup-required — the server
 exits 1 without them, and `YTT_PUBLIC_URL` has **no fallback**: the OAuth
@@ -67,7 +76,7 @@ Pass any YouTube URL form: `youtu.be/…`, `?v=`, `/shorts/`, `/live/`, bare 11-
 | Requirement | Notes |
 |-------------|-------|
 | **Residential egress IP** | YouTube blocks datacenter IPs. Self-hosted on a home server or residential VPS works natively. For VPS/cloud, set `YTT_PROXY_URL` to a residential proxy (e.g. Webshare). |
-| **Whisper endpoint** | Optional for captioned videos. Leaving `YTT_WHISPER_URL` unset uses the built-in reference endpoint; set it to any reachable OpenAI-compatible ASR service (`/v1/audio/transcriptions`) to transcribe caption-less videos. For explicit caption-only mode, set it to an empty value; caption-less requests end with `asr_failed` after the initial `pending` response. |
+| **Whisper endpoint** | Optional for captioned videos. Unset selects the project-operated reference endpoint and sends caption-less audio there; set `YTT_WHISPER_URL` to an operator-selected OpenAI-compatible service (`/v1/audio/transcriptions`) or to an empty value for explicit caption-only mode. The first ASR call is `pending` + poll; endpoint outage/rejection ends the job as `asr_failed`. |
 | **Single replica** | In-process state (LRU cache, single-flight, Whisper job registry). Scale-out requires a redesign. |
 | **Auth required** | OAuth 2.1 with a subject allowlist. Empty allowlist = deny all. |
 
@@ -134,7 +143,7 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
 | `YTT_OIDC_ISSUER` | *(reference Authentik)* | Issuer URL of the upstream OIDC provider — matched byte-for-byte against the id token's `iss` claim, so set it to exactly what your IdP advertises. Validated at startup (https, no whitespace/query/fragment). |
 | `YTT_OIDC_CONFIG_URL` | *(derived from the issuer)* | Discovery-document URL; defaults to `<issuer>/.well-known/openid-configuration`. Set only for a non-standard path. |
-| `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | OpenAI-compatible ASR endpoint. Required for caption-less videos. |
+| `YTT_WHISPER_URL` | *(reference in-cluster Whisper)* | Base URL of the project-operated reference ASR endpoint when unset. Caption-less audio is sent there by default; override it with an operator-selected OpenAI-compatible service, or set it empty for explicit caption-only mode. See the [reference-ASR contract](docs/notes/reference-asr.md). |
 | `YTT_WHISPER_MODEL` | `large-v3-turbo` | Model name served by the Whisper endpoint. Auto-corrects via `/v1/models`. |
 | `YTT_CACHE_DIR` | `/cache` | Transcript cache directory. |
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |

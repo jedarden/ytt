@@ -41,7 +41,6 @@ registries (``test_server.py``).
 from __future__ import annotations
 
 import inspect
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -52,7 +51,7 @@ import pytest
 import yaml
 
 from ytt import errors
-from ytt.config import Settings
+from ytt.config import DEFAULT_WHISPER_URL, Settings
 from ytt.ratelimit import SubjectRateLimiter, WhisperQuota
 from ytt.whisper import (
     WhisperJobRegistry,
@@ -67,10 +66,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = REPO_ROOT / "deploy" / "ASR-RUNBOOK.md"
 CONFIG_DOC = REPO_ROOT / "docs" / "usage" / "configuration.md"
 MANIFEST_DIR = REPO_ROOT / "deploy" / "k8s" / "ardenone-cluster" / "ytt"
-
-#: The declared default — "unset never means disabled" (runbook §5).
-DEFAULT_WHISPER_URL = "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
-
 
 @pytest.fixture(autouse=True)
 def _bypass_authz(monkeypatch):

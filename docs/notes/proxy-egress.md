@@ -9,6 +9,11 @@ happens when the proxy itself fails.
 Environment reference: `README.md` (Configuration table) and
 `docs/usage/configuration.md` (`YTT_PROXY_URL` row).
 
+The Whisper URL may be the project-operated reference default or an
+operator-selected endpoint; its provenance and the default audio-egress
+disclosure are specified in [reference-asr.md](reference-asr.md). The proxy
+rules below are identical for both configurations.
+
 ## Which requests use the proxy
 
 | Traffic | Proxy usage | Why |

@@ -142,6 +142,14 @@ DEFAULT_OIDC_CONFIG_URL = (
     DEFAULT_OIDC_ISSUER.rstrip("/") + "/.well-known/openid-configuration"
 )
 
+# Base URL of the project-operated reference Whisper service.  This is an
+# in-cluster DNS name, not a managed transcript API or a bundled model.  A
+# self-hoster may replace it with ``YTT_WHISPER_URL`` or choose explicit
+# caption-only operation by setting that variable to the empty string; the
+# provenance and audio-egress contract are specified in
+# ``docs/notes/reference-asr.md``.
+DEFAULT_WHISPER_URL = "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
+
 
 def _require_https_url(env_name: str, value: str) -> None:
     """Validate an https URL setting in the ``YTT_PROXY_URL`` style (fail fast).
@@ -335,7 +343,7 @@ class Settings(BaseSettings):
     # Model: large-v3-turbo (only model available on whisper-openai service)
     # RT_FACTOR calibrated for CPU: 2.0 (large-v3-turbo is slower than small)
     # Phase 9 will re-calibrate based on actual transcription measurements
-    whisper_url: str = "http://whisper-openai.whisper-stt.svc.cluster.local:8000"
+    whisper_url: str = DEFAULT_WHISPER_URL
     whisper_model: str = "large-v3-turbo"
     whisper_realtime_factor: float = 2.0
     whisper_timeout_sec: int = 2880
