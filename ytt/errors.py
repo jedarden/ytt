@@ -73,4 +73,33 @@ FORBIDDEN = "forbidden"  # subject not in allowlist (403)
 NO_CAPTIONS_ASR_STARTED = "no_captions_asr_started"
 NO_CAPTIONS_ASR_FAILED = "no_captions_asr_failed"
 
+# Codes that may cross the MCP tool boundary in a ``TranscriptResult``.  Keep
+# protocol-level authorization failures (``FORBIDDEN``) and Whisper metrics /
+# bookkeeping labels out of this namespace: they are not tool payload codes.
+TOOL_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        BAD_URL,
+        BAD_METADATA_URL,
+        PRIVATE,
+        MEMBERS_ONLY,
+        AGE_RESTRICTED,
+        REGION_BLOCKED,
+        IS_LIVESTREAM,
+        UNAVAILABLE,
+        RATE_LIMITED,
+        IP_BLOCKED,
+        EMPTY_BODY,
+        TOO_LONG_FOR_ASR,
+        ASR_FAILED,
+        NOT_FOUND,
+        CURSOR_STALE,
+    }
+)
+
+# Names reserved for internal Whisper state and metrics labels.  These must
+# never be added to ``TOOL_ERROR_CODES`` or relayed as TranscriptResult codes.
+METRIC_ONLY_LABELS: frozenset[str] = frozenset(
+    {NO_CAPTIONS_ASR_STARTED, NO_CAPTIONS_ASR_FAILED}
+)
+
 __all__ = ["YttError"] + [name for name in dir() if name.isupper()]

@@ -356,6 +356,7 @@ text. `message` is always safe to relay verbatim.
 | `error_code` | Emitted by | Meaning |
 |---|---|---|
 | `bad_url` | `get_youtube_transcript` | Not a single-video YouTube URL (playlist / channel / handle / search / unrecognized). |
+| `bad_metadata_url` | `get_youtube_transcript` | A URL supplied by video metadata failed the derived-URL scheme/host policy; the caller's YouTube URL was valid. |
 | `private` | `get_youtube_transcript` | Video is private. |
 | `members_only` | `get_youtube_transcript` | Members-only video. |
 | `age_restricted` | `get_youtube_transcript` | Age-restricted — sign-in required. |

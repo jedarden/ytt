@@ -70,6 +70,10 @@ reference service that rejects work is `asr_failed`, just like the same
 failure from an overridden endpoint. Failed jobs are not cached; callers retry
 by calling `get_youtube_transcript` again with the original URL.
 
+`no_captions_asr_started` and `no_captions_asr_failed` are metrics-only and
+Whisper-job-internal labels. They are not members of the tool `error_code`
+taxonomy and must never replace the caller-visible `asr_failed` code above.
+
 ## Controls that apply unchanged
 
 Reference-ASR jobs use the same controls as BYO-ASR jobs:
