@@ -51,6 +51,7 @@ INVENTORY_MD = REPO_ROOT / "docs" / "bead-inventory.md"
 INVENTORY_JSON = REPO_ROOT / "docs" / "bead-inventory.json"
 BEADS_DB = REPO_ROOT / ".beads" / "beads.db"
 CADENCE_SCRIPT = REPO_ROOT / "scripts" / "bead-inventory-cadence.sh"
+CADENCE_NOTE = REPO_ROOT / "docs" / "notes" / "bead-inventory-cadence.md"
 CADENCE_SERVICE_UNIT = REPO_ROOT / "scripts" / "systemd" / "ytt-bead-inventory-regen.service"
 CADENCE_TIMER_UNIT = REPO_ROOT / "scripts" / "systemd" / "ytt-bead-inventory-regen.timer"
 
@@ -292,4 +293,26 @@ def test_cadence_units_stay_wired_to_the_script():
     assert re.search(r"^OnUnitActiveSec=\d", timer, re.M), (
         f"{CADENCE_TIMER_UNIT.name} lost its interval — the cadence would "
         "never fire"
+    )
+
+
+def test_cadence_note_step_list_matches_script_markers():
+    expected = [
+        "dirty-skip",
+        "regenerate-restore",
+        "data-change",
+        "heartbeat",
+        "publish-rollback",
+    ]
+    note_steps = re.findall(r"cadence-step:\s*([a-z0-9-]+)", CADENCE_NOTE.read_text())
+    script_steps = re.findall(
+        r"^\s*#\s*cadence-step:\s*([a-z0-9-]+)$", CADENCE_SCRIPT.read_text(), re.M
+    )
+    assert note_steps == expected, (
+        "the cadence note's numbered decision steps changed without updating "
+        f"the guarded step IDs: {note_steps!r}"
+    )
+    assert script_steps == expected, (
+        "the cadence script's decision markers changed without updating the "
+        f"documented workflow: {script_steps!r}"
     )

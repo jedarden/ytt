@@ -40,23 +40,23 @@ host anyway.
 
 Each tick (daily; `OnBootSec=10min`, `OnUnitActiveSec=1d`):
 
-1. **Skip if the pair is dirty.** Uncommitted changes to the pair mean a
+1. **Skip if the pair is dirty.** <!-- cadence-step: dirty-skip --> Uncommitted changes to the pair mean a
    worker is mid-regeneration or about to commit their own refresh — the
    tick refuses to commit or discard someone else's in-flight work.
-2. **Regenerate from the live store** via
+2. **Regenerate from the live store** <!-- cadence-step: regenerate-restore --> via
    `scripts/regen-bead-inventory.sh`. On failure the pair is restored to
    its committed state before exiting nonzero — a half-written pair is
    never left behind.
-3. **Commit only on a data change.** The old and new JSON payloads are
+3. **Commit only on a data change.** <!-- cadence-step: data-change --> The old and new JSON payloads are
    compared with the per-run metadata (`generated_at`, `workspace`)
    stripped; timestamp-only churn on a quiet store is discarded and the
    worktree is left byte-identical. Most ticks therefore touch nothing.
-4. **Heartbeat at most every 7 days.** A quiet store still gets a
+4. **Heartbeat at most every 7 days.** <!-- cadence-step: heartbeat --> A quiet store still gets a
    liveness commit (a `generated_at` bump) at least weekly — half the
    suite's 14-day freshness bound — so the backstop can never trip on a
    healthy-but-silent cadence. The regenerator collapses consecutive
    same-count History bullets, so heartbeats do not bloat the audit trail.
-5. **Pathspec-limited commit + push.** The commit carries only
+5. **Pathspec-limited commit + push.** <!-- cadence-step: publish-rollback --> The commit carries only
    `docs/bead-inventory.{md,json}` under the fleet identity
    (`jedarden` / `github@jedarden.com`) — never the box's ever-dirty
    `.beads/checkpoint` churn — and pushes to Forgejo `origin`. A rejected
@@ -93,5 +93,10 @@ journalctl --user -u ytt-bead-inventory-regen -n 50           # what did ticks d
 fresh / at-bound / stale / missing / unreadable snapshots correctly
 (fabricated fixtures, no store needed), the script must stay executable,
 and the committed units must keep ExecStarting its `run` path on a real
-interval. The structural legs run everywhere; the freshness leg still
-skips where no live store exists.
+interval. `tests/unit/test_bead_inventory_cadence.py` runs the real scripts in
+a temporary checkout with a seeded fake bead store, covering dirty-pair skip,
+failed-regeneration restore, metadata-only churn, heartbeat throttle and due
+heartbeat, and rejected-push rollback. The step IDs above are also checked
+against markers in `scripts/bead-inventory-cadence.sh`, so this workflow note
+and its implementation cannot silently drift apart. The structural legs run
+everywhere; the freshness leg still skips where no live store exists.

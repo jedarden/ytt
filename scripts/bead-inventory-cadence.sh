@@ -110,6 +110,7 @@ push_pair() {
 cmd_run() {
   cd "$REPO_ROOT"
 
+  # cadence-step: dirty-skip
   # Another worker with an uncommitted pair refresh (mid-regeneration or
   # about to commit) owns the tree right now — not ours to commit or
   # discard. Skip; the next tick re-evaluates.
@@ -132,6 +133,7 @@ cmd_run() {
   cp -- "$PAIR_MD" "$before_md"
   cp -- "$PAIR_JSON" "$before_json"
 
+  # cadence-step: regenerate-restore
   if ! "$REGEN" >/dev/null; then
     cp -- "$before_md" "$PAIR_MD"
     cp -- "$before_json" "$PAIR_JSON"
@@ -140,6 +142,7 @@ cmd_run() {
     exit 1
   fi
 
+  # cadence-step: data-change
   # Data change = the JSON payload without the per-run metadata
   # (generated_at, workspace path). Timestamp-only churn on a quiet store is
   # not a change worth a commit.
@@ -171,6 +174,7 @@ PYEOF
       echo "publish still failing — commit retained; next tick retries" >&2
       exit 1
     fi
+    # cadence-step: heartbeat
     pair_epoch="$(git log -1 --format=%at -- docs/bead-inventory.json)"
     pair_age=$(( $(date +%s) - pair_epoch ))
     if [ "$pair_age" -le $(( HEARTBEAT_DAYS * 86400 )) ]; then
@@ -188,6 +192,7 @@ PYEOF
     echo "snapshot data changed — committing the refreshed pair"
   fi
 
+  # cadence-step: publish-rollback
   commit_and_push
   my_commit="$(git rev-parse HEAD)"
   if ! push_pair; then
