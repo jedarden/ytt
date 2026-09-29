@@ -1,16 +1,16 @@
 {
-  "generated_at": "2026-09-28T12:38:48Z",
+  "generated_at": "2026-09-29T11:10:09Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 180,
-    "open": 1,
-    "in_progress": 1,
-    "closed": 176,
-    "other": 2,
+    "total_beads": 188,
+    "open": 2,
+    "in_progress": 3,
+    "closed": 182,
+    "other": 1,
     "other_statuses": {
-      "deferred": 2
+      "deferred": 1
     }
   },
   "beads_not_closed": [
@@ -68,21 +68,55 @@
       "updated_at": "2026-09-28T02:04:44.995369343Z"
     },
     {
+      "id": "ytt-84f2e101",
+      "title": "Add regression tests for bead-inventory cadence safety behavior",
+      "status": "in_progress",
+      "effective_status": "in_progress",
+      "priority": 2,
+      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
+      "labels": [
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 2,
+      "created_at": "2026-09-29T03:29:08.983689909Z",
+      "updated_at": "2026-09-29T11:06:17.483784195Z"
+    },
+    {
       "id": "ytt-96bb54f6",
       "title": "Verify yt-dlp 2026.8.19 clears the caption-track 429s in ardenone-cluster once a release carrying it is deployed",
-      "status": "deferred",
-      "effective_status": "deferred",
+      "status": "open",
+      "effective_status": "open",
       "priority": 2,
       "assignee": null,
       "labels": [
+        "human",
         "verification",
         "yt-dlp"
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 3,
+      "revision": 9,
       "created_at": "2026-09-26T22:21:25.935836095Z",
-      "updated_at": "2026-09-27T05:57:49.855073192Z"
+      "updated_at": "2026-09-29T04:10:20.740368314Z"
+    },
+    {
+      "id": "ytt-daefe30b",
+      "title": "Diagnostic: does a real headless browser (Playwright) avoid the caption-track 429 that yt-dlp's raw urlopen hits",
+      "status": "in_progress",
+      "effective_status": "in_progress",
+      "priority": 2,
+      "assignee": "claude-session",
+      "labels": [
+        "diagnostic",
+        "ops"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 2,
+      "created_at": "2026-09-29T03:26:45.415872288Z",
+      "updated_at": "2026-09-29T03:27:04.165061897Z"
     }
   ],
   "pluck_label_analysis": {
@@ -92,7 +126,14 @@
       "blocked",
       "escalation"
     ],
-    "beads_matching_default_excludes": [],
+    "beads_matching_default_excludes": [
+      {
+        "id": "ytt-96bb54f6",
+        "matching_labels": [
+          "human"
+        ]
+      }
+    ],
     "quarantine_windows": [
       {
         "id": "ytt-7656c3a2",
