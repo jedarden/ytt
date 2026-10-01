@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-09-29T11:10:09Z",
+  "generated_at": "2026-10-01T11:10:10Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
     "total_beads": 188,
     "open": 2,
-    "in_progress": 3,
-    "closed": 182,
+    "in_progress": 2,
+    "closed": 183,
     "other": 1,
     "other_statuses": {
       "deferred": 1
@@ -66,22 +66,6 @@
       "revision": 9,
       "created_at": "2026-09-25T16:20:04.669053281Z",
       "updated_at": "2026-09-28T02:04:44.995369343Z"
-    },
-    {
-      "id": "ytt-84f2e101",
-      "title": "Add regression tests for bead-inventory cadence safety behavior",
-      "status": "in_progress",
-      "effective_status": "in_progress",
-      "priority": 2,
-      "assignee": "claude-code-glm-5.3-flash-glm-roam-19",
-      "labels": [
-        "weave-generated"
-      ],
-      "manual_blocked": false,
-      "dependencies": [],
-      "revision": 2,
-      "created_at": "2026-09-29T03:29:08.983689909Z",
-      "updated_at": "2026-09-29T11:06:17.483784195Z"
     },
     {
       "id": "ytt-96bb54f6",
