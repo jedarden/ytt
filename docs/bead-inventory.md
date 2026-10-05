@@ -1,7 +1,7 @@
 # Workspace Bead Inventory
 
 > **Point-in-time snapshot — do not trust for planning.** This file records
-> what the bead store looked like when it was generated (2026-10-01T11:10:10Z) and
+> what the bead store looked like when it was generated (2026-10-05T11:10:10Z) and
 > begins drifting the moment any worker opens, claims, or closes a bead. For
 > live state, run `bead list` yourself. It is deliberately **not** refreshed
 > by `scripts/definition-of-done.sh` — see the header of the regen script for
@@ -12,7 +12,7 @@
 > age` before citing — it prints this snapshot's age and exits nonzero once
 > it exceeds the freshness bound.
 
-Generated 2026-10-01T11:10:10Z from the live bead-rs store with:
+Generated 2026-10-05T11:10:10Z from the live bead-rs store with:
 
 ```text
 bead list --json --limit 1000
@@ -64,4 +64,4 @@ do not by themselves hide a bead.
 - 2026-09-27T12:38:47Z: 11 open, 3 in progress, 143 closed, 3 deferred.
 - 2026-09-28T12:38:48Z: 1 open, 1 in progress, 176 closed, 2 deferred.
 - 2026-09-29T11:10:09Z: 2 open, 3 in progress, 182 closed, 1 deferred.
-- 2026-10-01T11:10:10Z (this snapshot): 2 open, 2 in progress, 183 closed, 1 deferred.
+- 2026-10-05T11:10:10Z (this snapshot): 2 open, 2 in progress, 183 closed, 1 deferred.

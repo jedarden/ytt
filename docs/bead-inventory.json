@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-01T11:10:10Z",
+  "generated_at": "2026-10-05T11:10:10Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
@@ -98,9 +98,9 @@
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 2,
+      "revision": 3,
       "created_at": "2026-09-29T03:26:45.415872288Z",
-      "updated_at": "2026-09-29T03:27:04.165061897Z"
+      "updated_at": "2026-10-05T02:48:56.651609261Z"
     }
   ],
   "pluck_label_analysis": {
