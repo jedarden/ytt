@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-10-05T11:10:10Z",
+  "generated_at": "2026-10-07T11:10:11Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 188,
+    "total_beads": 189,
     "open": 2,
-    "in_progress": 2,
+    "in_progress": 3,
     "closed": 183,
     "other": 1,
     "other_statuses": {
@@ -14,6 +14,23 @@
     }
   },
   "beads_not_closed": [
+    {
+      "id": "ytt-204947b5",
+      "title": "ytt: browser-primary caption fetch (stealth Chromium in-process, yt-dlp fallback)",
+      "status": "in_progress",
+      "effective_status": "in_progress",
+      "priority": 1,
+      "assignee": "claude-session",
+      "labels": [
+        "fetch-core",
+        "ops"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 2,
+      "created_at": "2026-10-07T11:06:57.561397433Z",
+      "updated_at": "2026-10-07T11:07:04.786626705Z"
+    },
     {
       "id": "ytt-cd9e04a5",
       "title": "Run same-egress caption retest for videos that hit upstream 429s",
@@ -98,9 +115,9 @@
       ],
       "manual_blocked": false,
       "dependencies": [],
-      "revision": 3,
+      "revision": 4,
       "created_at": "2026-09-29T03:26:45.415872288Z",
-      "updated_at": "2026-10-05T02:48:56.651609261Z"
+      "updated_at": "2026-10-06T21:01:23.463476208Z"
     }
   ],
   "pluck_label_analysis": {

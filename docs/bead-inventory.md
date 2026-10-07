@@ -1,7 +1,7 @@
 # Workspace Bead Inventory
 
 > **Point-in-time snapshot — do not trust for planning.** This file records
-> what the bead store looked like when it was generated (2026-10-05T11:10:10Z) and
+> what the bead store looked like when it was generated (2026-10-07T11:10:11Z) and
 > begins drifting the moment any worker opens, claims, or closes a bead. For
 > live state, run `bead list` yourself. It is deliberately **not** refreshed
 > by `scripts/definition-of-done.sh` — see the header of the regen script for
@@ -12,7 +12,7 @@
 > age` before citing — it prints this snapshot's age and exits nonzero once
 > it exceeds the freshness bound.
 
-Generated 2026-10-05T11:10:10Z from the live bead-rs store with:
+Generated 2026-10-07T11:10:11Z from the live bead-rs store with:
 
 ```text
 bead list --json --limit 1000
@@ -21,14 +21,15 @@ bead list --json --limit 1000
 via `scripts/regen-bead-inventory.sh` (the only supported way to regenerate —
 this file is fully generated, do not hand-edit).
 
-Summary at generation time: **2 open**, **2 in
-progress**, 183 closed, 1 deferred — 188 beads total. The
+Summary at generation time: **2 open**, **3 in
+progress**, 183 closed, 1 deferred — 189 beads total. The
 machine-readable copy is [docs/bead-inventory.json](bead-inventory.json).
 
-## Not-closed beads (5)
+## Not-closed beads (6)
 
 | ID | Title | Labels | Status |
 | --- | --- | --- | --- |
+| `ytt-204947b5` | ytt: browser-primary caption fetch (stealth Chromium in-process, yt-dlp fallback) | `fetch-core`, `ops` | in_progress |
 | `ytt-cd9e04a5` | Run same-egress caption retest for videos that hit upstream 429s | `captions`, `deployment`, `diagnostics` | in_progress |
 | `ytt-4f1c45c2` | Wire planned startup sequence into the server boot path (startup_scan, startup_sweep, TTL GC, reconcile loop never run) | `ops`, `startup` | open |
 | `ytt-7656c3a2` | Add an anonymous container-image pull release gate | `failure-count:2`, `quarantine-until:2026-09-25T23:34:14.292819353+00:00`, `weave-generated` | deferred |
@@ -64,4 +65,5 @@ do not by themselves hide a bead.
 - 2026-09-27T12:38:47Z: 11 open, 3 in progress, 143 closed, 3 deferred.
 - 2026-09-28T12:38:48Z: 1 open, 1 in progress, 176 closed, 2 deferred.
 - 2026-09-29T11:10:09Z: 2 open, 3 in progress, 182 closed, 1 deferred.
-- 2026-10-05T11:10:10Z (this snapshot): 2 open, 2 in progress, 183 closed, 1 deferred.
+- 2026-10-05T11:10:10Z: 2 open, 2 in progress, 183 closed, 1 deferred.
+- 2026-10-07T11:10:11Z (this snapshot): 2 open, 3 in progress, 183 closed, 1 deferred.
