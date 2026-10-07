@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.27] — 2026-10-07
+## [0.2.28] — 2026-10-07
 
+> The 0.2.27 number was consumed by a failed release attempt: the `ytt-build`
+> image's unit-test stage died on 8 `test_bead_inventory_cadence.py` tests
+> (`FileNotFoundError: 'git'` — the slim image has no git), so no 0.2.27
+> image was ever published. This is that content re-cut as 0.2.28, plus the
+> two fixes below.
+>
 > **Captions now come from a real browser first.** YouTube's caption endpoint
 > returns an empty body or HTTP 429 unless the request carries a PO token that
 > YouTube's own player minted for that exact video and track; yt-dlp cannot
@@ -45,11 +51,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A separate pod keeps ytt's image slim (only the Playwright *client* wheel
   is added) and means a browser crash or OOM cannot restart ytt, whose job
   registry is in-process. See `deploy/RUNBOOK.md` §8.
-- 44 new unit tests (`tests/unit/test_browser_fetch.py`) on a fake Playwright
+- 47 new unit tests (`tests/unit/test_browser_fetch.py`) on a fake Playwright
   object graph; mutation-checked against the four regressions that matter
   (accepting a 0-byte body, falling back after a video-level error, taking
   the default track's response for the wanted one, dropping the stealth
   launch option).
+
+### Fixed
+
+- **Manual-caption videos failed on the browser path** (found testing the
+  0.2.27 candidate against live YouTube through bench, before any rollout).
+  The first cut forced the wanted caption track straight after navigation; a
+  track forced *before the player has made its own first caption request* goes
+  out with no PO token and YouTube answers `200` + 0 bytes — every video with
+  manual tracks (Rick Astley, a TED talk, the canary video) failed with
+  `empty_body`. Automatic-caption videos happened to work, which hid it from
+  the earlier diagnostics. The fetch is now two-phase: switch captions on and
+  let the player make its **natural first request** (it carries a token);
+  use it if it is the wanted track, otherwise force the wanted one (which now
+  also gets a token). A wanted-language response with an empty body is given a
+  short grace period for a good one to follow before being declared a rejected
+  token. Verified live on 11 cases (auto + manual captions, es/fr/unknown
+  language fallback, live stream, unavailable id). New regression tests
+  emulate the race; mutation-checked.
+- **The image build's test stage lacked `git`** (`Dockerfile`): installed in
+  the discarded `test` stage only (runtime stays git-free). The eight
+  `test_bead_inventory_cadence.py` tests had landed in a worker commit that
+  never went through an image build, because `ytt-build` only builds on a
+  VERSION bump.
 
 ### Changed
 

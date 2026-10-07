@@ -29,6 +29,7 @@ from ytt import browser_fetch, errors, fetch
 from ytt.browser_fetch import (
     BROWSER_LAUNCH_OPTIONS,
     BrowserInfraError,
+    NATURAL_JS,
     PLAYER_INFO_JS,
     SELECT_TRACK_JS,
     browser_endpoint,
@@ -122,6 +123,8 @@ class Scenario:
         goto_error: Exception | None = None,
         hang_goto: bool = False,
         issue_on_select: bool = True,
+        strict_order: bool = False,
+        late_good: bool = False,
     ) -> None:
         self.player_response = player_response
         self.bodies = bodies or {}
@@ -130,6 +133,12 @@ class Scenario:
         self.goto_error = goto_error
         self.hang_goto = hang_goto
         self.issue_on_select = issue_on_select
+        # Emulates the real race (measured on live YouTube): a track forced
+        # BEFORE the player's own first request goes out with no PO token
+        # (200 + 0 bytes, no `pot` param).
+        self.strict_order = strict_order
+        # First response for the wanted track is empty, a good one follows.
+        self.late_good = late_good
         # observations
         self.endpoint: str | None = None
         self.goto_urls: list[str] = []
@@ -142,17 +151,26 @@ class FakePage:
     def __init__(self, sc: Scenario) -> None:
         self.sc = sc
         self._cb = None
+        self._natural_done = False
 
     def on(self, event: str, cb) -> None:
         assert event == "response"
         self._cb = cb
 
-    def _emit(self, lang: str, kind: str) -> None:
-        status, body = self.sc.bodies.get((lang, kind), (200, json3("x")))
-        q = f"v=VID&lang={lang}&fmt=json3&pot=TOKEN"
+    def _emit(self, lang: str, kind: str, *, pot: bool = True, body=None) -> None:
+        status, default_body = self.sc.bodies.get((lang, kind), (200, json3("x")))
+        q = f"v=VID&lang={lang}&fmt=json3"
+        if pot:
+            q += "&pot=TOKEN"
         if kind:
             q += f"&kind={kind}"
-        self._cb(FakeResponse(f"https://www.youtube.com/api/timedtext?{q}", status, body))
+        self._cb(
+            FakeResponse(
+                f"https://www.youtube.com/api/timedtext?{q}",
+                status,
+                default_body if body is None else body,
+            )
+        )
 
     async def goto(self, url: str, **kwargs) -> None:
         self.sc.goto_urls.append(url)
@@ -160,15 +178,26 @@ class FakePage:
             await asyncio.sleep(3600)
         if self.sc.goto_error:
             raise self.sc.goto_error
-        if self.sc.default_request:
-            self._emit(*self.sc.default_request)
 
     async def evaluate(self, script: str, arg=None):
         if script == PLAYER_INFO_JS:
             return self.sc.player_response
+        if script == NATURAL_JS:
+            # phase 1: the player makes its own first request, token attached
+            self._natural_done = True
+            if self.sc.default_request:
+                self._emit(*self.sc.default_request)
+            return True
         if script == SELECT_TRACK_JS:
             self.sc.selected.append(arg)
-            if self.sc.issue_on_select:
+            if self.sc.strict_order and not self._natural_done:
+                self._emit(arg["lang"], arg["kind"], pot=False, body=b"")
+            elif self.sc.late_good:
+                self._emit(arg["lang"], arg["kind"], pot=False, body=b"")
+                asyncio.get_running_loop().call_later(
+                    0.02, self._emit, arg["lang"], arg["kind"]
+                )
+            elif self.sc.issue_on_select:
                 self._emit(arg["lang"], arg["kind"])
             return {"ok": True, "via": "tracklist"}
         raise AssertionError(f"unexpected page script: {script[:40]!r}")
@@ -225,6 +254,8 @@ def install(monkeypatch: pytest.MonkeyPatch, sc: Scenario) -> Scenario:
 
     monkeypatch.setattr(browser_fetch, "_playwright_factory", lambda: factory)
     monkeypatch.setattr(browser_fetch, "TRACK_WAIT_SEC", 0.2)
+    monkeypatch.setattr(browser_fetch, "NATURAL_WAIT_SEC", 0.05)
+    monkeypatch.setattr(browser_fetch, "EMPTY_GRACE_SEC", 0.05)
     return sc
 
 
@@ -304,6 +335,59 @@ class TestFetch:
         # the page script was told to switch to the chosen track
         assert sc.selected == [{"lang": "en", "kind": ""}]
         assert sc.browser_closed
+
+    async def test_natural_request_for_the_wanted_track_is_used_without_forcing(
+        self, monkeypatch
+    ) -> None:
+        """A video whose default track IS the wanted one (live: Rick Astley's
+        manual English): the player's own first request already has the token,
+        so nothing is forced."""
+        sc = install(
+            monkeypatch,
+            Scenario(
+                player(tracks=(("en", ""), ("de-DE", ""))),
+                default_request=("en", ""),
+                bodies={("en", ""): (200, json3("never", "gonna"))},
+            ),
+        )
+        res = await browser_fetch_transcript("VID", None, make_settings())
+        assert [s.text for s in res.segments] == ["never", "gonna"]
+        assert res.source == "caption_manual" and res.served_lang == "en"
+        assert sc.selected == []
+
+    async def test_track_is_never_forced_before_the_players_own_first_request(
+        self, monkeypatch
+    ) -> None:
+        """Live finding 2026-10-07: forcing a track straight after navigation
+        sends it without a PO token (200 + 0 bytes), so every manual-caption
+        video failed.  The player's natural request must come first."""
+        sc = install(
+            monkeypatch,
+            Scenario(
+                player(tracks=(("ar", "asr"), ("en", ""))),
+                default_request=("ar", "asr"),
+                strict_order=True,
+                bodies={("en", ""): (200, json3("ok"))},
+            ),
+        )
+        res = await browser_fetch_transcript("VID", None, make_settings())
+        assert res.served_lang == "en" and [s.text for s in res.segments] == ["ok"]
+        assert sc.selected == [{"lang": "en", "kind": ""}]
+
+    async def test_an_empty_first_response_followed_by_a_good_one_succeeds(
+        self, monkeypatch
+    ) -> None:
+        install(
+            monkeypatch,
+            Scenario(
+                player(tracks=(("ar", "asr"), ("en", ""))),
+                default_request=("ar", "asr"),
+                late_good=True,
+                bodies={("en", ""): (200, json3("late"))},
+            ),
+        )
+        res = await browser_fetch_transcript("VID", None, make_settings())
+        assert [s.text for s in res.segments] == ["late"]
 
     async def test_auto_only_video_serves_the_asr_track(self, monkeypatch) -> None:
         install(

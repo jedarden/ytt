@@ -158,7 +158,20 @@ PLAYER_INFO_JS = """() => {
     };
 }"""
 
-#: Ask the player for one caption track.  The captions module publishes its
+#: Phase 1: switch captions on and start (muted) playback, so the PLAYER makes
+#: its own first caption request.  Order matters (measured 2026-10-07, bench):
+#: a track forced BEFORE this first request goes out without a PO token
+#: (``200`` + 0 bytes); once the player has made its natural request — which
+#: carries a token — forcing another track also gets one.
+NATURAL_JS = """() => {
+    const p = document.getElementById("movie_player");
+    if (!p) return false;
+    try { p.loadModule("captions"); } catch (e) {}
+    try { p.mute(); p.playVideo(); } catch (e) {}
+    return true;
+}"""
+
+#: Phase 2: ask the player for one caption track.  The captions module publishes its
 #: track list a moment after ``loadModule``; passing one of ITS OWN entries to
 #: ``setOption`` is the reliable form.  The player then issues the
 #: ``/api/timedtext`` request itself (with the PO token attached).
@@ -293,6 +306,11 @@ def _published(player: dict) -> str | None:
 #: How long to wait for the player's own caption request once the track was
 #: requested (module constant so tests can shrink it).
 TRACK_WAIT_SEC = 20.0
+#: How long phase 1 waits for the player's natural first caption request.
+NATURAL_WAIT_SEC = 8.0
+#: After a wanted-language response with an EMPTY body (no PO token), keep
+#: waiting this long for a good one before declaring the token rejected.
+EMPTY_GRACE_SEC = 5.0
 
 _semaphore: asyncio.Semaphore | None = None
 _semaphore_key: tuple[int, int] = (0, 0)
@@ -383,16 +401,29 @@ async def _fetch_in_browser(
             wanted = player["tracks"][int(url.split(":", 1)[1])]
 
             try:
-                await page.evaluate(
-                    SELECT_TRACK_JS, {"lang": wanted["lang"], "kind": wanted["kind"]}
-                )
+                await page.evaluate(NATURAL_JS)
             except Exception as exc:
                 raise BrowserInfraError(
                     f"could not drive the player: {type(exc).__name__}",
                     reason="player_script",
                 ) from exc
 
-            hit = await _await_track_response(page, seen, wanted)
+            # Phase 1: the player's own first request already carries a PO
+            # token; if it is the wanted track, take it and force nothing.
+            hit = await _await_natural_response(page, seen, wanted)
+            if hit is None:
+                # Phase 2: now (and only now) force the wanted track.
+                try:
+                    await page.evaluate(
+                        SELECT_TRACK_JS,
+                        {"lang": wanted["lang"], "kind": wanted["kind"]},
+                    )
+                except Exception as exc:
+                    raise BrowserInfraError(
+                        f"could not drive the player: {type(exc).__name__}",
+                        reason="player_script",
+                    ) from exc
+                hit = await _await_track_response(page, seen, wanted)
         finally:
             if browser is not None:
                 try:
@@ -424,29 +455,58 @@ async def _fetch_in_browser(
     )
 
 
+async def _await_natural_response(
+    page: Any, seen: list[dict], wanted: dict
+) -> dict | None:
+    """Wait for the player's natural first caption request (phase 1).
+
+    Returns it when it already is the wanted track (same language AND kind)
+    and has a body; ``None`` when the player fetched some other track, did
+    nothing in the window, or the first response was empty — the caller then
+    forces the wanted track.
+    """
+    deadline = time.monotonic() + NATURAL_WAIT_SEC
+    while time.monotonic() < deadline:
+        for s in seen:
+            if s["status"] != 200 or not s["body"]:
+                continue
+            if s["lang"] == wanted["lang"] and (s["kind"] or "") == (wanted["kind"] or ""):
+                return s
+            return None  # a different track arrived first: go force ours
+        await page.wait_for_timeout(250)
+    return None
+
+
 async def _await_track_response(page: Any, seen: list[dict], wanted: dict) -> dict:
     """Wait for the player's own timedtext response for the wanted track.
 
     The player may first fetch its default track; only a response for the
-    wanted language counts.  An empty body means the PO token was rejected
-    (automation detected / bad egress) — an infrastructure failure, not an
-    answer about the video.
+    wanted language counts.  A wanted-language response with an EMPTY body
+    means no PO token was attached (or it was rejected); a good one may still
+    follow, so wait :data:`EMPTY_GRACE_SEC` before treating it as an
+    infrastructure failure rather than an answer about the video.
     """
     deadline = time.monotonic() + TRACK_WAIT_SEC
+    empty_since: float | None = None
     nudged = False
     while time.monotonic() < deadline:
+        empty = False
         for s in seen:
-            if s["lang"] == wanted["lang"] and s["status"] == 200:
-                if not s["body"]:
-                    raise BrowserInfraError(
-                        "player's caption request returned an empty body "
-                        "(PO token rejected)",
-                        reason="empty_body",
-                    )
-                return s
             if s["status"] == 429:
                 raise BrowserInfraError(
                     "player's caption request was rate limited", reason="rate_limited"
+                )
+            if s["lang"] == wanted["lang"] and s["status"] == 200:
+                if s["body"]:
+                    return s
+                empty = True
+        if empty:
+            empty_since = empty_since or time.monotonic()
+            if time.monotonic() - empty_since >= EMPTY_GRACE_SEC:
+                raise BrowserInfraError(
+                    "player's caption request returned an empty body "
+                    "(PO token missing or rejected)",
+                    reason="empty_body",
                 )
         if not nudged and time.monotonic() > deadline - TRACK_WAIT_SEC * 0.6:
             nudged = True
@@ -455,6 +515,12 @@ async def _await_track_response(page: Any, seen: list[dict], wanted: dict) -> di
             except Exception:
                 pass
         await page.wait_for_timeout(250)
+    if empty_since is not None:
+        raise BrowserInfraError(
+            "player's caption request returned an empty body "
+            "(PO token missing or rejected)",
+            reason="empty_body",
+        )
     raise BrowserInfraError(
         "the player never requested the wanted caption track", reason="no_request"
     )

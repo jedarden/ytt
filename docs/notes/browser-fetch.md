@@ -57,6 +57,18 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
 - **The token never leaves the browser.** ytt does not extract, store or replay it; it
   reads the response of a request the browser made itself. The browser context is
   anonymous (no login, no cookies from us — the plan's "no YouTube cookies" rule holds).
+- **Order matters: let the player go first.** Measured on live YouTube (2026-10-07,
+  bench): a track forced straight after navigation is requested *without a PO token*
+  (`200` + 0 bytes, no `pot` parameter); once the player has made its own first
+  caption request — which carries a token — forcing another track also gets one
+  (`de-DE` 7,764 B, `ja` 8,009 B on a manual-caption video). So the fetch is two-phase:
+  switch captions on and wait for the player's natural request (use it if it is the
+  wanted track), and only then force the wanted track. Automatic-caption videos hid
+  this in the first diagnostics; every manual-caption video exposed it.
+- **Track list quirks.** The player's `tracklist` hides an automatic track that shares a
+  language with a manual one, and is empty for videos with only automatic tracks; the
+  forcing script therefore falls back to `{languageCode, kind}` — which is what works for
+  automatic-only videos.
 - **Source/language are what the player actually fetched.** `FetchResult.source` and
   `served_lang` come from the captured request's `kind`/`lang` parameters, not from
   what we asked for.

@@ -16,7 +16,7 @@
 #             failures) — prometheusrule.yml; response procedure:
 #             deploy/CANARY-MONITORING-RUNBOOK.md
 #   scrape:   service/ytt-canary port metrics, via servicemonitor.yml
-# Image: ronaldraygun/ytt:0.2.27 — probes every configured video each cycle
+# Image: ronaldraygun/ytt:0.2.28 — probes every configured video each cycle
 # (5efa175); derived-URL SSRF allowlist since 0.2.25 (b65b494); per-path
 # metrics since 0.2.21 (6b1c3de). Pinned semver,
 # no :latest.
@@ -65,7 +65,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt-canary
-          image: ronaldraygun/ytt:0.2.27
+          image: ronaldraygun/ytt:0.2.28
           imagePullPolicy: IfNotPresent
           ports:
             - name: metrics

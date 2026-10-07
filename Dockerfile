@@ -55,6 +55,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- test: gate the build on the unit suite -------------------------------
 FROM builder AS test
+# git is a TEST-ONLY dependency: tests/unit/test_bead_inventory_cadence.py
+# drives scripts/bead-inventory-cadence.sh through real throwaway git repos
+# (commit / push / rollback), and python:3.12-slim has no git. Without it the
+# image build's pytest run failed with `FileNotFoundError: 'git'` on 8 tests
+# (release 0.2.27 was burned on exactly that: the tests landed 2026-09-28 in a
+# commit that never went through an image build, because ytt-build only builds
+# on a VERSION bump). Installed in this discarded stage only — the runtime
+# image stays git-free.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 # The WHOLE build context, not a hand-picked subset. The suite reads repo-root
 # files by path (VERSION, Dockerfile, LICENSE, NOTICE, CONTRIBUTING.md,
 # SECURITY.md, CHANGELOG.md, scripts/, notes/, deploy/, docs/ ...), and every
