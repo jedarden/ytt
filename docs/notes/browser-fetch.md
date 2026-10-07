@@ -1,0 +1,103 @@
+# Browser-primary caption fetch
+
+**Status:** decided 2026-10-07, bead `ytt-204947b5`. Reverses the earlier "no browser,
+no PoToken" contract (`docs/notes/yt-dlp-player-client.md`) for the primary path.
+
+## Why
+
+YouTube's caption endpoint (`/api/timedtext`) answers a request that lacks a valid
+**PO token** with `200` and an **empty body**, or `429`. The token is minted by
+YouTube's own player (BotGuard) for one exact *video and track*. yt-dlp cannot mint
+it, so its caption-track download fails on many videos — in the 2026-09-28 retest
+**31 of 36** known-bad videos still returned `HTTP Error 429` after a yt-dlp bump
+(`ytt-96bb54f6`), from the cluster's residential IP, spaced eight seconds apart across
+*distinct* videos. That pattern is not request-volume throttling.
+
+Evidence that the token — not the IP and not the client's TLS fingerprint — is the gate
+(diagnostics `ytt-daefe30b`, run in-cluster on the same egress as ytt):
+
+| Observation | Result |
+|---|---|
+| Stealth Chromium, the player's own caption request | real body, **19/19** videos yt-dlp 429s on; first byte ~2.0 s median (1.8–3.0 s) |
+| Same, plain Playwright headless shell | `200` + **0 bytes** (token rejected: automation detected) |
+| Captured URL replayed with a non-browser HTTP client, token intact | identical bytes → TLS/client fingerprint is irrelevant |
+| Same URL, `pot`/`potc` stripped | `200` + **0 bytes** → the token is the gate |
+| Same URL, `lang=` swapped, token kept | `200` + 0 bytes → the token is bound to the track |
+| Player asked for another track via its API | fresh request with a fresh token, real body |
+
+## Design
+
+```
+ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (separate)
+  fetch_transcript()                                         playwright run-server :3001
+   └ browser_fetch_transcript ──ws://…/?browser=chromium──►   └ one fresh stealth Chromium
+        │       &launch-options=<stealth json>                  per connection, closed on done
+        ▼
+   1. goto watch page            2. read ytInitialPlayerResponse
+      (the ONLY navigation)         playability → error taxonomy; title/author/length/date;
+                                    caption-track list
+   3. choose track with the SAME rules as the yt-dlp path (ytt.fetch._select_track)
+   4. force it through the player API → the player issues its own /api/timedtext
+      request, PO token attached
+   5. capture that response → parse_json3 → FetchResult (same shape as yt-dlp path)
+```
+
+- **Separate server, per-connection browser.** A single long-lived browser context grew
+  to the pod's 2.5 GiB limit and was OOM-killed after ~19 pages; one browser per fetch
+  has no cross-fetch state. A browser crash cannot restart ytt, whose job registry and
+  single-flight table are in-process. The server image is the stock
+  `mcr.microsoft.com/playwright/python` image; ytt only needs the small client wheel
+  (no Dockerfile base change). Client and server Playwright versions must match
+  major.minor.
+- **Stealth is load-bearing.** Launch options (`BROWSER_LAUNCH_OPTIONS`): full Chromium
+  (`channel=chromium`, new headless), `--enable-automation` removed,
+  `--disable-blink-features=AutomationControlled`, plus an init script hiding
+  `navigator.webdriver`. The default headless shell is detected and its token rejected.
+  This is an arms race: expect to revisit it (see Risks in the plan).
+- **The token never leaves the browser.** ytt does not extract, store or replay it; it
+  reads the response of a request the browser made itself. The browser context is
+  anonymous (no login, no cookies from us — the plan's "no YouTube cookies" rule holds).
+- **Source/language are what the player actually fetched.** `FetchResult.source` and
+  `served_lang` come from the captured request's `kind`/`lang` parameters, not from
+  what we asked for.
+
+## Failure contract
+
+| Situation | Raised as | Router action |
+|---|---|---|
+| private / unavailable / age / region / members | `YttError` with the taxonomy code | returned as-is (yt-dlp would only repeat it) |
+| live or upcoming | `YttError(is_livestream)` | returned as-is, no Whisper |
+| no caption tracks | `NoCaptionsError(duration_sec)` | returned as-is → existing Whisper fallback |
+| server unreachable / timeout / navigation failed | `BrowserInfraError` | fall back to yt-dlp |
+| player never requested the wanted track | `BrowserInfraError(no_request)` | fall back |
+| `200` + 0 bytes (token rejected), or `429` | `BrowserInfraError(empty_body\|rate_limited)` | fall back |
+| bot wall on this egress (`LOGIN_REQUIRED … not a bot`) | `BrowserInfraError(playability_blocked)` | fall back (and its proxy retry) |
+| both paths fail | the yt-dlp error, message naming the browser failure | — |
+
+Metrics: `ytt_browser_fetch_total{outcome=ok|video_error|infra_error|timeout}` and
+`ytt_browser_fetch_seconds`. A rising `infra_error` share means the browser path is
+drifting — the fallback is hiding it from users, not from the dashboard.
+
+## Operating it
+
+- **Config:** `YTT_BROWSER_WS_URL`, `YTT_FETCH_MODE`, `YTT_BROWSER_TIMEOUT_SEC`,
+  `YTT_BROWSER_MAX_CONCURRENCY` — see `docs/usage/configuration.md`. With the URL unset
+  ytt is exactly the yt-dlp-only server it was before.
+- **Rollback:** `YTT_FETCH_MODE=ytdlp` (restart), no image change.
+- **Server:** one `playwright run-server` Deployment, `ClusterIP` only, no ingress. It is
+  **unauthenticated and can browse from the home IP** — never expose it publicly. Run it
+  with a PID 1 that reaps children (e.g. `bash` supervising the server): Chromium leaves
+  zombie helper processes otherwise (measured: 12 after three fetches).
+- **Sizing:** each in-flight fetch is its own Chromium (~400–700 MB). Size the server's
+  memory for `YTT_BROWSER_MAX_CONCURRENCY` × ~0.7 GiB plus headroom.
+- **bench:** any `playwright run-server` works as the endpoint — the shared
+  `ws://bench:3001/` accepts the same stealth launch options (verified 2026-10-07), but
+  allows only two clients and is not reachable from pods without extra plumbing.
+- **Not covered:** `YTT_PROXY_URL` applies to the yt-dlp path only; the browser's egress
+  is the server pod's.
+
+## What this does not change
+
+Whisper audio download, the cache, auth, rate limits and the error taxonomy are untouched.
+The yt-dlp player-client pin and its contract tests still guard the fallback and audio
+paths.

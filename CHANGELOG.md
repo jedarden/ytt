@@ -7,7 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.27] — 2026-10-07
+
+> **Captions now come from a real browser first.** YouTube's caption endpoint
+> returns an empty body or HTTP 429 unless the request carries a PO token that
+> YouTube's own player minted for that exact video and track; yt-dlp cannot
+> mint one, so its caption-track download failed on many videos (31 of 36
+> known-bad videos still 429'd after the yt-dlp 2026.8.19 bump). A stealth
+> Chromium's player can — it fetched real captions for 19 of 19 of those
+> videos at ~2 s to first byte. Evidence and design:
+> `docs/notes/browser-fetch.md` (beads `ytt-204947b5`, `ytt-daefe30b`).
+
 ### Added
+
+- **Browser-primary caption fetch** (`ytt/browser_fetch.py`). With
+  `YTT_BROWSER_WS_URL` set (a `playwright run-server` endpoint) ytt opens the
+  watch page in a fresh browser per fetch, reads `ytInitialPlayerResponse`
+  (playability → the existing error taxonomy, metadata, caption-track list),
+  chooses the track with the **same language rules** as the yt-dlp path,
+  forces it through the player API and captures the response of the player's
+  *own* `/api/timedtext` request. `FetchResult.source`/`served_lang` are taken
+  from the request the player actually made. Video-level errors (private,
+  unavailable, age/region/members, live, no captions) are returned as-is;
+  browser/infrastructure failures (server down, timeout, a 0-byte body = PO
+  token rejected, bot wall) fall back to the yt-dlp path. The Whisper audio
+  path is unchanged.
+- **Settings:** `YTT_BROWSER_WS_URL` (unset = off, behaviour unchanged),
+  `YTT_FETCH_MODE` (`auto`|`browser`|`ytdlp`; `ytdlp` is the rollback switch),
+  `YTT_BROWSER_TIMEOUT_SEC` (45), `YTT_BROWSER_MAX_CONCURRENCY` (3).
+- **Metrics:** `ytt_browser_fetch_total{outcome=ok|video_error|infra_error|timeout}`
+  and `ytt_browser_fetch_seconds`; alert `YttBrowserFetchFailing` fires when
+  most browser fetches end in `infra_error`/`timeout` (the yt-dlp fallback
+  would otherwise hide the drift from users).
+- **Deployment:** a separate `ytt-browser` pod (stock
+  `mcr.microsoft.com/playwright/python` image, `playwright run-server`,
+  ClusterIP only, `bash` as PID 1 so Chromium's helper processes are reaped).
+  A separate pod keeps ytt's image slim (only the Playwright *client* wheel
+  is added) and means a browser crash or OOM cannot restart ytt, whose job
+  registry is in-process. See `deploy/RUNBOOK.md` §8.
+- 44 new unit tests (`tests/unit/test_browser_fetch.py`) on a fake Playwright
+  object graph; mutation-checked against the four regressions that matter
+  (accepting a 0-byte body, falling back after a video-level error, taking
+  the default track's response for the wanted one, dropping the stealth
+  launch option).
+
+### Changed
+
+- **The no-browser / no-PoToken contract is amended**, not removed.
+  `tests/unit/test_egress_boundary.py` now sanctions the `playwright` client
+  and a `browser_ws_url` setting; managed transcript APIs and third-party
+  PoToken *providers* (bgutil & co.) stay forbidden — the token is minted by
+  youtube.com's own player in ytt's own browser and is never extracted or
+  replayed. `docs/notes/yt-dlp-player-client.md` now scopes the player-client
+  contract to the yt-dlp fallback and the audio path.
+- ytt memory limit 1Gi → 1536Mi (the Playwright client spawns a node driver
+  per browser fetch).
+
+### Also in this release (previously Unreleased)
+
+#### Added
 
 - **The README now documents the full `ytt canary` flag surface** (bead
   `ytt-7ce8d590`): a five-row flag/default/effect table in the canary
@@ -45,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior changed — the gate's destination, schema and write path are
   untouched.
 
-### Changed
+#### Changed
 
 - Canary and one-shot/gate log lines now carry an in-message ISO-8601 **UTC**
   timestamp (`2026-09-18T23:14:05.156+00:00 INFO:ytt.canary:…`), matching the
@@ -57,7 +115,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime-stamped prefix is node-local and unchanged — correlate on the
   in-message stamp (bead `ytt-56679d29`).
 
-### Fixed
+#### Fixed
 
 - **The server pod no longer exports a dead zero
   `ytt_canary_last_success_timestamp_seconds` series** (bead

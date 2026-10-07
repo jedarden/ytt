@@ -1,0 +1,23 @@
+---
+# ClusterIP only, on purpose: the browser server is unauthenticated and can
+# browse from the home IP.  No IngressRoute, no tailscale.com/expose, no
+# external-dns annotation — ytt reaches it at
+# ws://ytt-browser.ytt.svc.cluster.local:3001/ and nothing else should.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ytt-browser
+  namespace: ytt
+  labels:
+    app: ytt-browser
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: browser
+spec:
+  type: ClusterIP
+  selector:
+    app: ytt-browser
+  ports:
+    - name: ws
+      port: 3001
+      targetPort: 3001
+      protocol: TCP

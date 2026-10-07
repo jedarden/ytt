@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Awaitable, Callable, TypeVar
 
@@ -64,6 +65,8 @@ if TYPE_CHECKING:
     from ytt.config import Settings
 
 T = TypeVar("T")
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Derived-URL redirect guard (docs/notes/derived-url-policy.md)
@@ -528,16 +531,17 @@ async def run_with_proxy_retry(
             ) from retry_exc
 
 
-async def fetch_transcript(
+async def fetch_transcript_ytdlp(
     video_id: str,
     lang: str | None,
     settings: "Settings",
 ) -> FetchResult:
-    """Async caption fetch with timeout + ip_blocked proxy retry.
+    """Async yt-dlp caption fetch with timeout + ip_blocked proxy retry.
 
     Wraps :func:`_do_fetch` in ``asyncio.to_thread``; timeout and the
     one-shot proxy retry are :func:`run_with_proxy_retry`'s shared semantics
-    (timeout = ``YTT_EXTRACT_TIMEOUT_SEC`` per attempt).
+    (timeout = ``YTT_EXTRACT_TIMEOUT_SEC`` per attempt).  This is the fallback
+    path when the browser path is enabled, and the only path when it is not.
     """
     return await run_with_proxy_retry(
         lambda proxy: asyncio.to_thread(_do_fetch, video_id, lang, settings, proxy),
@@ -547,3 +551,54 @@ async def fetch_transcript(
         what="Extraction",
         timeout_detail=" (possible silent hang; retrying may help)",
     )
+
+
+async def fetch_transcript(
+    video_id: str,
+    lang: str | None,
+    settings: "Settings",
+) -> FetchResult:
+    """Fetch captions: browser first (when configured), yt-dlp as fallback.
+
+    The single seam the server calls.  With ``YTT_BROWSER_WS_URL`` unset (or
+    ``YTT_FETCH_MODE=ytdlp``) this is exactly :func:`fetch_transcript_ytdlp`.
+
+    With the browser path enabled, a real browser's player mints the PO token
+    that YouTube's caption endpoint demands (yt-dlp cannot — its caption-track
+    download gets HTTP 429 / empty bodies; docs/notes/browser-fetch.md):
+
+    - the browser answers → return it;
+    - a **video-level** error (private, unavailable, live, no captions, ...)
+      → raised as-is; yt-dlp would only repeat it;
+    - a **browser/infrastructure** failure (server down, timeout, token
+      rejected, bot wall) → log it and fall back to yt-dlp, whose own errors
+      then name the browser failure so the operator sees both.
+    """
+    from ytt.browser_fetch import (
+        BrowserInfraError,
+        browser_fetch_enabled,
+        browser_fetch_transcript,
+    )
+
+    if not browser_fetch_enabled(settings):
+        return await fetch_transcript_ytdlp(video_id, lang, settings)
+
+    try:
+        return await browser_fetch_transcript(video_id, lang, settings)
+    except BrowserInfraError as browser_exc:
+        log.warning(
+            "browser caption fetch failed (%s: %s); falling back to yt-dlp for %s",
+            browser_exc.reason,
+            browser_exc,
+            video_id,
+        )
+        try:
+            return await fetch_transcript_ytdlp(video_id, lang, settings)
+        except NoCaptionsError:
+            raise
+        except YttError as ytdlp_exc:
+            raise YttError(
+                ytdlp_exc.error_code,
+                f"{ytdlp_exc.message} (browser path failed first: {browser_exc}; "
+                "yt-dlp fallback also failed)",
+            ) from ytdlp_exc

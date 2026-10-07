@@ -339,6 +339,23 @@ class Settings(BaseSettings):
     max_concurrent_whisper: int = 1
     extract_timeout_sec: int = 60
 
+    # --- browser-primary fetch (docs/notes/browser-fetch.md) ---
+    # Caption path selection. "auto" (default): the browser path is primary when
+    # YTT_BROWSER_WS_URL is set, else yt-dlp only (so a stranger who sets
+    # nothing gets the original behaviour). "browser": same as auto but a
+    # missing URL is a config error. "ytdlp": never use the browser.
+    fetch_mode: Literal["auto", "browser", "ytdlp"] = "auto"
+    # WebSocket endpoint of a `playwright run-server` (one fresh browser per
+    # connection). ytt appends the stealth launch options itself. The server is
+    # unauthenticated: keep it cluster-internal / tailnet-only, never public.
+    browser_ws_url: str = ""
+    # Whole-fetch budget for one browser caption fetch (connect + page + wait
+    # for the player's own caption request).
+    browser_timeout_sec: int = 45
+    # Concurrent browser fetches ytt will run against the server (each is its
+    # own ~400-700 MB Chromium on the server side).
+    browser_max_concurrency: int = 3
+
     # --- whisper ---
     # Model: large-v3-turbo (only model available on whisper-openai service)
     # RT_FACTOR calibrated for CPU: 2.0 (large-v3-turbo is slower than small)
@@ -609,6 +626,44 @@ class Settings(BaseSettings):
                 f"explicit YTT_RATE_LIMIT_BURST={self.rate_limit_burst} would "
                 "grant a one-shot allowance that contradicts it — unset the "
                 "burst or raise the rate"
+            )
+        return self
+
+    @field_validator("browser_ws_url")
+    @classmethod
+    def _browser_ws_url_valid(cls, v: str) -> str:
+        """``YTT_BROWSER_WS_URL`` is a ws(s):// endpoint — or empty (browser off).
+
+        Fail fast at startup, like the proxy URL: a typo would otherwise only
+        show up as every browser fetch silently falling back to yt-dlp.
+        """
+        stripped = v.strip()
+        if not stripped:
+            return ""
+        parsed = urlparse(stripped)
+        if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
+            raise ValueError(
+                "YTT_BROWSER_WS_URL must be a ws:// or wss:// URL with a host "
+                "(a `playwright run-server` endpoint) — or unset"
+            )
+        if any(ch.isspace() for ch in stripped):
+            raise ValueError("YTT_BROWSER_WS_URL must not contain whitespace")
+        return stripped
+
+    @field_validator("browser_timeout_sec", "browser_max_concurrency")
+    @classmethod
+    def _browser_positive(cls, v: int, info) -> int:
+        if v < 1:
+            raise ValueError(f"YTT_{info.field_name.upper()} must be >= 1, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _browser_mode_needs_url(self) -> "Settings":
+        """``YTT_FETCH_MODE=browser`` without an endpoint is a config error."""
+        if self.fetch_mode == "browser" and not self.browser_ws_url:
+            raise ValueError(
+                "YTT_FETCH_MODE=browser requires YTT_BROWSER_WS_URL "
+                "(use YTT_FETCH_MODE=auto to fall back to yt-dlp when unset)"
             )
         return self
 

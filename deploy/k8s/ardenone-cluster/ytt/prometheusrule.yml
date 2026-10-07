@@ -58,6 +58,41 @@ spec:
               YTT_PROXY_URL to a residential proxy (Webshare) as a temporary
               fallback.  Check /admin/egress for current IP/ASN.
 
+        # --- Browser-primary fetch failing (bead ytt-204947b5) ---
+        # The browser path is the primary caption fetcher; when it fails the
+        # router falls back to yt-dlp, which hides the problem from users
+        # (yt-dlp's caption download 429s for many videos).  This rule is the
+        # only place the drift shows: most browser fetches ending in
+        # infra_error/timeout (server down, PO token rejected = YouTube
+        # started flagging the browser, bot wall) over 30 minutes with at
+        # least 3 fetches.  Video-level errors (private, unavailable, ...) are
+        # a separate outcome and do NOT count: they are correct answers.
+        - alert: YttBrowserFetchFailing
+          expr: |
+            (
+              sum(increase(ytt_browser_fetch_total{outcome=~"infra_error|timeout"}[30m]))
+              /
+              sum(increase(ytt_browser_fetch_total[30m]))
+            ) > 0.5
+            and
+            sum(increase(ytt_browser_fetch_total[30m])) >= 3
+          for: 10m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt: over half of browser caption fetches are failing"
+            description: >
+              More than half of ytt's browser caption fetches ended in
+              infra_error or timeout over 30 minutes, so captions are being
+              served by the yt-dlp fallback (which 429s for many videos).
+              Check the ytt-browser pod (restarts, OOM), then the `reason` in
+              the ytt logs ("browser caption fetch failed (<reason>: ...)"):
+              empty_body = YouTube rejected the PO token (browser flagged as
+              automation); connect/timeout = server down or overloaded.
+              deploy/RUNBOOK.md has the response; YTT_FETCH_MODE=ytdlp is the
+              rollback.
+
         # --- Whisper service down ---
         - alert: YttWhisperDown
           expr: |

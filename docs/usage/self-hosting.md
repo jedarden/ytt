@@ -228,7 +228,7 @@ is what points it at yours.
 ```yaml
 services:
   ytt:
-    image: ghcr.io/jedarden/ytt:0.2.26
+    image: ghcr.io/jedarden/ytt:0.2.27
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"   # private — only the proxy talks to it
@@ -243,9 +243,28 @@ services:
       YTT_OAUTH_CLIENT_SECRET: "your-oauth-client-secret"
       YTT_OIDC_ISSUER: "https://idp.example.com/application/o/ytt/"  # your IdP's issuer (see Step 4)
       YTT_WHISPER_URL: "http://whisper:8000"
+      # Optional but strongly recommended: fetch captions through a real
+      # browser. YouTube's caption endpoint serves a body only to a request
+      # carrying a PO token its own player minted, so yt-dlp-only captions
+      # fail (HTTP 429 / empty) on many videos. See docs/notes/browser-fetch.md.
+      # Unset = yt-dlp only. Needs the `browser` service below.
+      YTT_BROWSER_WS_URL: "ws://browser:3001/"
       YTT_CACHE_DIR: "/cache"
       YTT_CACHE_MAX_BYTES: "2Gi"
       YTT_SCRATCH_DIR: "/scratch"   # swept on every boot — keep it dedicated to ytt
+
+  # Optional: browser server for the primary caption fetch (one fresh Chromium
+  # per fetch). UNAUTHENTICATED and able to browse from your IP — never publish
+  # a port for it; only ytt (same compose network) should reach it.
+  # The Playwright version here must match ytt's `playwright` client (1.63.x).
+  browser:
+    image: mcr.microsoft.com/playwright/python:v1.63.0-noble
+    restart: unless-stopped
+    init: true   # reaps Chromium's helper processes (zombies otherwise)
+    command: >
+      bash -c "pip3 install --quiet playwright==1.63.0 &&
+      exec python3 -m playwright run-server --host 0.0.0.0 --port 3001"
+    mem_limit: 3g
 
   # Optional: Whisper ASR service
   # https://github.com/stpb/whisper-openai

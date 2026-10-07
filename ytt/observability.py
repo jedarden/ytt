@@ -8,6 +8,8 @@ Metrics (all registered against the default CollectorRegistry):
 
     ytt_fetch_blocks_total{outcome}      — Counter
     ytt_fetch_empty_body_total           — Counter
+    ytt_browser_fetch_total              — Counter  (browser path, by outcome)
+    ytt_browser_fetch_seconds            — Histogram
     ytt_whisper_errors_total{reason}     — Counter
     ytt_whisper_job_seconds              — Histogram
     ytt_cache_bytes                      — Gauge
@@ -87,6 +89,24 @@ for _fetch_outcome in FETCH_BLOCK_OUTCOMES:
 ytt_fetch_empty_body_total = Counter(
     "ytt_fetch_empty_body_total",
     "Total empty-body (unrecognized yt-dlp error) fetch events.",
+)
+
+#: Browser-primary caption fetches (ytt.browser_fetch), by outcome:
+#: ok | video_error | infra_error | timeout.  ``infra_error``/``timeout`` are
+#: the cases the router answers by falling back to yt-dlp.
+ytt_browser_fetch_total = Counter(
+    "ytt_browser_fetch_total",
+    "Total browser caption fetches, labelled by outcome.",
+    ["outcome"],
+)
+for _browser_outcome in ("ok", "video_error", "infra_error", "timeout"):
+    ytt_browser_fetch_total.labels(outcome=_browser_outcome)
+
+#: Wall-clock of one browser caption fetch (connect → caption body).
+ytt_browser_fetch_seconds = Histogram(
+    "ytt_browser_fetch_seconds",
+    "Browser caption fetch duration in seconds.",
+    buckets=(1, 2, 3, 5, 8, 13, 21, 34, 55),
 )
 
 #: Whisper transcription errors.

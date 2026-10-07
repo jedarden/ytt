@@ -112,6 +112,7 @@ _MARKER_DEFAULTS: dict[str, tuple[object, tuple[str, ...]]] = {
     ),
     "YTT_JWT_SIGNING_SECRET": (None, ("unset",)),
     "YTT_PROXY_URL": (None, ("unset",)),
+    "YTT_BROWSER_WS_URL": ("", ("unset",)),
 }
 
 #: README rows documented only as "*(reference …)*" — the model default must

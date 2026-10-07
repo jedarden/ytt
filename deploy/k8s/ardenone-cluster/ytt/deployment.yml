@@ -60,7 +60,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt
-          image: ronaldraygun/ytt:0.2.26
+          image: ronaldraygun/ytt:0.2.27
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -105,6 +105,23 @@ spec:
               value: "4"
             - name: YTT_MAX_CONCURRENT_WHISPER
               value: "1"
+
+            # --- Browser-primary caption fetch (bead ytt-204947b5) ---
+            # YouTube's caption endpoint needs a PO token only its own player
+            # can mint; yt-dlp cannot, so a real browser (ytt-browser pod, one
+            # fresh Chromium per fetch) is the primary fetcher and yt-dlp the
+            # fallback.  "browser" (not "auto") so a missing URL fails startup
+            # loudly instead of silently reverting to the 429-prone path.
+            # Rollback without an image change: YTT_FETCH_MODE=ytdlp.
+            # Inert on images older than 0.2.27 (unknown YTT_* are ignored).
+            - name: YTT_FETCH_MODE
+              value: "browser"
+            - name: YTT_BROWSER_WS_URL
+              value: "ws://ytt-browser.ytt.svc.cluster.local:3001/"
+            - name: YTT_BROWSER_TIMEOUT_SEC
+              value: "45"
+            - name: YTT_BROWSER_MAX_CONCURRENCY
+              value: "3"
 
             # --- Whisper (caption-less videos only) ---
             - name: YTT_WHISPER_URL
@@ -174,7 +191,9 @@ spec:
               ephemeral-storage: "100Mi"
             limits:
               cpu: "1000m"
-              memory: "1Gi"
+              # was 1Gi: the Playwright client spawns a node driver per
+              # browser fetch (~80 MB each, up to YTT_BROWSER_MAX_CONCURRENCY).
+              memory: "1536Mi"
               ephemeral-storage: "500Mi"
 
           livenessProbe:

@@ -6,8 +6,12 @@ mobile and Claude desktop.
 
 All transcript retrieval is orchestrated **inside the server** — no
 third-party transcript APIs are used for YouTube. ytt does not call managed
-transcript providers. Captions are extracted with
-[yt-dlp](https://github.com/yt-dlp/yt-dlp) (json3, with rolling-caption dedup).
+transcript providers. Captions are fetched through a real browser's own
+player when a browser server is configured (`YTT_BROWSER_WS_URL` — YouTube's
+caption endpoint demands a token only its player can mint; see
+[`docs/notes/browser-fetch.md`](docs/notes/browser-fetch.md)), with
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) (json3, with rolling-caption dedup)
+as the fallback and the only path when none is configured.
 If a video has no captions, ytt downloads its audio and sends it to a
 Whisper-compatible ASR service: the project-operated reference endpoint by
 default, or the endpoint selected with `YTT_WHISPER_URL`. That default is
@@ -24,7 +28,7 @@ docker run --rm \
   -e YTT_OAUTH_CLIENT_ID=your-oauth-client-id \
   -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
   -p 8080:8080 \
-  ghcr.io/jedarden/ytt:0.2.26
+  ghcr.io/jedarden/ytt:0.2.27
 ```
 
 `YTT_WHISPER_URL` is optional for captioned videos, so the quick start above
@@ -230,7 +234,8 @@ ytt MCP server (uvicorn, 1 worker)
   ├─ Single-flight: one yt-dlp call per video per in-flight window
   ├─ LRU cache: flat files, byte-cap, whole-unit eviction
   ▼
-  yt-dlp caption fetch (json3, rolling-caption dedup)
+  caption fetch (json3, rolling-caption dedup):
+    browser player first (when YTT_BROWSER_WS_URL is set), yt-dlp as fallback
     └─ no captions? → Whisper ASR (via YTT_WHISPER_URL)
 ```
 

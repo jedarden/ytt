@@ -1,4 +1,11 @@
-"""Egress-boundary regression guard: no managed transcript API, no PoToken provider.
+"""Egress-boundary regression guard: no managed transcript API, no third-party PoToken provider.
+
+Boundary change (bead ytt-204947b5, plan §Fetch core): a real browser is now the
+primary caption fetcher, because YouTube's caption endpoint demands a PO token
+that only YouTube's own player can mint. What stays forbidden is any THIRD
+PARTY in that chain: managed transcript APIs and PoToken *providers*
+(bgutil & co.). The token is minted by youtube.com's player in OUR browser and
+used by that browser; ytt never receives, stores or replays it.
 
 The documentation promise this module enforces:
 
@@ -90,6 +97,10 @@ SANCTIONED_RUNTIME_DEPS: frozenset[str] = frozenset(
         "prometheus-client",
         "structlog",
         "starlette",
+        # Browser-primary caption fetch: the Playwright CLIENT only; the browsers
+        # run in a separate `playwright run-server` pod. Reviewed under
+        # ytt-204947b5: it reaches youtube.com through that server, nothing else.
+        "playwright",
     }
 )
 
@@ -394,7 +405,8 @@ class TestInstalledDistributionSurface:
             "the environment breaches the no-PoToken-provider / "
             "no-transcript-API boundary: " + "; ".join(violations) + ". "
             "Remove it (pyproject.toml + uv.lock, then `uv sync`) — ytt "
-            "avoids PoTokens through player-client choice, not a provider."
+            "gets PO tokens only from YouTube's own player in its own "
+            "browser (docs/notes/browser-fetch.md), never from a provider."
         )
 
 
@@ -417,6 +429,9 @@ NETWORK_IMPORTS_BY_FILE: dict[str, set[str]] = {
     "canary.py": {"yt_dlp"},
     "selftest.py": {"httpx"},
     "derived_url.py": {"yt_dlp"},
+    # Browser-primary caption fetch (ytt-204947b5): drives a remote browser
+    # that loads youtube.com; no other network library.
+    "browser_fetch.py": {"playwright"},
 }
 
 #: Stdlib modules that can open connections and must never be imported by
@@ -532,18 +547,25 @@ class TestConfigUrlSurface:
         URL field (``YTT_TRANSCRIPT_API_URL``, say) cannot appear without
         updating this guard — the deliberate-change moment."""
         url_fields = {name for name in Settings.model_fields if "url" in name}
-        assert url_fields == {
+        sanctioned = {
             "whisper_url",
             "proxy_url",
             "public_url",
             "oidc_config_url",
-        }, (
-            f"Settings grew URL field(s) {sorted(url_fields - {'whisper_url', 'proxy_url', 'public_url', 'oidc_config_url'})}. "
-            "Transcript egress is yt-dlp→YouTube plus YTT_WHISPER_URL; "
-            "proxy_url only re-routes that same traffic; public_url / "
-            "oidc_config_url are inbound/OAuth. A new URL setting that can "
-            "point transcript retrieval at a third party must not ship — "
-            "update this guard only after the boundary review."
+            # ytt-204947b5: the `playwright run-server` that hosts the browser
+            # which loads youtube.com. It is a browser, not a transcript
+            # service — and ytt only ever asks it to navigate to youtube.com
+            # (pinned by tests/unit/test_browser_fetch.py).
+            "browser_ws_url",
+        }
+        assert url_fields == sanctioned, (
+            f"Settings grew URL field(s) {sorted(url_fields - sanctioned)}. "
+            "Transcript egress is a browser/yt-dlp→YouTube plus "
+            "YTT_WHISPER_URL; proxy_url only re-routes that same traffic; "
+            "browser_ws_url is the browser host; public_url / oidc_config_url "
+            "are inbound/OAuth. A new URL setting that can point transcript "
+            "retrieval at a third party must not ship — update this guard "
+            "only after the boundary review."
         )
 
 

@@ -344,6 +344,7 @@ git push
 | `YttWhisperDown` | No (rate window 10 min) | A single mid-swap Whisper failure won't trip it |
 | `YttHomeIPBurned` | No | Cannot fire at all as of 0.2.20: `ytt_fetch_blocks_total` has no increment site in the release (see `docs/notes/canary-first-fetch.md`; pre-registration tracked as bead `ytt-f77d1be4`) |
 | `YttCacheUndersized` | Only after the §2.2 wiring gap is fixed | Evictions post-restart are from a cold-counter baseline until then |
+| `YttBrowserFetchFailing` | Possibly | Needs ≥ 3 browser fetches in 30 m with > 50 % `infra_error`/`timeout` for 10 m. A swap of the `ytt-browser` pod (not of ytt) can trip it — see §8 |
 
 ## 7. What must NOT be done directly with kubectl
 
@@ -374,3 +375,53 @@ collects the read-only evidence (§3 step 4's corroboration commands) and
 hands the exec step to an operator — same split as the cache, OAuth-state,
 and deletion runbooks.  The proxy's RBAC cannot write, so a denied write
 there is the boundary working, not an outage to route around.
+
+## 8. The browser server (`ytt-browser`)
+
+ytt's primary caption fetch drives a real browser, because YouTube's caption
+endpoint serves a body only to a request carrying a PO token that its own
+player minted (design and measurements: `docs/notes/browser-fetch.md`).  The
+browser lives in its **own pod** (`ytt-browser`, `playwright run-server`, one
+fresh Chromium per fetch) so a browser crash or OOM cannot restart ytt and drop
+its in-flight jobs.
+
+**What it looks like when healthy:** `ytt_browser_fetch_total{outcome="ok"}`
+climbing with traffic; ~2 s from request to caption body for a cache miss;
+`ytt-browser` Running with no restarts.
+
+**What to look at, in order, when `YttBrowserFetchFailing` fires** (read-only,
+no kubectl writes):
+
+1. `kubectl --server=http://traefik-ardenone-cluster:8001 get pods -n ytt` —
+   `ytt-browser` restarting or `OOMKilled`?  (`describe pod` shows the last
+   state.)  Memory is sized for `YTT_BROWSER_MAX_CONCURRENCY` (3) × ~0.7 GiB.
+2. The *reason* ytt logs for each fallback —
+   `browser caption fetch failed (<reason>: …); falling back to yt-dlp`:
+
+   | `reason` | Meaning | Response |
+   |---|---|---|
+   | `connect` | server unreachable (pod down, DNS, restarting) | check step 1; pod restarts on its own |
+   | `timeout` / `navigate` / `no_request` | slow or stuck page, player never asked for the track | usually transient; persistent ⇒ YouTube changed the player — escalate |
+   | `empty_body` | `200` + 0 bytes: **YouTube rejected the PO token** — the browser is being flagged as automation | the arms-race signal: escalate; check the stealth launch options (`ytt/browser_fetch.py::BROWSER_LAUNCH_OPTIONS`) and the Playwright/Chromium versions |
+   | `playability_blocked` | bot wall on this egress (`LOGIN_REQUIRED … not a bot`) | egress problem, same as `YttHomeIPBurned` — see `docs/notes/proxy-egress.md` |
+   | `rate_limited` | the player's own caption request got `429` | back off; persistent ⇒ escalate |
+
+3. While degraded, captions are still served by the yt-dlp fallback — for the
+   subset of videos it can fetch (it `429`s on many).  `video_error` outcomes
+   (private, unavailable, live) are correct answers and never count.
+
+**Rollback (no image change):** set `YTT_FETCH_MODE: "ytdlp"` in
+`k8s/ardenone-cluster/ytt/deployment.yml` in declarative-config, push, let
+ArgoCD sync.  ytt then behaves exactly as before the browser path existed.
+
+**Upgrading Playwright:** the server image tag
+(`mcr.microsoft.com/playwright/python:vX.Y.Z-noble`), its `pip3 install
+playwright==X.Y.Z` line, and ytt's `playwright==X.Y.Z` pin in `pyproject.toml`
+must move together — client and server must share major.minor.  A mismatch
+shows up as every fetch failing with `reason=connect`.
+
+**Never expose it.**  The server is unauthenticated and can browse from the
+home IP.  No IngressRoute, no `tailscale.com/expose`, no external-dns
+annotation.  (`NetworkPolicy` is inert on this CNI, so "no route" is the whole
+boundary.)  Startup needs PyPI reachable (the Playwright package is
+`pip install`ed at container start).

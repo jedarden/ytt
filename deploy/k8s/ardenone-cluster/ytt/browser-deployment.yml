@@ -1,0 +1,115 @@
+---
+# ytt-browser — the browser server behind ytt's PRIMARY caption fetch
+# (bead ytt-204947b5; design, measurements and failure contract:
+# ytt repo docs/notes/browser-fetch.md).
+#
+# Why this exists: YouTube's caption endpoint returns an empty body / HTTP 429
+# unless the request carries a PO token that YouTube's own player minted, and
+# yt-dlp cannot mint one (31/36 known-bad videos still 429'd after a yt-dlp
+# bump).  A stealth Chromium's player can, so ytt connects here over WebSocket
+# and lets the player make the request itself.
+#
+# `playwright run-server` starts ONE FRESH BROWSER PER CONNECTION and closes it
+# when ytt disconnects, so memory cannot accumulate across fetches (a single
+# long-lived context was OOM-killed at ~19 pages) and a browser crash cannot
+# restart ytt, whose job registry is in-process.  ytt sends the stealth launch
+# options in the connection URL; nothing is configured here.
+#
+# SECURITY: the server is UNAUTHENTICATED and can browse from the home IP.  It
+# is ClusterIP-only with no IngressRoute and no tailscale exposure — never add
+# either.  (NetworkPolicy is inert on this CNI, so the boundary is "no route".)
+#
+# Image: stock mcr.microsoft.com/playwright/python (browsers baked in at
+# /ms-playwright).  It does NOT ship the playwright package itself, so it is
+# pip-installed at start, pinned to the image's own version (the server and
+# ytt's client wheel must share major.minor).  Startup therefore needs PyPI.
+#
+# PID 1 is bash supervising the server: Chromium leaves zombie helper
+# processes unless PID 1 reaps them (measured: 12 zombies after three
+# fetches with the server as PID 1, 0 with bash as PID 1).
+#
+# Deployment, not Job (Jobs are banned here); replicas 1 + Recreate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-browser
+  namespace: ytt
+  labels:
+    app: ytt-browser
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: browser
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytt-browser
+  template:
+    metadata:
+      labels:
+        app: ytt-browser
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: browser
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: browser
+          image: mcr.microsoft.com/playwright/python:v1.63.0-noble
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip3 install --quiet playwright==1.63.0
+              python3 -m playwright run-server --host 0.0.0.0 --port 3001 &
+              server=$!
+              # bash is PID 1: forward termination, and reap orphaned Chromium helpers.
+              trap 'kill -TERM "$server" 2>/dev/null || true; wait "$server" || true; exit 0' TERM INT
+              wait "$server"
+          ports:
+            - name: ws
+              containerPort: 3001
+              protocol: TCP
+          # Sizing: each in-flight fetch is its own Chromium (~400-700 MB
+          # measured; docs/notes/browser-fetch.md).  ytt's
+          # YTT_BROWSER_MAX_CONCURRENCY=3 → ~2 GiB peak.  Request is the
+          # typical (one or two fetches); the limit is the 3-fetch peak.
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "1Gi"
+              ephemeral-storage: "200Mi"
+            limits:
+              cpu: "2000m"
+              memory: "3Gi"
+              ephemeral-storage: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          # Not the HTTP surface (it speaks WebSocket): a TCP accept is the
+          # readiness signal.  Generous liveness delay: the pip install at
+          # start takes tens of seconds and must not be killed mid-way.
+          readinessProbe:
+            tcpSocket:
+              port: 3001
+            initialDelaySeconds: 25
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 3001
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

@@ -1,5 +1,15 @@
 # yt-dlp Player-Client Pin & the PoToken Avoidance Contract
 
+> **Scope note (2026-10-07, bead `ytt-204947b5`).** This contract now governs the
+> **yt-dlp fallback and the Whisper audio path**, not the primary caption fetch. A real
+> browser is the primary fetcher when `YTT_BROWSER_WS_URL` is set
+> (`docs/notes/browser-fetch.md`), because live evidence showed the caption (Subs)
+> request is PO-token-gated for many videos on exactly the clients pinned below — the
+> "clean" classification here reflects yt-dlp's policy tables, which no longer match
+> YouTube's live behaviour for those videos (31/36 known-bad videos returned HTTP 429
+> after the 2026.8.19 bump). The pin, the cookie-free rule and the contract tests stay:
+> they keep the fallback and audio path honest.
+
 ## The contract
 
 `ytt` extracts YouTube captions and (fallback) audio **cookie-free, with no

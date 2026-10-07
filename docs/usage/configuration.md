@@ -129,6 +129,17 @@ allowlisted caller can't exhaust the home IP / shared Whisper service"):
 | `YTT_MAX_PENDING_WHISPER_JOBS` | `16` | Backlog cap for the ASR queue: the total of *pending* (waiting for a `YTT_MAX_CONCURRENT_WHISPER` slot) plus *running* jobs. Where the per-subject quota caps each subject's *rate*, this caps the system's *backlog* — a fleet of allowlisted callers cannot pile unbounded queued work onto the shared Whisper service. New caption-less requests are denied with `error_code="rate_limited"` ("Whisper queue full (…/… jobs pending or running)") while the backlog is at capacity; joining a job already in flight is always allowed and a queue-full denial spends no quota slot. `0` = deny every new ASR job (fail-closed, same convention as the per-subject limits). |
 | `YTT_EXTRACT_TIMEOUT_SEC` | `60` | Timeout for `yt-dlp extract_info` calls. On expiry, the single-flight Future resolves as `rate_limited`. |
 
+## Browser-primary caption fetch
+
+YouTube's caption endpoint only serves a caption body to a request carrying a PO token that YouTube's own player minted for that exact video and track; yt-dlp cannot mint one, so its caption downloads fail with HTTP 429 or an empty body on many videos. With a browser server configured, ytt fetches captions through a real browser instead and uses yt-dlp only as a fallback. Design, measurements and operations: [`docs/notes/browser-fetch.md`](../notes/browser-fetch.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTT_BROWSER_WS_URL` | *(unset)* | WebSocket endpoint of a [`playwright run-server`](https://playwright.dev/python/docs/docker#remote-connection) (`ws://` or `wss://`). ytt appends the stealth launch options itself and the server starts one fresh browser per connection. **Unset = the browser path is off** and ytt behaves exactly as before (yt-dlp only). The server has no authentication: keep it cluster-internal or tailnet-only, never publicly reachable. Its Playwright version must match ytt's `playwright` client (same major.minor). |
+| `YTT_FETCH_MODE` | `auto` | `auto`: the browser path is primary when `YTT_BROWSER_WS_URL` is set, otherwise yt-dlp only. `browser`: as `auto`, but startup fails if `YTT_BROWSER_WS_URL` is unset. `ytdlp`: never use the browser, even if a URL is set (rollback switch). With the browser path active, yt-dlp runs **only** when the browser path itself failed (server down, timeout, token rejected, bot wall) — never after a video-level error such as `private`, `unavailable` or `is_livestream`. |
+| `YTT_BROWSER_TIMEOUT_SEC` | `45` | Whole-fetch budget for one browser caption fetch (connect, load the watch page, wait for the player's own caption request). On expiry the fetch counts as a browser failure and the yt-dlp fallback runs. |
+| `YTT_BROWSER_MAX_CONCURRENCY` | `3` | Concurrent browser fetches ytt runs against the server. Each is its own Chromium on the server (~400–700 MB), so size the server's memory for this many. Extra fetches wait their turn. |
+
 ## Whisper ASR
 
 | Variable | Default | Description |

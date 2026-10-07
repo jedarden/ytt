@@ -75,6 +75,10 @@ YTT_DOCUMENTED_SURFACE: dict[str, frozenset[str]] = {
     # --- ytt.observability (registered in the server process too) -----------
     "ytt_fetch_blocks": frozenset({"outcome"}),
     "ytt_fetch_empty_body": frozenset(),
+    # Browser-primary caption fetch (ytt-204947b5): outcome is a closed enum
+    # (ok | video_error | infra_error | timeout); the histogram is unlabeled.
+    "ytt_browser_fetch": frozenset({"outcome"}),
+    "ytt_browser_fetch_seconds": frozenset(),
     "ytt_whisper_errors": frozenset({"reason"}),
     "ytt_whisper_job_seconds": frozenset(),
     "ytt_cache_bytes": frozenset(),
