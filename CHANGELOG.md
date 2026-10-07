@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Browser-server docs, runbook and compose example corrected after the in-cluster
+  acceptance run** (bead `ytt-204947b5`; no image change — the 0.2.28 code is
+  unaffected). The first acceptance run got **0 of 39** browser fetches because the
+  browser server was started with `playwright run-server`: since Playwright 1.6x it
+  silently drops client-supplied `args` / `ignoreDefaultArgs` (the options that stop the
+  browser looking automated) unless started `--unsafe` (which would let any client set
+  `executablePath`), so the browser came up `HeadlessChrome` with
+  `navigator.webdriver === true` and YouTube rejected the player's PO token. The server
+  now runs `playwright launch-server --config` with the stealth options **fixed on the
+  server**, one shared Chromium with a fresh context per fetch (RSS plateaus ~860 MB over
+  25 full fetch cycles) and a 6 h recycle loop; the rerun passed (38/41, all via the
+  browser, median 5.4 s). Corrected: `docs/notes/browser-fetch.md`, `docs/plan/plan.md`,
+  `docs/usage/configuration.md` (`YTT_BROWSER_WS_URL`), the `docs/usage/self-hosting.md`
+  compose example (it used `run-server` and would have hit the same empty bodies — the
+  corrected service is verified to apply stealth), `deploy/RUNBOOK.md` §8, the deploy
+  mirror, and code comments. The client still sends the options in the URL, which is
+  harmless against a `launch-server` and honoured by servers that accept client options.
+
 ## [0.2.28] — 2026-10-07
 
 > The 0.2.27 number was consumed by a failed release attempt: the `ytt-build`

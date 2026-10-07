@@ -108,8 +108,8 @@ spec:
 
             # --- Browser-primary caption fetch (bead ytt-204947b5) ---
             # YouTube's caption endpoint needs a PO token only its own player
-            # can mint; yt-dlp cannot, so a real browser (ytt-browser pod, one
-            # fresh Chromium per fetch) is the primary fetcher and yt-dlp the
+            # can mint; yt-dlp cannot, so a real browser (ytt-browser pod: one
+            # shared Chromium, fresh context per fetch) is the primary fetcher and yt-dlp the
             # fallback.  "browser" (not "auto") so a missing URL fails startup
             # loudly instead of silently reverting to the 429-prone path.
             # Rollback without an image change: YTT_FETCH_MODE=ytdlp.
@@ -117,7 +117,7 @@ spec:
             - name: YTT_FETCH_MODE
               value: "browser"
             - name: YTT_BROWSER_WS_URL
-              value: "ws://ytt-browser.ytt.svc.cluster.local:3001/"
+              value: "ws://ytt-browser.ytt.svc.cluster.local:3001/ytt"
             - name: YTT_BROWSER_TIMEOUT_SEC
               value: "45"
             - name: YTT_BROWSER_MAX_CONCURRENCY

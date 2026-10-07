@@ -98,7 +98,7 @@ SANCTIONED_RUNTIME_DEPS: frozenset[str] = frozenset(
         "structlog",
         "starlette",
         # Browser-primary caption fetch: the Playwright CLIENT only; the browsers
-        # run in a separate `playwright run-server` pod. Reviewed under
+        # run in a separate `playwright launch-server` pod. Reviewed under
         # ytt-204947b5: it reaches youtube.com through that server, nothing else.
         "playwright",
     }
@@ -552,7 +552,7 @@ class TestConfigUrlSurface:
             "proxy_url",
             "public_url",
             "oidc_config_url",
-            # ytt-204947b5: the `playwright run-server` that hosts the browser
+            # ytt-204947b5: the Playwright server (`launch-server`) that hosts the browser
             # which loads youtube.com. It is a browser, not a transcript
             # service — and ytt only ever asks it to navigate to youtube.com
             # (pinned by tests/unit/test_browser_fetch.py).

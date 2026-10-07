@@ -345,8 +345,11 @@ class Settings(BaseSettings):
     # nothing gets the original behaviour). "browser": same as auto but a
     # missing URL is a config error. "ytdlp": never use the browser.
     fetch_mode: Literal["auto", "browser", "ytdlp"] = "auto"
-    # WebSocket endpoint of a `playwright run-server` (one fresh browser per
-    # connection). ytt appends the stealth launch options itself. The server is
+    # WebSocket endpoint of a Playwright server started with `playwright
+    # launch-server --config` whose config FIXES the stealth launch options
+    # (`run-server` silently drops client options without --unsafe — see
+    # docs/notes/browser-fetch.md). ytt also sends the options in the URL,
+    # best effort only. The server is
     # unauthenticated: keep it cluster-internal / tailnet-only, never public.
     browser_ws_url: str = ""
     # Whole-fetch budget for one browser caption fetch (connect + page + wait
@@ -644,7 +647,7 @@ class Settings(BaseSettings):
         if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
             raise ValueError(
                 "YTT_BROWSER_WS_URL must be a ws:// or wss:// URL with a host "
-                "(a `playwright run-server` endpoint) — or unset"
+                "(a Playwright server endpoint) — or unset"
             )
         if any(ch.isspace() for ch in stripped):
             raise ValueError("YTT_BROWSER_WS_URL must not contain whitespace")

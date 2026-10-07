@@ -6,10 +6,11 @@ for that exact video + track.  yt-dlp cannot mint one, which is why its
 caption-track download fails on many videos.  A real browser can: YouTube's
 own player attaches the token to the request it issues itself.
 
-This module drives a **remote** Chromium (a ``playwright run-server``
-endpoint, ``YTT_BROWSER_WS_URL``): one fresh browser per fetch (the server
-launches one per connection), one page, and reads the response of the
-player's *own* ``/api/timedtext`` request.  No token is ever extracted,
+This module drives a **remote** Chromium (a Playwright server endpoint,
+``YTT_BROWSER_WS_URL`` — ``playwright launch-server --config`` with the stealth
+launch options fixed on the server): a fresh context and one page per fetch,
+closed afterwards, and reads the response of the player's *own*
+``/api/timedtext`` request.  No token is ever extracted,
 stored or replayed — the token is minted by YouTube's player in our browser
 and used by that browser.  See ``docs/notes/browser-fetch.md``.
 
@@ -74,8 +75,15 @@ class BrowserInfraError(Exception):
 # Endpoint + stealth configuration
 # ---------------------------------------------------------------------------
 
-#: Launch options sent to the ``run-server`` endpoint (it applies them to the
-#: browser it starts for this connection).  Full Chromium in new-headless mode
+#: The stealth launch options.  AUTHORITATIVE COPY: the server config in
+#: ``deploy/k8s/ardenone-cluster/ytt/browser-deployment.yml`` (and the compose
+#: example in ``docs/usage/self-hosting.md``) — a ``launch-server`` fixes them
+#: where clients cannot change them.  ytt ALSO sends this same set in the
+#: connection URL; only servers that accept client launch options honour it
+#: (an older ``run-server``, or one started ``--unsafe``) and it is harmless
+#: otherwise.  Do NOT rely on it: Playwright 1.6x ``run-server`` silently drops
+#: ``args`` / ``ignoreDefaultArgs`` without ``--unsafe``, leaving a browser that
+#: looks automated (measured: 39/39 empty bodies in-cluster).  Full Chromium in new-headless mode
 #: with the automation switches removed: Playwright's default headless shell
 #: is detected as automation and YouTube then rejects the player's PO token
 #: (empty 200 bodies — ytt-daefe30b v2).
@@ -105,9 +113,11 @@ BROWSER_USER_AGENT = (
 def browser_endpoint(ws_url: str) -> str:
     """Return *ws_url* with the stealth launch options attached.
 
-    ``playwright run-server`` reads ``browser`` and ``launch-options`` from
-    the connection URL's query.  An operator-supplied ``launch-options`` is
-    left alone (it is their endpoint); otherwise ours is added.
+    Best effort only (see :data:`BROWSER_LAUNCH_OPTIONS`): a ``run-server``
+    that accepts client options reads ``browser`` and ``launch-options`` from
+    the connection URL's query; a ``launch-server`` ignores them.  An
+    operator-supplied ``launch-options`` is left alone (it is their endpoint);
+    otherwise ours is added.
     """
     parts = urlparse(ws_url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))

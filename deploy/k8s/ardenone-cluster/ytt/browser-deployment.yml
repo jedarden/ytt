@@ -9,11 +9,22 @@
 # bump).  A stealth Chromium's player can, so ytt connects here over WebSocket
 # and lets the player make the request itself.
 #
-# `playwright run-server` starts ONE FRESH BROWSER PER CONNECTION and closes it
-# when ytt disconnects, so memory cannot accumulate across fetches (a single
-# long-lived context was OOM-killed at ~19 pages) and a browser crash cannot
-# restart ytt, whose job registry is in-process.  ytt sends the stealth launch
-# options in the connection URL; nothing is configured here.
+# `playwright launch-server` with the stealth launch options FIXED HERE, on the
+# server.  Not `run-server`: since Playwright 1.6x `run-server` silently drops
+# client-supplied `args` / `ignoreDefaultArgs` (the options that stop the
+# browser looking automated) unless started with `--unsafe`, which would let
+# any pod on the cluster network set `executablePath` — arbitrary command
+# execution in this pod.  Measured 2026-10-07: through `run-server` the browser
+# came up HeadlessChrome / navigator.webdriver=true, YouTube rejected the
+# player's PO token, and 39/39 browser fetches returned an empty body.  With
+# the options set server-side, webdriver=false and the token is accepted.
+#
+# One shared browser; ytt opens a fresh CONTEXT per fetch and closes it.
+# Measured: RSS plateaus (~860 MB after 25 full fetch cycles, ~1 MB/cycle
+# drift), unlike the single long-lived CONTEXT that was OOM-killed at ~19
+# pages.  A browser crash can still restart only this pod, never ytt, whose
+# job registry is in-process.  The bash loop recycles the browser every 6 h to
+# bound the slow drift (a fetch in flight at that moment falls back to yt-dlp).
 #
 # SECURITY: the server is UNAUTHENTICATED and can browse from the home IP.  It
 # is ClusterIP-only with no IngressRoute and no tailscale exposure — never add
@@ -63,11 +74,31 @@ spec:
             - |
               set -euo pipefail
               pip3 install --quiet playwright==1.63.0
-              python3 -m playwright run-server --host 0.0.0.0 --port 3001 &
-              server=$!
+              # Stealth launch options live HERE, not in the client (see header).
+              # Full Chromium in new-headless mode, automation switches removed.
+              # ytt connects to ws://ytt-browser.ytt.svc.cluster.local:3001/ytt
+              cat > /tmp/launch.json <<'JSON'
+              {
+                "channel": "chromium",
+                "headless": true,
+                "ignoreDefaultArgs": ["--enable-automation"],
+                "args": ["--no-sandbox", "--disable-dev-shm-usage",
+                         "--disable-blink-features=AutomationControlled"],
+                "host": "0.0.0.0",
+                "port": 3001,
+                "wsPath": "ytt"
+              }
+              JSON
+              server=""
               # bash is PID 1: forward termination, and reap orphaned Chromium helpers.
-              trap 'kill -TERM "$server" 2>/dev/null || true; wait "$server" || true; exit 0' TERM INT
-              wait "$server"
+              trap '[ -n "$server" ] && kill -TERM "$server" 2>/dev/null; wait 2>/dev/null; exit 0' TERM INT
+              while true; do
+                # 6 h recycle (timeout exits 124) and crash-restart in one loop.
+                timeout 21600 python3 -m playwright launch-server --browser chromium --config /tmp/launch.json &
+                server=$!
+                wait "$server" || true
+                sleep 1
+              done
           ports:
             - name: ws
               containerPort: 3001

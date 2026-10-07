@@ -29,10 +29,10 @@ Evidence that the token — not the IP and not the client's TLS fingerprint — 
 
 ```
 ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (separate)
-  fetch_transcript()                                         playwright run-server :3001
-   └ browser_fetch_transcript ──ws://…/?browser=chromium──►   └ one fresh stealth Chromium
-        │       &launch-options=<stealth json>                  per connection, closed on done
-        ▼
+  fetch_transcript()                                         playwright launch-server :3001/ytt
+   └ browser_fetch_transcript ──────── ws://…:3001/ytt ────►   └ ONE stealth Chromium, options
+        │   (fresh context per fetch, closed afterwards)          fixed in the server config;
+        ▼                                                         recycled every 6 h
    1. goto watch page            2. read ytInitialPlayerResponse
       (the ONLY navigation)         playability → error taxonomy; title/author/length/date;
                                     caption-track list
@@ -42,17 +42,31 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
    5. capture that response → parse_json3 → FetchResult (same shape as yt-dlp path)
 ```
 
-- **Separate server, per-connection browser.** A single long-lived browser context grew
-  to the pod's 2.5 GiB limit and was OOM-killed after ~19 pages; one browser per fetch
-  has no cross-fetch state. A browser crash cannot restart ytt, whose job registry and
-  single-flight table are in-process. The server image is the stock
-  `mcr.microsoft.com/playwright/python` image; ytt only needs the small client wheel
-  (no Dockerfile base change). Client and server Playwright versions must match
+- **Separate server, stealth fixed on the server.** A browser crash cannot restart ytt,
+  whose job registry and single-flight table are in-process. The server image is the
+  stock `mcr.microsoft.com/playwright/python` image; ytt only needs the small client
+  wheel (no Dockerfile base change). Client and server Playwright versions must match
   major.minor.
-- **Stealth is load-bearing.** Launch options (`BROWSER_LAUNCH_OPTIONS`): full Chromium
-  (`channel=chromium`, new headless), `--enable-automation` removed,
-  `--disable-blink-features=AutomationControlled`, plus an init script hiding
-  `navigator.webdriver`. The default headless shell is detected and its token rejected.
+- **`launch-server --config`, not `run-server`.** Since Playwright 1.6x, `run-server`
+  silently drops client-supplied `args` / `ignoreDefaultArgs` (the very options that make
+  the browser look un-automated) unless started with `--unsafe` — which lets any client
+  set `executablePath`, i.e. execute arbitrary commands in the pod. Measured 2026-10-07:
+  through `run-server` the browser came up `HeadlessChrome` with `navigator.webdriver ===
+  true`, the player's PO token was rejected, and **39/39 in-cluster browser fetches
+  returned an empty body** (the first acceptance run). `launch-server --config` fixes the
+  options on the server where clients cannot touch them. (Bench's older 1.59 `run-server`
+  honoured client options, which is why the approach looked fine there.)
+- **Shared browser, fresh context per fetch.** A single long-lived *context* reused across
+  pages grew to the pod's 2.5 GiB limit and was OOM-killed after ~19 pages. With a fresh
+  context per fetch, closed afterwards, the shared browser's RSS plateaus (measured
+  ~860 MB after 25 full fetch cycles, ~1 MB/cycle drift) — and the server's bash loop
+  recycles the browser every 6 h to bound that drift.
+- **Stealth is load-bearing.** Launch options (authoritative copy: the server config in
+  `deploy/k8s/ardenone-cluster/ytt/browser-deployment.yml`; ytt also sends the same set as
+  `BROWSER_LAUNCH_OPTIONS` in the connection URL, which only servers that accept client
+  options honour and which is harmless otherwise): full Chromium (`channel=chromium`, new
+  headless), `--enable-automation` removed, `--disable-blink-features=AutomationControlled`,
+  plus an init script (applied by ytt per context) hiding `navigator.webdriver`. The default headless shell is detected and its token rejected.
   This is an arms race: expect to revisit it (see Risks in the plan).
 - **The token never leaves the browser.** ytt does not extract, store or replay it; it
   reads the response of a request the browser made itself. The browser context is
@@ -96,15 +110,21 @@ drifting — the fallback is hiding it from users, not from the dashboard.
   `YTT_BROWSER_MAX_CONCURRENCY` — see `docs/usage/configuration.md`. With the URL unset
   ytt is exactly the yt-dlp-only server it was before.
 - **Rollback:** `YTT_FETCH_MODE=ytdlp` (restart), no image change.
-- **Server:** one `playwright run-server` Deployment, `ClusterIP` only, no ingress. It is
+- **Server:** one `playwright launch-server --config` Deployment, `ClusterIP` only, no
+  ingress, endpoint `ws://ytt-browser.ytt.svc.cluster.local:3001/ytt`. It is
   **unauthenticated and can browse from the home IP** — never expose it publicly. Run it
-  with a PID 1 that reaps children (e.g. `bash` supervising the server): Chromium leaves
-  zombie helper processes otherwise (measured: 12 after three fetches).
-- **Sizing:** each in-flight fetch is its own Chromium (~400–700 MB). Size the server's
-  memory for `YTT_BROWSER_MAX_CONCURRENCY` × ~0.7 GiB plus headroom.
-- **bench:** any `playwright run-server` works as the endpoint — the shared
-  `ws://bench:3001/` accepts the same stealth launch options (verified 2026-10-07), but
-  allows only two clients and is not reachable from pods without extra plumbing.
+  with a PID 1 that reaps children (e.g. `bash` supervising the server in a loop that also
+  recycles it every 6 h): Chromium leaves zombie helper processes otherwise (measured: 12
+  after three fetches with the server as PID 1, 0 with bash as PID 1).
+- **Sizing:** the shared browser idles near 0.7 GiB and each in-flight page adds memory;
+  size the server for `YTT_BROWSER_MAX_CONCURRENCY` pages plus headroom (deployed: 1 GiB
+  request, 3 GiB limit).
+- **First-fetch race:** a client that starts before the server is Ready gets a connect
+  failure and falls back to yt-dlp (observed once in the acceptance run: the first fetch
+  came 27 s after the server pod started). Retry-before-fallback is the known gap.
+- **bench:** `ws://bench:3001/` is a `run-server` (1.59) that happens to honour client
+  launch options, so ytt works against it unchanged (verified 2026-10-07) — but it allows
+  only two clients and is not reachable from pods without extra plumbing.
 - **Not covered:** `YTT_PROXY_URL` applies to the yt-dlp path only; the browser's egress
   is the server pod's.
 

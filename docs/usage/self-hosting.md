@@ -248,23 +248,36 @@ services:
       # carrying a PO token its own player minted, so yt-dlp-only captions
       # fail (HTTP 429 / empty) on many videos. See docs/notes/browser-fetch.md.
       # Unset = yt-dlp only. Needs the `browser` service below.
-      YTT_BROWSER_WS_URL: "ws://browser:3001/"
+      YTT_BROWSER_WS_URL: "ws://browser:3001/ytt"
       YTT_CACHE_DIR: "/cache"
       YTT_CACHE_MAX_BYTES: "2Gi"
       YTT_SCRATCH_DIR: "/scratch"   # swept on every boot — keep it dedicated to ytt
 
-  # Optional: browser server for the primary caption fetch (one fresh Chromium
-  # per fetch). UNAUTHENTICATED and able to browse from your IP — never publish
-  # a port for it; only ytt (same compose network) should reach it.
-  # The Playwright version here must match ytt's `playwright` client (1.63.x).
+  # Optional: browser server for the primary caption fetch (one shared stealth
+  # Chromium; ytt opens a fresh context per fetch). UNAUTHENTICATED and able to
+  # browse from your IP — never publish a port for it; only ytt (same compose
+  # network) should reach it. The Playwright version here must match ytt's
+  # `playwright` client (1.63.x). It uses `launch-server --config` so the
+  # stealth options are fixed HERE: `run-server` would silently drop them
+  # (Playwright 1.6x) and every fetch would get an empty body.
   browser:
     image: mcr.microsoft.com/playwright/python:v1.63.0-noble
     restart: unless-stopped
     init: true   # reaps Chromium's helper processes (zombies otherwise)
-    command: >
-      bash -c "pip3 install --quiet playwright==1.63.0 &&
-      exec python3 -m playwright run-server --host 0.0.0.0 --port 3001"
     mem_limit: 3g
+    command:
+      - bash
+      - -c
+      - |
+        pip3 install --quiet playwright==1.63.0
+        cat > /tmp/launch.json <<'JSON'
+        {"channel": "chromium", "headless": true,
+         "ignoreDefaultArgs": ["--enable-automation"],
+         "args": ["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"],
+         "host": "0.0.0.0", "port": 3001, "wsPath": "ytt"}
+        JSON
+        exec python3 -m playwright launch-server --browser chromium --config /tmp/launch.json
 
   # Optional: Whisper ASR service
   # https://github.com/stpb/whisper-openai

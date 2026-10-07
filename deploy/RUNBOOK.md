@@ -381,8 +381,9 @@ there is the boundary working, not an outage to route around.
 ytt's primary caption fetch drives a real browser, because YouTube's caption
 endpoint serves a body only to a request carrying a PO token that its own
 player minted (design and measurements: `docs/notes/browser-fetch.md`).  The
-browser lives in its **own pod** (`ytt-browser`, `playwright run-server`, one
-fresh Chromium per fetch) so a browser crash or OOM cannot restart ytt and drop
+browser lives in its **own pod** (`ytt-browser`, `playwright launch-server
+--config` with the stealth options fixed on the server, one shared Chromium, a
+fresh context per fetch, recycled every 6 h) so a browser crash or OOM cannot restart ytt and drop
 its in-flight jobs.
 
 **What it looks like when healthy:** `ytt_browser_fetch_total{outcome="ok"}`
