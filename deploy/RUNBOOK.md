@@ -429,8 +429,11 @@ to miss): the `ytt` policy selects the ytt pod and must allow egress to
 `ytt-browser:3001` — when that rule was missing, prod's first real browser
 fetch failed at connect (`reason=connect`, ~1.4 s) and fell back to yt-dlp,
 while the acceptance pod (not selected by the policy) worked (bead
-`ytt-1e4c448b`).  Nothing yet restricts *ingress* to the browser pod, so
-"no route" is not a boundary today; an ingress-only policy admitting
-`app=ytt` and `app=ytt-caption-retest` is the pending hardening step.
+`ytt-1e4c448b`).  The browser pod's own *ingress* is restricted by
+`browser-networkpolicy.yml` to `app=ytt` and `app=ytt-caption-retest` on
+`:3001`, so a new client of the browser must be added to **both** policies.
+`tests/unit/test_browser_network_policy.py` holds the wiring (URL ↔ Service ↔
+server config ↔ egress rule ↔ ingress admission) so a gap fails the build
+instead of production.
 Startup needs PyPI reachable (the Playwright package is `pip install`ed at
 container start).

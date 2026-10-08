@@ -1,0 +1,43 @@
+---
+# Ingress-only NetworkPolicy for the ytt-browser server (bead ytt-1e4c448b).
+#
+# The browser server is UNAUTHENTICATED and can browse from the home IP, so
+# only the pods that legitimately drive it may reach it: the ytt server and the
+# ytt-caption-retest acceptance pod (same namespace; `from.podSelector` without
+# a namespaceSelector means "this namespace only").
+#
+# NetworkPolicy IS enforced on this cluster: k3s runs its embedded kube-router
+# controller on every node (no --disable-network-policy).  Precedent that this
+# policy cannot break the kubelet's readiness/liveness probes (tcpSocket :3001):
+# ibkr-mcp-server and openbao sit under restrictive ingress policies with no
+# kubelet carve-out and have stayed Ready with 0 restarts for days.
+#
+# Ingress only: egress (DNS, YouTube :443, PyPI :443 at start) is left
+# unrestricted on purpose, so this policy cannot cut the browser off from
+# YouTube.  The matching egress rule on the ytt side lives in networkpolicy.yml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ytt-browser
+  namespace: ytt
+  labels:
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app: ytt-browser
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - ytt
+                  - ytt-caption-retest
+      ports:
+        - protocol: TCP
+          port: 3001

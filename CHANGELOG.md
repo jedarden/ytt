@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the earlier assumption that it was inert; the browser manifest and
   `deploy/RUNBOOK.md` §8 are corrected. Known gap: the client logs only the
   exception *type* for a connect failure, which is why this took a log hunt.
+- **Browser server now has an ingress-only NetworkPolicy**
+  (`browser-networkpolicy.yml`): only `app=ytt` and `app=ytt-caption-retest`
+  in the namespace may reach `:3001`; egress is untouched, so the server can
+  still reach YouTube and PyPI. Probe safety was checked against precedent
+  (`ibkr-mcp-server` and OpenBao stay Ready under restrictive ingress policies
+  with no kubelet carve-out).
+- **New guard `tests/unit/test_browser_network_policy.py`** — pins the wiring
+  that broke: every Deployment setting `YTT_BROWSER_WS_URL` must be allowed out
+  by every Egress policy selecting it, admitted in by the browser's ingress
+  policy, and the URL's host/port/path must match the Service and the server's
+  `wsPath`. Mutation-checked against the incident (dropped egress rule), a
+  widened ingress policy, and a path mismatch.
 
 - **Browser-server docs, runbook and compose example corrected after the in-cluster
   acceptance run** (bead `ytt-204947b5`; no image change — the 0.2.28 code is
