@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Production could not use the browser path: the `ytt` NetworkPolicy blocked
+  `ytt → ytt-browser:3001`** (bead `ytt-1e4c448b`; manifest-only fix, no image
+  change). After the 0.2.28 rollout the connector's first real fetch failed at
+  connect (`browser caption fetch failed (connect: cannot reach browser
+  server)`, 1.4 s) and fell back to yt-dlp, which 429s on most videos — while
+  the acceptance run (a pod the policy does not select) had passed 38/41. The
+  policy allowed egress only to DNS, Whisper and 80/443; one rule for
+  `app=ytt-browser` TCP 3001 now exists. **NetworkPolicy is enforced on this
+  cluster** (k3s's embedded kube-router controller runs on every node), contrary
+  to the earlier assumption that it was inert; the browser manifest and
+  `deploy/RUNBOOK.md` §8 are corrected. Known gap: the client logs only the
+  exception *type* for a connect failure, which is why this took a log hunt.
+
 - **Browser-server docs, runbook and compose example corrected after the in-cluster
   acceptance run** (bead `ytt-204947b5`; no image change — the 0.2.28 code is
   unaffected). The first acceptance run got **0 of 39** browser fetches because the

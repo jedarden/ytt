@@ -50,6 +50,22 @@ spec:
         - protocol: TCP
           port: 8000
 
+    # --- ytt-browser (primary caption fetch; bead ytt-204947b5 / ytt-1e4c448b) ---
+    # The Playwright browser server in this namespace (launch-server, ws :3001/ytt).
+    # THIS POLICY IS ENFORCED: k3s runs its embedded kube-router NetworkPolicy
+    # controller on every node (no --disable-network-policy), invisible as it
+    # has no pods.  Until this rule existed, the first real browser fetch in
+    # prod (2026-10-08T01:26Z) was rejected at connect and fell back to yt-dlp,
+    # which 429s for most videos -- while the acceptance pod (app=ytt-caption-
+    # retest, not selected by this policy) connected fine.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: ytt-browser
+      ports:
+        - protocol: TCP
+          port: 3001
+
     # --- YouTube + googlevideo (caption/audio downloads via yt-dlp) ---
     # YouTube uses many IPs; allow all HTTPS egress from the pod.
     # Tighten to specific CIDRs after observing DNS queries with a log tool.

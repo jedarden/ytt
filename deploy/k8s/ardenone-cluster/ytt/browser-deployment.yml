@@ -28,7 +28,13 @@
 #
 # SECURITY: the server is UNAUTHENTICATED and can browse from the home IP.  It
 # is ClusterIP-only with no IngressRoute and no tailscale exposure — never add
-# either.  (NetworkPolicy is inert on this CNI, so the boundary is "no route".)
+# either.  NetworkPolicy IS enforced on this cluster (k3s runs its embedded
+# kube-router controller on every node; no --disable-network-policy), so egress
+# policies must name this server (networkpolicy.yml has the ytt -> :3001 rule;
+# its absence broke prod's first browser fetch, ytt-1e4c448b).  No policy yet
+# restricts INGRESS to this pod, so any pod in the cluster can reach it: an
+# ingress-only policy allowing app=ytt / app=ytt-caption-retest is the pending
+# hardening step (test the kubelet readiness probe before applying it).
 #
 # Image: stock mcr.microsoft.com/playwright/python (browsers baked in at
 # /ms-playwright).  It does NOT ship the playwright package itself, so it is

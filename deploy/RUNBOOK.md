@@ -401,7 +401,7 @@ no kubectl writes):
 
    | `reason` | Meaning | Response |
    |---|---|---|
-   | `connect` | server unreachable (pod down, DNS, restarting) | check step 1; pod restarts on its own |
+   | `connect` | server unreachable (pod down, DNS, restarting) — **or a NetworkPolicy denying ytt → `ytt-browser:3001`** (an immediate failure, ~1–2 s, with a Running pod and a clean server log) | check step 1; if the pod is healthy, check the `ytt` policy's egress rules before anything else |
    | `timeout` / `navigate` / `no_request` | slow or stuck page, player never asked for the track | usually transient; persistent ⇒ YouTube changed the player — escalate |
    | `empty_body` | `200` + 0 bytes: **YouTube rejected the PO token** — the browser is being flagged as automation | the arms-race signal: escalate; check the stealth launch options (`ytt/browser_fetch.py::BROWSER_LAUNCH_OPTIONS`) and the Playwright/Chromium versions |
    | `playability_blocked` | bot wall on this egress (`LOGIN_REQUIRED … not a bot`) | egress problem, same as `YttHomeIPBurned` — see `docs/notes/proxy-egress.md` |
@@ -423,6 +423,14 @@ shows up as every fetch failing with `reason=connect`.
 
 **Never expose it.**  The server is unauthenticated and can browse from the
 home IP.  No IngressRoute, no `tailscale.com/expose`, no external-dns
-annotation.  (`NetworkPolicy` is inert on this CNI, so "no route" is the whole
-boundary.)  Startup needs PyPI reachable (the Playwright package is
-`pip install`ed at container start).
+annotation.  `NetworkPolicy` **is enforced** on this cluster (k3s runs its
+embedded kube-router controller on every node; it has no pods, so it is easy
+to miss): the `ytt` policy selects the ytt pod and must allow egress to
+`ytt-browser:3001` — when that rule was missing, prod's first real browser
+fetch failed at connect (`reason=connect`, ~1.4 s) and fell back to yt-dlp,
+while the acceptance pod (not selected by the policy) worked (bead
+`ytt-1e4c448b`).  Nothing yet restricts *ingress* to the browser pod, so
+"no route" is not a boundary today; an ingress-only policy admitting
+`app=ytt` and `app=ytt-caption-retest` is the pending hardening step.
+Startup needs PyPI reachable (the Playwright package is `pip install`ed at
+container start).
