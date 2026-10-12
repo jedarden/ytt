@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-10-08T11:10:11Z",
+  "generated_at": "2026-10-12T11:10:12Z",
   "workspace": "/home/coding/ytt",
   "command": "bead list --json --limit 1000",
   "point_in_time_notice": "Snapshot of the bead store at generated_at. The live store drifts immediately; do not use these counts for planning. Regenerate with scripts/regen-bead-inventory.sh.",
   "summary": {
-    "total_beads": 190,
-    "open": 2,
+    "total_beads": 205,
+    "open": 17,
     "in_progress": 2,
     "closed": 185,
     "other": 1,
@@ -50,6 +50,114 @@
       "updated_at": "2026-09-28T05:22:34.478898181Z"
     },
     {
+      "id": "ytt-0a32c7bc",
+      "title": "Make the browser-to-yt-dlp fallback visible: transport-attributed fetch metrics, fallback alert, and a browser-transport canary leg",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T00:02:41.379180648Z",
+      "updated_at": "2026-10-12T00:02:41.379180648Z"
+    },
+    {
+      "id": "ytt-116dbe2b",
+      "title": "Pin the browser-fetch context lifecycle (fresh context per fetch, closed afterwards) with a regression test",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T00:02:42.849503048Z",
+      "updated_at": "2026-10-12T00:02:42.849503048Z"
+    },
+    {
+      "id": "ytt-1f485836",
+      "title": "Document the optional ytt-browser sidecar recipe for self-hosters in docs/usage/self-hosting.md",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T00:02:43.28431533Z",
+      "updated_at": "2026-10-12T00:02:43.28431533Z"
+    },
+    {
+      "id": "ytt-3b748ddf",
+      "title": "Add browser-server compatibility and lifecycle regression gates",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T08:27:11.462760714Z",
+      "updated_at": "2026-10-12T08:27:11.462760714Z"
+    },
+    {
+      "id": "ytt-42462e97",
+      "title": "Test browser and yt-dlp caption-selection parity",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T08:27:11.74578756Z",
+      "updated_at": "2026-10-12T08:27:11.74578756Z"
+    },
+    {
+      "id": "ytt-46865727",
+      "title": "Pin the Playwright client/server major.minor version-match contract with a startup guard and tests",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T00:02:42.331526506Z",
+      "updated_at": "2026-10-12T00:02:42.331526506Z"
+    },
+    {
       "id": "ytt-4f1c45c2",
       "title": "Wire planned startup sequence into the server boot path (startup_scan, startup_sweep, TTL GC, reconcile loop never run)",
       "status": "open",
@@ -85,6 +193,42 @@
       "updated_at": "2026-09-28T02:04:44.995369343Z"
     },
     {
+      "id": "ytt-7f8eec27",
+      "title": "Make silent browser\u2192yt-dlp fallback observable: pre-register browser-fetch outcome metrics plus a fallback-activation alert",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T09:31:42.090489183Z",
+      "updated_at": "2026-10-12T09:31:42.090489183Z"
+    },
+    {
+      "id": "ytt-8f748cf7",
+      "title": "Verify the deployed browser-primary path clears the known-429 corpus in ardenone-cluster and record the evidence",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T00:02:41.880581285Z",
+      "updated_at": "2026-10-12T00:02:41.880581285Z"
+    },
+    {
       "id": "ytt-96bb54f6",
       "title": "Verify yt-dlp 2026.8.19 clears the caption-track 429s in ardenone-cluster once a release carrying it is deployed",
       "status": "open",
@@ -101,6 +245,132 @@
       "revision": 9,
       "created_at": "2026-09-26T22:21:25.935836095Z",
       "updated_at": "2026-09-29T04:10:20.740368314Z"
+    },
+    {
+      "id": "ytt-9d2834ef",
+      "title": "Add ytt-browser/ytt Playwright compatibility and lifecycle conformance tests",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-11T23:00:29.245667302Z",
+      "updated_at": "2026-10-11T23:00:29.245667302Z"
+    },
+    {
+      "id": "ytt-b309510d",
+      "title": "Reconcile the documented 0.2.28 release lineage",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T08:27:11.18740934Z",
+      "updated_at": "2026-10-12T08:27:11.18740934Z"
+    },
+    {
+      "id": "ytt-b921ec2a",
+      "title": "Pin the Playwright major.minor version-match contract between the ytt client wheel and the ytt-browser server with a drift guard",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-11T18:55:18.575183514Z",
+      "updated_at": "2026-10-11T18:55:18.575183514Z"
+    },
+    {
+      "id": "ytt-ccedd591",
+      "title": "Pin the ytt \u2194 ytt-browser Playwright major.minor version-match contract with a build/test guard and a coupled-upgrade procedure",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T09:31:42.354821123Z",
+      "updated_at": "2026-10-12T09:31:42.354821123Z"
+    },
+    {
+      "id": "ytt-dae63d05",
+      "title": "Add observability for browser unavailability and yt-dlp fallback",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-11T23:00:29.773191952Z",
+      "updated_at": "2026-10-11T23:00:29.773191952Z"
+    },
+    {
+      "id": "ytt-e94ce5ee",
+      "title": "Extend the canary probe and release gate to exercise the browser-primary caption path (ytt canary --gate currently verifies only the yt-dlp fallback)",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-12T09:31:41.807731061Z",
+      "updated_at": "2026-10-12T09:31:41.807731061Z"
+    },
+    {
+      "id": "ytt-fb53dbe3",
+      "title": "Add fault-injection coverage for bead-inventory cadence",
+      "status": "open",
+      "effective_status": "open",
+      "priority": 2,
+      "assignee": null,
+      "labels": [
+        "human",
+        "proposal-pending",
+        "weave-generated"
+      ],
+      "manual_blocked": false,
+      "dependencies": [],
+      "revision": 1,
+      "created_at": "2026-10-11T23:00:30.305732826Z",
+      "updated_at": "2026-10-11T23:00:30.305732826Z"
     }
   ],
   "pluck_label_analysis": {
@@ -112,7 +382,97 @@
     ],
     "beads_matching_default_excludes": [
       {
+        "id": "ytt-0a32c7bc",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-116dbe2b",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-1f485836",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-3b748ddf",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-42462e97",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-46865727",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-7f8eec27",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-8f748cf7",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
         "id": "ytt-96bb54f6",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-9d2834ef",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-b309510d",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-b921ec2a",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-ccedd591",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-dae63d05",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-e94ce5ee",
+        "matching_labels": [
+          "human"
+        ]
+      },
+      {
+        "id": "ytt-fb53dbe3",
         "matching_labels": [
           "human"
         ]
