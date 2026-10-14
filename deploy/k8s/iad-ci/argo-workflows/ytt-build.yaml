@@ -17,9 +17,9 @@
 # test suite aborts the build (no separate test step needed here — see
 # armor-workflowtemplate.yml for the pattern this mirrors).
 #
-# Requires VERSION to be bumped by the developer in each release commit;
-# CI validates the version bump and fails if it wasn't changed. CI never
-# auto-bumps, auto-commits, or pushes version changes (matches armor-workflowtemplate.yml
+# Preserves explicit VERSION advances; otherwise CI allocates a patch release
+# through the shared helper. The generated commit remains the immutable build source.
+# Source validation and publication gates remain required (matches armor-workflowtemplate.yml
 # and the fleet's Forgejo-primary/GitHub-read-only-mirror model from org CLAUDE.md).
 #
 # All git operations use Forgejo (git.ardenone.com), not GitHub. GitHub is
@@ -32,15 +32,15 @@
 # body.after into the `revision` parameter; resolve-version rejects anything
 # that is not a full 40-hex SHA and reads the VERSION diff from THAT commit's
 # parent, and docker-build's initContainer clones exactly that SHA. Before
-# 2026-09-27 the build cloned refs/heads/master at pod-start time, so a
-# sibling push (a fleet worker pushes to ytt master every ~30 minutes) could
+# 2026-09-27 the build cloned the branch at pod-start time, so a
+# sibling push could
 # slip commits into a release tag that CI never validated, or make the VERSION
 # diff read the wrong commit. Same fix, same recipe as armor (armor-8c4d068d).
 #
 # Steps, in order — the anonymous-visibility check is deliberately LAST, so a
 # package that is merely still private is the only thing left failing:
 #
-#   1. resolve-version    revision must be a full SHA; VERSION must change in it.
+#   1. resolve-version    revision must be a full SHA; resolve a release version.
 #   2. docker-build       kaniko: test stage gate, push ronaldraygun/ytt:<v>.
 #   3. publish-ghcr       skopeo copy --preserve-digests of that exact image to
 #                         ghcr.io/jedarden/ytt:<v>; source and destination
@@ -96,7 +96,7 @@ spec:
       - name: git-repo
         value: jedarden/ytt
       - name: branch
-        value: master
+        value: main
       # Full 40-hex SHA of the pushed commit, wired by ytt-sensor from the
       # webhook's body.after (parameters.2 in the sensor's resource). The
       # sentinel default is deliberately not a SHA: a run that loses the
@@ -106,6 +106,9 @@ spec:
       - name: revision
         value: "unset"
   volumes:
+    - name: ci-release-versioning
+      configMap:
+        name: ci-release-versioning
     # Docker Hub credential — kaniko's push, and skopeo's read of the
     # (private) source image.
     - name: docker-config
@@ -134,6 +137,8 @@ spec:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
+                - name: source-sha
+                  value: "{{steps.resolve-version.outputs.parameters.source-sha}}"
         - - name: publish-ghcr
             template: publish-ghcr
             arguments:
@@ -167,94 +172,50 @@ spec:
               parameter: "{{steps.verify-ghcr-public.outputs.parameters.digest}}"
 
     - name: resolve-version
-      activeDeadlineSeconds: 120
+      activeDeadlineSeconds: 300
       script:
         image: alpine/git:v2.54.0
         command: [sh]
         source: |
           set -eu
-
-          # Only a full SHA pins a build (armor-8c4d068d): the branch can
-          # move between the push and this pod's start (queued runs, sibling
-          # pushes), and the VERSION diff below must read the triggering
-          # commit's parent, so the fetch keeps --depth 2. A bare ref, or the
-          # "unset" sentinel default, is rejected.
-          REV='{{workflow.parameters.revision}}'
-          printf '%s\n' "$REV" | grep -Eq '^[0-9a-f]{40}$' || {
-            echo "revision must be a full commit SHA, got: $REV" >&2
-            echo "(ytt-sensor wires it from the webhook's body.after; for a" >&2
-            echo " manual run pass -p revision=<full sha>)" >&2
-            exit 1
-          }
-
-          git clone --no-checkout --single-branch --depth 2 \
-            --branch '{{workflow.parameters.branch}}' \
-            "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" \
-            /tmp/repo
-          cd /tmp/repo
-          git fetch --depth 2 origin "$REV"
-          git checkout --detach --quiet "$REV"
-          test "$(git rev-parse HEAD)" = "$REV" || {
-            echo "checked-out revision does not match the request" >&2
-            exit 1
-          }
-
-          test -f VERSION || {
-            echo "VERSION is required; CI never creates release versions" >&2
-            exit 1
-          }
-          VERSION_CHANGED=$(git diff --name-only HEAD~1 HEAD -- VERSION | grep -c '^VERSION$' || true)
-          if [ "$VERSION_CHANGED" -eq 0 ]; then
-            echo "VERSION must change in the release commit; CI never auto-bumps or pushes" >&2
-            exit 1
-          fi
-          VERSION=$(cat VERSION | tr -d '[:space:]')
-          case "$VERSION" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "VERSION must be a semantic version, got: $VERSION" >&2; exit 1 ;;
-          esac
-
-          echo "$VERSION" > /tmp/version
-          echo "Building version: ${VERSION} from ${REV}"
+          apk add --no-cache python3 >/dev/null
+          git clone --quiet --branch "{{workflow.parameters.branch}}" \
+            "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" /tmp/repo
+          python3 /ci-release/release-version.py --repo /tmp/repo --version-file "VERSION" \
+            --branch "{{workflow.parameters.branch}}" --output-dir /tmp --source-sha "{{workflow.parameters.revision}}"
         env:
-          # Forgejo is read-only here: this credential only permits cloning.
-          # The script has no push path (CI validates, never writes).
-          #
-          # secret/key fixed 2026-09-08: forgejo-push-token/.git-credentials
-          # never existed as a real secret in this namespace (no ExternalSecret
-          # for it anywhere in declarative-config) -- every other template
-          # (armor-workflowtemplate.yml, acb-*-build-workflowtemplate.yml, ...)
-          # uses forgejo-webhook-token/token instead. This is what actually
-          # blocked ytt-build from ever running to completion.
           - name: GIT_CONFIG_COUNT
             value: "1"
           - name: GIT_CONFIG_KEY_0
             value: credential.helper
           - name: GIT_CONFIG_VALUE_0
             value: '!f() { test "$1" = get && echo "username=x-token" && echo "password=$FORGEJO_TOKEN"; }; f'
-          - name: GIT_TERMINAL_PROMPT
-            value: "0"
           - name: FORGEJO_TOKEN
             valueFrom:
               secretKeyRef:
                 name: forgejo-webhook-token
                 key: token
+        volumeMounts:
+          - name: ci-release-versioning
+            mountPath: /ci-release
+            readOnly: true
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
       outputs:
         parameters:
           - name: version
             valueFrom:
               path: /tmp/version
+          - name: source-sha
+            valueFrom:
+              path: /tmp/source-sha
 
-    # The initContainer clones the exact revision (armor's / pjp-demo's
-    # recipe: blobless clone, explicit-SHA fetch, detached checkout, asserted)
-    # into an emptyDir that kaniko consumes as a directory context — instead
-    # of kaniko cloning refs/heads/<branch> itself, which would build whatever
-    # the branch points at when the pod starts. The repo's .dockerignore keeps
-    # .git/.beads/.venv out of the context.
     - name: docker-build
       inputs:
         parameters:
           - name: version
+          - name: source-sha
       activeDeadlineSeconds: 1800
       retryStrategy:
         limit: "2"
@@ -272,7 +233,7 @@ spec:
           args:
             - |
               set -eu
-              REV='{{workflow.parameters.revision}}'
+              REV='{{inputs.parameters.source-sha}}'
               printf '%s\n' "$REV" | grep -Eq '^[0-9a-f]{40}$' || {
                 echo "revision must be a full commit SHA, got: $REV" >&2
                 exit 1
@@ -285,6 +246,8 @@ spec:
                 --branch '{{workflow.parameters.branch}}' \
                 "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" \
                 /workspace
+              git -C /workspace checkout --detach "{{inputs.parameters.source-sha}}"
+              test "$(git -C /workspace rev-parse HEAD)" = "{{inputs.parameters.source-sha}}"
               cd /workspace
               git fetch --depth 1 origin "$REV"
               git checkout --detach --quiet "$REV"

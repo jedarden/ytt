@@ -115,7 +115,7 @@ curl http://ytt.ytt.svc:8080/ytt/metrics | grep ytt_
 
 1. Release commit to `jedarden/ytt` on Forgejo bumps `VERSION`
    (plus `pyproject.toml`, `ytt/__init__.py`, `CHANGELOG.md`).
-2. Argo Events `ytt-sensor` fires on the push to `master`.
+2. Argo Events `ytt-sensor` fires on the push to `main`.
 3. `ytt-build` WorkflowTemplate (iad-ci) validates the `VERSION` bump in the
    pushed commit, then kaniko-builds exactly that commit — the Dockerfile's
    test stage runs `pytest -m "not integration"` and a red suite aborts the

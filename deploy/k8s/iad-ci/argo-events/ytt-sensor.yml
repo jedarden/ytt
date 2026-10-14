@@ -1,19 +1,28 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: ServerSideApply=true
   name: ytt-sensor
   namespace: argo-events
 spec:
   template:
+    # Prefer dependable nodes: the one gp.vs1.2xlarge-iad is dependable:false
+    # and evicts Sensors under DiskPressure. Preferred, not required, so it
+    # stays the fallback (declarat-f3fff8dc).
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+            - key: servers.ngpc.rxt.io/class
+              operator: NotIn
+              values:
+              - gp.vs1.2xlarge-iad
     metadata:
       annotations:
         kubectl.kubernetes.io/restarted-at: '2026-08-07T07:53:59Z'
-    # PROBE (2026-09-20): argo-events v1.9.10 Template carries `container`, its own
-    # narrow Container type (resources/env/volumeMounts/securityContext), NOT a
-    # PodSpec. The `spec.containers[]` block below is preserved by the CRD's
-    # x-kubernetes-preserve-unknown-fields but the controller never reads it, so
-    # every generated sensor Deployment is resources:{} today. Testing the real
-    # field on this one sensor before converting the other 69.
     container:
       resources:
         requests:
@@ -22,26 +31,6 @@ spec:
         limits:
           cpu: 200m
           memory: 256Mi
-    spec:
-      containers:
-      - name: main
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 7777
-          initialDelaySeconds: 30
-          periodSeconds: 30
-          timeoutSeconds: 2
-          failureThreshold: 2
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 7777
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 2
-          failureThreshold: 3
-        # (resources moved to spec.template.container — this block is inert; declarat-5dfe4a42)
   eventBusName: default
   fetchTimeout: 3s
   dependencies:
@@ -57,7 +46,7 @@ spec:
       - path: body.ref
         type: string
         value:
-        - refs/heads/master
+        - refs/heads/main
       - path: body.head_commit.message
         type: string
         comparator: '!='
@@ -72,7 +61,7 @@ spec:
         # index 2 is `revision` in the resource's arguments below. Without
         # this the workflow's `revision` keeps its non-SHA sentinel and
         # resolve-version rejects the run loudly (rather than building
-        # whatever refs/heads/master points at when a pod starts, which is
+        # whatever refs/heads/main points at when a pod starts, which is
         # how a sibling push could slip commits into a release tag). Same
         # wiring as armor-sensor.yml (armor-8c4d068d).
         parameters:
@@ -96,7 +85,7 @@ spec:
                 - name: git-repo
                   value: jedarden/ytt
                 - name: branch
-                  value: master
+                  value: main
                 - name: revision
                   value: unset
     conditions: ytt-push

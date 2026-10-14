@@ -17,7 +17,7 @@ cannot be done from inside a manifest.  The release path is: **bump `VERSION`
 
 ### 1. Bump the version in the release commit
 
-CI (`ytt-build` in iad-ci) fires on **every push to `master`** and fails the
+CI (`ytt-build` in iad-ci) fires on **every push to `main`** and fails the
 run unless the pushed commit changes `VERSION`.  Bump all four in the same
 commit:
 
@@ -35,7 +35,7 @@ git push   # Forgejo is origin; GitHub receives the read-only mirror
 The Forgejo webhook fires the `ytt-sensor` (argo-events) → `ytt-build`
 WorkflowTemplate in iad-ci. The sensor passes the pushed commit's SHA
 (`body.after`) as the workflow's `revision` parameter, and every step works
-on exactly that commit — not on whatever `master` has become by the time a
+on exactly that commit — not on whatever `main` has become by the time a
 pod starts:
 
 1. `resolve-version` rejects anything that is not a full SHA, checks out that

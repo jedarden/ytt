@@ -50,7 +50,7 @@ values.
 ## What the CI actually does
 
 The Forgejo webhook → `ytt-sensor` (argo-events, fires on every push to
-`master`) → `ytt-build` WorkflowTemplate (iad-ci):
+`main`) → `ytt-build` WorkflowTemplate (iad-ci):
 
 1. **resolve-version** — the sensor passes the pushed commit's SHA as the
    `revision` parameter; this step checks out exactly that commit and

@@ -12,6 +12,9 @@
 # the `launch-server` fix: 38/41 ok, all 38 via the browser, median 5.4 s; the
 # 3 others were the live stream, the unavailable id (both correct) and one
 # connect to a server that was not Ready yet (bead ytt-204947b5).
+# Run 20261014-v1 checks four user-requested videos through the same path.
+# YTT_CAPTION_RETEST_IDS scopes this run; the original corpus remains below
+# for repeatable broader acceptance runs.
 #
 # This is deliberately a Deployment rather than a Job: Jobs are banned in this
 # GitOps tree, while a Deployment remains continuously owned and prunable by
@@ -48,7 +51,7 @@ spec:
         app.kubernetes.io/name: ytt
         app.kubernetes.io/component: diagnostic
       annotations:
-        ytt.ardenone.com/caption-retest-run: "20261007-v3"
+        ytt.ardenone.com/caption-retest-run: "20261014-v1"
     spec:
       automountServiceAccountToken: false
       imagePullSecrets:
@@ -70,6 +73,8 @@ spec:
             - |
               import asyncio
               import json
+              import os
+              import re
               import threading
               import time
 
@@ -77,7 +82,7 @@ spec:
               from ytt.fetch import fetch_transcript
               from ytt.observability import redact_credentials, ytt_browser_fetch_total
 
-              run_id = "20261007-v3"
+              run_id = "20261014-v1"
               video_ids = [
                   "1DaMkTuiCEQ", "3lUyMZpAb6g", "75tja_RxKn4", "82u2qUjnJ6E",
                   "86ptx1cYv5c", "8DgRqDukf-U", "8zHUvixZAtg", "9KOau7CLCCU",
@@ -92,6 +97,14 @@ spec:
                   "iG9CE55wbtY", "dQw4w9WgXcQ", "jNQXAC9IVRw", "jfKfPfyJRdk",
                   "aaaaaaaaaaa",
               ]
+              requested_ids = os.environ.get("YTT_CAPTION_RETEST_IDS")
+              if requested_ids:
+                  video_ids = requested_ids.split(",")
+                  if len(video_ids) != len(set(video_ids)) or not all(
+                      re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id)
+                      for video_id in video_ids
+                  ):
+                      raise ValueError("YTT_CAPTION_RETEST_IDS must contain unique video IDs")
               delay_sec = 8.0
               settings = Settings()
               outcomes = {}
@@ -171,6 +184,8 @@ spec:
               value: "browser"
             - name: YTT_BROWSER_WS_URL
               value: "ws://ytt-browser.ytt.svc.cluster.local:3001/ytt"
+            - name: YTT_CAPTION_RETEST_IDS
+              value: "bYpdCFz7VtA,UJlS7KTsvWo,lhGXIGh5oTY,jgi2-xV81kY"
           resources:
             requests:
               cpu: "50m"

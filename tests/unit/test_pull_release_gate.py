@@ -32,8 +32,8 @@ Properties:
 * **The build is pinned to the pushed commit** — ``revision`` (a full SHA,
   wired from the webhook's ``body.after`` by ytt-sensor) is validated by
   ``resolve-version`` and cloned by ``docker-build``; nothing builds
-  ``refs/heads/master`` as of pod start (a fleet worker pushes to master every
-  ~30 minutes).
+  the moving branch tip as of pod start (a sibling push can move it before
+  the build starts).
 * **Both registries hold the same image** — ``publish-ghcr`` is a
   ``skopeo copy --preserve-digests`` of the manifest ``docker-build`` pushed,
   and refuses to succeed unless source and destination digests match.
@@ -273,19 +273,15 @@ def test_revision_parameter_defaults_to_a_non_sha_sentinel():
 
 
 def test_resolve_version_pins_the_pushed_commit():
-    """The full-SHA check, the explicit-SHA fetch that keeps the parent, and
-    the VERSION diff read from that commit's parent (not the branch tip)."""
+    """Pass the pushed SHA to the shared release-versioning helper."""
     source = _script_source("resolve-version")
     assert "{{workflow.parameters.revision}}" in source
-    assert "[0-9a-f]{40}" in source, "revision is not required to be a full SHA"
-    assert "git fetch --depth 2 origin" in source, (
-        "resolve-version must fetch the exact revision with its parent"
-    )
-    assert "git checkout --detach" in source
-    assert "git diff --name-only HEAD~1 HEAD -- VERSION" in source, (
-        "the VERSION bump must be read from the pushed commit's parent"
-    )
-    assert "refs/heads" not in source
+    assert "/ci-release/release-version.py" in source
+    assert '--source-sha "{{workflow.parameters.revision}}"' in source
+    assert '--branch "{{workflow.parameters.branch}}"' in source
+    assert "ci-release-versioning" in _mount_names("resolve-version")
+    outputs = _template("resolve-version")["outputs"]["parameters"]
+    assert {p["name"] for p in outputs} == {"version", "source-sha"}
 
 
 def test_docker_build_clones_the_pinned_revision_into_a_directory_context():
@@ -296,11 +292,14 @@ def test_docker_build_clones_the_pinned_revision_into_a_directory_context():
     inits = template.get("initContainers") or []
     assert [i["name"] for i in inits] == ["clone-source"], inits
     clone = "\n".join(inits[0]["args"])
-    assert "{{workflow.parameters.revision}}" in clone
+    assert "{{inputs.parameters.source-sha}}" in clone
     assert "[0-9a-f]{40}" in clone
-    assert "git checkout --detach" in clone
-    assert 'test "$(git rev-parse HEAD)" = "$REV"' in clone, (
+    assert "checkout --detach" in clone
+    assert 'test "$(git -C /workspace rev-parse HEAD)" = "{{inputs.parameters.source-sha}}"' in clone, (
         "the checked-out commit is never asserted equal to the request"
+    )
+    assert _step_args("docker-build")["source-sha"] == (
+        "{{steps.resolve-version.outputs.parameters.source-sha}}"
     )
     args = template["container"]["args"]
     assert "--context=dir:///workspace" in args, args
@@ -343,6 +342,24 @@ def test_sensor_wires_the_pushed_sha_into_revision():
     assert template_names == [p["name"] for p in arguments], (
         "the sensor's arguments and the WorkflowTemplate's parameters differ"
     )
+
+
+def test_release_flow_uses_main_branch():
+    """A main push must reach a workflow that can clone that commit."""
+    sensor = next(d for d in _documents(SENSOR_FILE) if d.get("kind") == "Sensor")
+    filters = sensor["spec"]["dependencies"][0]["filters"]["data"]
+    ref_filter = next(item for item in filters if item["path"] == "body.ref")
+    assert ref_filter["value"] == ["refs/heads/main"]
+
+    trigger = sensor["spec"]["triggers"][0]["template"]["argoWorkflow"]
+    arguments = trigger["source"]["resource"]["spec"]["arguments"]["parameters"]
+    sensor_branch = next(p["value"] for p in arguments if p["name"] == "branch")
+    workflow_branch = next(
+        p["value"]
+        for p in _workflow_template()["spec"]["arguments"]["parameters"]
+        if p["name"] == "branch"
+    )
+    assert (sensor_branch, workflow_branch) == ("main", "main")
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +422,7 @@ def test_publish_mounts_both_credentials_read_only():
     secrets = {
         v["name"]: v["secret"]["secretName"]
         for v in _workflow_template()["spec"]["volumes"]
+        if "secret" in v
     }
     assert secrets["docker-config"] == "docker-hub-registry"
     assert secrets["docker-config-ghcr"] == "ghcr-jedarden-registry", (
