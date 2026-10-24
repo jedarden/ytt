@@ -24,17 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployed-browser 429-corpus verification evidence recorded
   (`ytt-8f748cf7`, docs-only).
 
-## [0.2.37] — 2026-10-24
+## [0.2.39] — 2026-10-24
 
-> Versions 0.2.29-0.2.36 were CI auto-bumps that touched only `VERSION`
+> Versions 0.2.29-0.2.38 were CI auto-bumps that touched only `VERSION`
 > and never published an image: the CI helper allocates a patch bump for
 > any push that does not advance `VERSION` itself and pushes the bump
 > commit before building, so every build then failed the repo's own
 > release-metadata gates (the suite compares `VERSION` against the image
-> pins). No 0.2.29-0.2.36 tag exists in either registry and nothing was
+> pins). No 0.2.29-0.2.38 tag exists in either registry and nothing was
 > ever deployed from them — the entries below are what the trail's source
-> commits carried, shipped for the first time in this image. Reconciled
-> and cut as 0.2.37 (bead `ytt-0e6b7331`).
+> commits carried, shipped for the first time in this image. 0.2.37 was
+> consumed by a racing auto-bump while this reconciliation was in flight,
+> so the cut is numbered 0.2.39 (bead `ytt-0e6b7331`).
 
 ### Added
 

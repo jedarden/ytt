@@ -60,7 +60,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: ytt
-          image: ronaldraygun/ytt:0.2.37
+          image: ronaldraygun/ytt:0.2.39
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

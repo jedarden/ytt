@@ -28,7 +28,7 @@ docker run --rm \
   -e YTT_OAUTH_CLIENT_ID=your-oauth-client-id \
   -e YTT_OAUTH_CLIENT_SECRET=your-oauth-client-secret \
   -p 8080:8080 \
-  ghcr.io/jedarden/ytt:0.2.37
+  ghcr.io/jedarden/ytt:0.2.39
 ```
 
 `YTT_WHISPER_URL` is optional for captioned videos, so the quick start above
