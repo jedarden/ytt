@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Launch-mode regression guard for the browser server** (bead
+  `ytt-4ac8116f`): `tests/unit/test_browser_launch_mode.py` pins the
+  documented contract — the ytt-browser pod is launched via
+  `playwright launch-server --config` with the stealth options fixed
+  server-side, and `run-server`/`--unsafe` must never reach an executable
+  launch line (`run-server` silently drops the stealth options since
+  Playwright 1.6x — 39/39 empty in-cluster bodies on 2026-10-07 — and
+  `--unsafe` hands every client `executablePath`, i.e. arbitrary command
+  execution in the pod). The guard sweeps every mirrored manifest, ties the
+  three copies of the launch options (manifest server config, self-hosting
+  compose example, client `BROWSER_LAUNCH_OPTIONS`), and pins the note's
+  contract statement.
+- Deployed-browser 429-corpus verification evidence recorded
+  (`ytt-8f748cf7`, docs-only).
+
+## [0.2.35] — 2026-10-24
+
+> Versions 0.2.29-0.2.34 were CI image auto-bumps that touched only
+> `VERSION` and shipped no changelog section; the fixes below are what the
+> trail carried. Reconciled at 0.2.35 (bead `ytt-0e6b7331`).
+
 ### Fixed
 
 - **Production could not use the browser path: the `ytt` NetworkPolicy blocked
