@@ -24,6 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployed-browser 429-corpus verification evidence recorded
   (`ytt-8f748cf7`, docs-only).
 
+## [0.2.43] — 2026-10-24
+
+> Versions 0.2.40-0.2.42 were CI auto-bumps that touched only `VERSION`
+> and never published an image: every push that does not advance `VERSION`
+> (source commits, merge commits, and the chore(beads) checkpoint
+> publishes between them) allocates another patch, and each of those
+> builds then failed the repo's own release-metadata gates — the same
+> phantom trail the 0.2.39 cut documented, resumed by the very next push.
+> No 0.2.40-0.2.42 tag exists in either registry. This cut takes the
+> helper's explicit-advance escape again so the trail's source commit
+> ships for real (bead `ytt-825066d8`).
+
+### Added
+
+- **Canary CLI contract: `ytt canary --browser` without `--once` is a
+  usage error** (bead `ytt-779dfb3a`): the last unpinned leg of the
+  browser-primary canary probe's acceptance criteria — `--browser` is
+  only valid with `--once` (the gate runs the leg itself), and
+  `TestCli.test_browser_without_once_is_a_usage_error` now pins the
+  rejection in `tests/unit/test_canary_once.py`.
+
 ## [0.2.39] — 2026-10-24
 
 > Versions 0.2.29-0.2.38 were CI auto-bumps that touched only `VERSION`
