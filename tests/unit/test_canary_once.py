@@ -556,6 +556,14 @@ class TestCli:
             cli_main(["canary", "--gate", "--browser"])
         assert excinfo.value.code == 2
 
+    def test_browser_without_once_is_a_usage_error(self):
+        """--browser probes one video once; a bare --browser would silently
+        mean nothing outside one-shot mode (the gate runs the leg itself
+        when the path is configured) — the flag requires --once explicitly."""
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main(["canary", "--browser"])
+        assert excinfo.value.code == 2
+
     def test_browser_and_via_proxy_together_is_a_usage_error(self):
         """One one-shot probe exercises one path; asking for both would make
         the verdict ambiguous."""
