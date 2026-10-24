@@ -24,11 +24,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployed-browser 429-corpus verification evidence recorded
   (`ytt-8f748cf7`, docs-only).
 
-## [0.2.35] — 2026-10-24
+## [0.2.37] — 2026-10-24
 
-> Versions 0.2.29-0.2.34 were CI image auto-bumps that touched only
-> `VERSION` and shipped no changelog section; the fixes below are what the
-> trail carried. Reconciled at 0.2.35 (bead `ytt-0e6b7331`).
+> Versions 0.2.29-0.2.36 were CI auto-bumps that touched only `VERSION`
+> and never published an image: the CI helper allocates a patch bump for
+> any push that does not advance `VERSION` itself and pushes the bump
+> commit before building, so every build then failed the repo's own
+> release-metadata gates (the suite compares `VERSION` against the image
+> pins). No 0.2.29-0.2.36 tag exists in either registry and nothing was
+> ever deployed from them — the entries below are what the trail's source
+> commits carried, shipped for the first time in this image. Reconciled
+> and cut as 0.2.37 (bead `ytt-0e6b7331`).
+
+### Added
+
+- **The canary one-shot and release gate now exercise the browser-primary
+  caption path** (bead `ytt-e94ce5ee`): `ytt canary --once --browser`
+  drives the stealth-Chromium fetch end to end and `ytt canary --gate`
+  requires the browser leg whenever a browser is configured — a release
+  can no longer pass while the primary path is down behind a silent
+  yt-dlp fallback (the ytt-1e4c448b incident shape). Probe failures fold
+  onto stable codes (connect/timeout -> `ip_blocked`, empty/garbage body
+  -> `empty_body`, 429 -> `rate_limited`), with three matching remediation
+  rows in `deploy/RUNBOOK.md` 3.1. The continuous probe loop is unchanged.
 
 ### Fixed
 

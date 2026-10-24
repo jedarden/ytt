@@ -1111,7 +1111,7 @@ wheels = [
 
 [[package]]
 name = "ytt"
-version = "0.2.35"
+version = "0.2.37"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
