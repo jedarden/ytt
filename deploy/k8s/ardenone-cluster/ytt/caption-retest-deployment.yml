@@ -70,7 +70,7 @@ spec:
       terminationGracePeriodSeconds: 5
       containers:
         - name: caption-retest
-          image: ronaldraygun/ytt:0.2.43
+          image: ronaldraygun/ytt:0.2.45
           imagePullPolicy: IfNotPresent
           command: ["python", "-u", "-c"]
           args:

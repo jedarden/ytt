@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployed-browser 429-corpus verification evidence recorded
   (`ytt-8f748cf7`, docs-only).
 
+## [0.2.45] — 2026-10-24
+
+> 0.2.44 was another CI auto-bump phantom: the chore(beads) checkpoint
+> publish pushed after the 0.2.43 cut did not advance `VERSION`, so the
+> helper allocated again. No 0.2.44 tag or image exists. This cut takes
+> the explicit-advance escape to keep the trail's tip green; it carries
+> no source changes since 0.2.43 (bead `ytt-825066d8`).
+
 ## [0.2.43] — 2026-10-24
 
 > Versions 0.2.40-0.2.42 were CI auto-bumps that touched only `VERSION`
