@@ -31,7 +31,9 @@ dependencies = [
     "structlog>=24.4.0",
     "starlette>=0.40.0",
     # Browser-primary caption fetch (docs/notes/browser-fetch.md): the CLIENT
-    # only -- browsers run in the separate `playwright run-server` pod. The
+    # only -- browsers run in the separate `playwright launch-server --config`
+    # pod (never `run-server`: since Playwright 1.6x it drops the stealth
+    # options, and with --unsafe any client gets executablePath). The
     # server image tag (mcr.microsoft.com/playwright/python:v1.63.0-noble) must
     # match this major.minor.
     "playwright==1.63.0",

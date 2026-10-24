@@ -56,6 +56,11 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
   returned an empty body** (the first acceptance run). `launch-server --config` fixes the
   options on the server where clients cannot touch them. (Bench's older 1.59 `run-server`
   honoured client options, which is why the approach looked fine there.)
+  This contract is pinned, not folklore: `tests/unit/test_browser_launch_mode.py`
+  fails if `run-server` or `--unsafe` reaches an executable launch line, and
+  ties the three copies of the launch options (the manifest's server config,
+  the self-hosting compose example, the client's `BROWSER_LAUNCH_OPTIONS`)
+  so they cannot drift apart.
 - **Shared browser, fresh context per fetch.** A single long-lived *context* reused across
   pages grew to the pod's 2.5 GiB limit and was OOM-killed after ~19 pages. With a fresh
   context per fetch, closed afterwards, the shared browser's RSS plateaus (measured
