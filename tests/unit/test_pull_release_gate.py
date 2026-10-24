@@ -281,7 +281,63 @@ def test_resolve_version_pins_the_pushed_commit():
     assert '--branch "{{workflow.parameters.branch}}"' in source
     assert "ci-release-versioning" in _mount_names("resolve-version")
     outputs = _template("resolve-version")["outputs"]["parameters"]
-    assert {p["name"] for p in outputs} == {"version", "source-sha"}
+    assert {p["name"] for p in outputs} == {"version", "source-sha", "skip"}
+
+
+def test_resolve_version_builds_only_explicit_version_advances():
+    """The phantom-trail fix (bead ytt-0e6b7331). A push that does not itself
+    advance VERSION must never reach the shared helper: the helper allocates
+    a VERSION-only "ci: auto-bump" commit for exactly that shape, and every
+    such half-bumped tip then failed the release-metadata drift guard and
+    re-redded main until a bead cut a release to reconcile it (the
+    0.2.29-0.2.47 trail). Releases here are explicit cuts; everything else
+    has nothing to build and the run skips."""
+    source = _script_source("resolve-version")
+    # The decision compares VERSION at the pushed SHA with its first parent —
+    # the same parent the helper itself uses.
+    assert 'git show "$REV":VERSION' in source
+    assert 'git show "$REV^":VERSION' in source
+    # The helper is invoked only on the advance side of the decision, never
+    # on the skip side.
+    skip_branch, advance_branch = source.split('if [ "$DECISION" != "advance" ]', 1)
+    assert "/ci-release/release-version.py" not in skip_branch
+    assert "/ci-release/release-version.py" in advance_branch
+    # The skip path ends the step successfully with the skip flag set and
+    # empty build outputs, so the gated steps below resolve instead of
+    # erroring on missing parameters.
+    assert 'echo "true" > /tmp/skip' in source
+    assert ': > /tmp/version' in source
+    assert ': > /tmp/source-sha' in source
+    assert 'echo "false" > /tmp/skip' in source
+    # Semantics of the embedded decision: a well-formed VERSION strictly
+    # greater than the parent's (or with no parent VERSION at all — the
+    # initial versioning commit) is an advance; unchanged, regressed or
+    # malformed values are not.
+    assert "advance = cur is not None and (prev is None or cur > prev)" in source
+
+
+def test_downstream_steps_are_gated_on_the_skip_decision():
+    """Every release step after resolve-version runs only when a build was
+    actually resolved; a skipped push must leave a Succeeded run (steps
+    omitted by `when`), never a pod failing on empty parameters."""
+    for step_name in RELEASE_STEPS[1:]:
+        step = _steps_entry(step_name)
+        assert step.get("when") == (
+            "'{{steps.resolve-version.outputs.parameters.skip}}' == 'false'"
+        ), f"{step_name} is not gated on the resolve-version skip decision"
+
+
+def test_workflow_outputs_survive_a_skipped_release():
+    """A skipped run never reaches verify-ghcr-public, so the release-record
+    outputs need a default — without one, output resolution would fail the
+    workflow after it had already done its (no-)work."""
+    outputs = {
+        p["name"]: p for p in _template("build")["outputs"]["parameters"]
+    }
+    for name in ("tested-tag", "tested-digest"):
+        assert outputs[name]["valueFrom"].get("default") == "skipped", (
+            f"{name} has no default for skipped runs"
+        )
 
 
 def test_docker_build_clones_the_pinned_revision_into_a_directory_context():

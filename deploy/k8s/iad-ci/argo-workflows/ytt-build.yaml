@@ -17,8 +17,16 @@
 # test suite aborts the build (no separate test step needed here — see
 # armor-workflowtemplate.yml for the pattern this mirrors).
 #
-# Preserves explicit VERSION advances; otherwise CI allocates a patch release
-# through the shared helper. The generated commit remains the immutable build source.
+# Builds explicit VERSION advances only (bead ytt-0e6b7331 — the 0.2.29-0.2.47
+# phantom-trail fix). ytt releases are CUT, not allocated: the six
+# version-bearing files, the CHANGELOG section, the deploy pins and the
+# v<version> tag move together, enforced by scripts/definition-of-done.sh.
+# A push that does not itself advance VERSION therefore has nothing to build
+# and the run skips at resolve-version. The shared helper remains the
+# resolver for real advances (it preserves them without committing) but is
+# never handed a non-advancing tip: it would allocate a VERSION-only
+# "ci: auto-bump" commit, and every such half-bumped tip then failed the
+# release-metadata gates and re-redded main until a bead cut a release.
 # Source validation and publication gates remain required (matches armor-workflowtemplate.yml
 # and the fleet's Forgejo-primary/GitHub-read-only-mirror model from org CLAUDE.md).
 #
@@ -132,6 +140,7 @@ spec:
         - - name: resolve-version
             template: resolve-version
         - - name: docker-build
+            when: "'{{steps.resolve-version.outputs.parameters.skip}}' == 'false'"
             template: docker-build
             arguments:
               parameters:
@@ -140,18 +149,21 @@ spec:
                 - name: source-sha
                   value: "{{steps.resolve-version.outputs.parameters.source-sha}}"
         - - name: publish-ghcr
+            when: "'{{steps.resolve-version.outputs.parameters.skip}}' == 'false'"
             template: publish-ghcr
             arguments:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
         - - name: quick-start-smoke
+            when: "'{{steps.resolve-version.outputs.parameters.skip}}' == 'false'"
             template: quick-start-smoke
             arguments:
               parameters:
                 - name: version
                   value: "{{steps.resolve-version.outputs.parameters.version}}"
         - - name: verify-ghcr-public
+            when: "'{{steps.resolve-version.outputs.parameters.skip}}' == 'false'"
             template: verify-ghcr-public
             arguments:
               parameters:
@@ -167,9 +179,14 @@ spec:
           - name: tested-tag
             valueFrom:
               parameter: "{{steps.verify-ghcr-public.outputs.parameters.tag}}"
+              # A skipped run never reaches verify-ghcr-public; without a
+              # default its outputs would not resolve and every skip would
+              # Error after doing its (non-)work.
+              default: skipped
           - name: tested-digest
             valueFrom:
               parameter: "{{steps.verify-ghcr-public.outputs.parameters.digest}}"
+              default: skipped
 
     - name: resolve-version
       activeDeadlineSeconds: 300
@@ -181,6 +198,45 @@ spec:
           apk add --no-cache python3 >/dev/null
           git clone --quiet --branch "{{workflow.parameters.branch}}" \
             "https://git.ardenone.com/{{workflow.parameters.git-repo}}.git" /tmp/repo
+          cd /tmp/repo
+          REV="{{workflow.parameters.revision}}"
+          printf '%s\n' "$REV" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "revision must be a full commit SHA, got: $REV" >&2
+            exit 1
+          }
+          git fetch --quiet origin "$REV"
+          # Explicit-advance gate (bead ytt-0e6b7331). ytt releases are cut,
+          # not allocated: only a push that advances VERSION itself has a
+          # build. A non-advancing tip must never reach the shared helper —
+          # it would allocate a VERSION-only "ci: auto-bump" commit whose
+          # half-bumped tree then fails the release-metadata gates (the
+          # 0.2.29-0.2.47 phantom trail). The parent compared against is the
+          # first parent, the same one the helper itself uses.
+          CUR="$(git show "$REV":VERSION 2>/dev/null || true)"
+          PREV="$(git show "$REV^":VERSION 2>/dev/null || true)"
+          DECISION="$(printf '%s\n%s\n' "$CUR" "$PREV" | python3 -c '
+          import sys
+
+          def triple(text):
+              parts = text.strip().split(".")
+              if len(parts) != 3 or not all(p.isdigit() and p for p in parts):
+                  return None
+              return tuple(int(p) for p in parts)
+
+          cur, prev = triple(sys.stdin.readline()), triple(sys.stdin.readline())
+          # A missing parent VERSION is the initial versioning commit (an
+          # advance); an unchanged, regressed or malformed VERSION is not.
+          advance = cur is not None and (prev is None or cur > prev)
+          print("advance" if advance else "skip")
+          ')"
+          if [ "$DECISION" != "advance" ]; then
+            echo "true" > /tmp/skip
+            : > /tmp/version
+            : > /tmp/source-sha
+            echo "resolve-version: $REV does not advance VERSION (${PREV:-none} -> ${CUR:-none}); nothing to build"
+            exit 0
+          fi
+          echo "false" > /tmp/skip
           python3 /ci-release/release-version.py --repo /tmp/repo --version-file "VERSION" \
             --branch "{{workflow.parameters.branch}}" --output-dir /tmp --source-sha "{{workflow.parameters.revision}}"
         env:
@@ -210,6 +266,9 @@ spec:
           - name: source-sha
             valueFrom:
               path: /tmp/source-sha
+          - name: skip
+            valueFrom:
+              path: /tmp/skip
 
     - name: docker-build
       inputs:
