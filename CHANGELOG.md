@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.49] — 2026-10-24
+
+> Versions 0.2.46-0.2.48 were the last CI auto-bump phantoms: the helper
+> allocated a VERSION-only bump for every push that did not advance
+> `VERSION` itself (source pushes, merges, chore(beads) checkpoint
+> publishes), and each half-bumped tip then failed the release-metadata
+> gates until a bead cut a release to reconcile it — the treadmill the
+> 0.2.39 and 0.2.43/0.2.45 cuts documented, resumed by the very next
+> push. `ytt-build` now builds **explicit `VERSION` advances only** (bead
+> `ytt-0e6b7331`): resolve-version skips a push whose first parent held
+> an equal, lower or malformed `VERSION`, and the shared helper is never
+> handed a non-advancing tip again. No 0.2.46-0.2.48 tag or image exists;
+> the entries below ship for the first time in this image.
+
 ### Added
 
 - **Launch-mode regression guard for the browser server** (bead
@@ -23,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract statement.
 - Deployed-browser 429-corpus verification evidence recorded
   (`ytt-8f748cf7`, docs-only).
+- **The release pipeline builds explicit advances only** (bead
+  `ytt-0e6b7331`): `deploy/k8s/iad-ci/argo-workflows/ytt-build.yaml`
+  resolve-version compares `VERSION` at the pushed SHA with its first
+  parent and skips the entire run when the push is not itself an advance
+  — when-gated steps, empty outputs, release-record outputs default to
+  "skipped". Pins the end of the 0.2.29-0.2.48 phantom trail:
+  `tests/unit/test_pull_release_gate.py` holds the decision, the gates
+  and the output defaults.
 
 ## [0.2.45] — 2026-10-24
 
