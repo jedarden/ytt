@@ -212,8 +212,10 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    fi
    ```
    The gate runs `ytt canary --once` (direct) **and** `--via-proxy` when
-   `YTT_PROXY_URL` is configured, requires `outcome=ok` on every probe,
-   writes the combined JSON evidence (default
+   `YTT_PROXY_URL` is configured **and** the browser-primary probe when
+   `YTT_BROWSER_WS_URL` is configured, requires `outcome=ok` on every
+   probe (a pass therefore requires the primary browser path, not just the
+   yt-dlp fallback), writes the combined JSON evidence (default
    `/tmp/ytt-canary-evidence/`), and exits 0 **only** on a full pass.
    Exit 1 = gate failed: the report's `remediation` field names the
    rollback/escalation path (§3.1 below) and the report's `probes` half
@@ -280,8 +282,11 @@ on the **first failing probe** (`report.failed_probe`) and its
 | `via_proxy` (proxy configured) | `ip_blocked` | The fallback egress path is broken. If the release changed `YTT_PROXY_URL`/proxy handling → **roll back** (revert the declarative-config change, push; §5) and re-gate. Otherwise the proxy's residential IP is burned or quota exhausted → **escalate** to the proxy/egress owner with the evidence JSON; rollback will not help. Direct probe failing too = fetches down for users → treat as an incident. |
 | `direct` (proxy configured, `via_proxy` passed) | `ip_blocked` | Native egress blocked, proxy healthy — the caption path degrades to its proxied fallback (bandwidth cost, still serving). Not a release defect; **rollback will not fix it**. **Escalate** to the egress owner with the evidence, and decide explicitly whether to keep or revert the tag. |
 | `direct` (no proxy configured) | `ip_blocked` | If the release changed fetch code or bumped yt-dlp → **roll back** (§5) and re-gate on the previous tag. Otherwise the egress IP is burned → **escalate** to the egress owner with the evidence. |
-| either probe | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
-| either probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the gate environment and re-run; escalate with the evidence only if it persists. |
+| `browser` (browser path configured) | `ip_blocked` or another path-down outcome | The browser-primary caption path is down — every transcript fetch is silently falling back to yt-dlp. If the release changed `YTT_BROWSER_WS_URL`, the browser Deployment, or its NetworkPolicy → **roll back** (revert that manifest change in declarative-config, push; §5) and re-run the gate. Otherwise the browser server is unreachable or refusing connections — check the ytt-browser pod and its egress NetworkPolicy (the connect-refused shape of bead `ytt-1e4c448b`) → **escalate** to the maintainers with the evidence JSON. |
+| `browser` | `empty_body` | The browser player's caption request came back with an empty body — the PO token was missing or rejected (the detected-as-automation class). If the release touched the browser launch options, the stealth settings, or fetch code → **roll back** (revert the tag pin in declarative-config; §5) and re-gate on the previous tag. Otherwise the browser Deployment's Chromium or its launch config drifted → **escalate** to the maintainers with the evidence JSON. |
+| `browser` | `rate_limited` | The browser-primary caption path was rate-limited by YouTube — the browser pod's shared egress IP is burned or its quota is exhausted. **Rollback will not fix it**; **escalate** to the egress owner with the evidence JSON, and decide explicitly whether to keep or revert the tag (fetches still serve through the yt-dlp fallback, at reduced caption coverage). |
+| any probe except `browser` | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
+| any probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the gate environment and re-run; escalate with the evidence only if it persists. |
 
 **Retain the evidence either way.**  The `tee`d stdout copy on the
 operator's box goes into the release bead — pass or fail; that capture, not

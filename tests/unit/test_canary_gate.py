@@ -77,17 +77,24 @@ def _once_report(verdict: str = "ok", *, via_proxy: bool = False) -> dict:
     }
 
 
-def _settings(proxy_url: str | None) -> MagicMock:
+def _settings(
+    proxy_url: str | None, browser_url: str | None = None, fetch_mode: str = "auto"
+) -> MagicMock:
     settings = MagicMock()
     settings.proxy_url = proxy_url
+    settings.fetch_mode = fetch_mode
+    settings.browser_ws_url = browser_url or ""
     return settings
 
 
 def _gate(
     *,
     proxy_url: str | None = None,
+    browser_url: str | None = None,
+    fetch_mode: str = "auto",
     direct: dict | Exception | None = None,
     via_proxy: dict | Exception | None = None,
+    browser: dict | Exception | None = None,
     video_id: str | None = None,
     evidence_dir=None,
 ) -> dict:
@@ -95,6 +102,8 @@ def _gate(
     outcomes = [direct if direct is not None else _once_report()]
     if proxy_url is not None:
         outcomes.append(via_proxy if via_proxy is not None else _once_report(via_proxy=True))
+    if browser_url is not None:
+        outcomes.append(browser if browser is not None else _once_report())
     side_effect = [
         outcome if isinstance(outcome, Exception) else dict(outcome)
         for outcome in outcomes
@@ -102,15 +111,20 @@ def _gate(
 
     calls: list[dict] = []
 
-    def recording_run_once(*, video_id=None, via_proxy=False):
-        calls.append({"video_id": video_id, "via_proxy": via_proxy})
+    def recording_run_once(*, video_id=None, via_proxy=False, browser=False):
+        calls.append(
+            {"video_id": video_id, "via_proxy": via_proxy, "browser": browser}
+        )
         outcome = side_effect.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
 
     with (
-        patch("ytt.config.get_settings", return_value=_settings(proxy_url)),
+        patch(
+            "ytt.config.get_settings",
+            return_value=_settings(proxy_url, browser_url, fetch_mode),
+        ),
         patch("ytt.canary_gate.run_once", side_effect=recording_run_once),
     ):
         report = run_gate(video_id=video_id, evidence_dir=evidence_dir)
@@ -181,6 +195,100 @@ class TestProbeSelection:
         assert report["verdict"] == "empty_body"
 
 
+class TestBrowserProbeSelection:
+    """The browser-primary leg (bead ytt-e94ce5ee): probed when — and only
+    when — the browser path is configured, and a full pass requires it."""
+
+    def test_browser_configured_runs_the_primary_probe_last(self, tmp_path):
+        report = _gate(
+            proxy_url="http://proxy:3128",
+            browser_url="ws://browser:3001/ytt",
+            evidence_dir=tmp_path,
+        )
+        calls = report.pop("_calls")
+        assert [(c["via_proxy"], c["browser"]) for c in calls] == [
+            (False, False),
+            (True, False),
+            (False, True),
+        ]
+        assert set(report["probes"]) == {"direct", "via_proxy", "browser"}
+        assert report["browser_configured"] is True
+
+    def test_without_a_browser_no_browser_probe_runs(self, tmp_path):
+        report = _gate(proxy_url="http://proxy:3128", evidence_dir=tmp_path)
+        report.pop("_calls")
+        assert set(report["probes"]) == {"direct", "via_proxy"}
+        assert report["browser_configured"] is False
+
+    def test_ytdlp_mode_disables_the_browser_probe_even_with_a_url(self, tmp_path):
+        """``YTT_FETCH_MODE=ytdlp`` is the documented rollback switch — the
+        browser path is off, so the gate must not demand it."""
+        report = _gate(
+            browser_url="ws://browser:3001/ytt",
+            fetch_mode="ytdlp",
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert set(report["probes"]) == {"direct"}
+        assert report["browser_configured"] is False
+
+    def test_browser_failure_fails_the_gate(self, tmp_path):
+        """THE blind-spot pin: the primary path down must fail the gate even
+        with both yt-dlp probes green (the ytt-1e4c448b incident shape)."""
+        report = _gate(
+            proxy_url="http://proxy:3128",
+            browser_url="ws://browser:3001/ytt",
+            direct=_once_report("ok"),
+            via_proxy=_once_report("ok", via_proxy=True),
+            browser=_once_report("ip_blocked"),
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert report["gate"] == "fail"
+        assert report["failed_probe"] == "browser"
+        assert report["verdict"] == "ip_blocked"
+        assert report["remediation"]
+
+    def test_pass_requires_the_browser_probe_ok_too(self, tmp_path):
+        report = _gate(
+            proxy_url="http://proxy:3128",
+            browser_url="ws://browser:3001/ytt",
+            direct=_once_report("ok"),
+            via_proxy=_once_report("ok", via_proxy=True),
+            browser=_once_report("ok"),
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert report["gate"] == "pass"
+        assert report["verdict"] == "ok"
+        assert report["failed_probe"] is None
+        assert report["remediation"] is None
+
+    def test_direct_failure_still_wins_when_all_three_probes_fail(self, tmp_path):
+        """Run order stays deterministic with three probes: direct, then
+        via_proxy, then browser."""
+        report = _gate(
+            proxy_url="http://proxy:3128",
+            browser_url="ws://browser:3001/ytt",
+            direct=_once_report("empty_body"),
+            via_proxy=_once_report("ip_blocked", via_proxy=True),
+            browser=_once_report("rate_limited"),
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert report["failed_probe"] == "direct"
+
+    def test_video_id_is_forwarded_to_the_browser_probe(self, tmp_path):
+        report = _gate(
+            browser_url="ws://browser:3001/ytt",
+            video_id="dQw4w9WgXcQ",
+            evidence_dir=tmp_path,
+        )
+        calls = report.pop("_calls")
+        assert {c["video_id"] for c in calls} == {"dQw4w9WgXcQ"}
+        assert report["video_id"] == "dQw4w9WgXcQ"
+
+
 # ---------------------------------------------------------------------------
 # run_gate — report contract
 # ---------------------------------------------------------------------------
@@ -191,6 +299,7 @@ class TestGateReportSchema:
         report.pop("_calls")
         assert set(report) == {
             "mode", "ran_at", "video_id", "proxy_configured",
+            "browser_configured",
             "probes", "verdict", "gate", "failed_probe",
             "remediation", "evidence_file",
         }
@@ -236,6 +345,23 @@ class TestGateError:
         report.pop("_calls")
         assert "s3cret" not in json.dumps(report)
         assert "alice" not in json.dumps(report)
+
+
+    def test_browser_probe_crash_becomes_gate_error_too(self, tmp_path):
+        """A crashing browser probe must block the release exactly like any
+        other probe crash — never degrade into a skip."""
+        report = _gate(
+            browser_url="ws://browser:3001/ytt",
+            browser=RuntimeError("boom"),
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert report["gate"] == "fail"
+        assert report["failed_probe"] == "browser"
+        assert report["verdict"] == GATE_ERROR
+        assert report["probes"]["browser"]["caption_fetch"]["outcome"] == GATE_ERROR
+        assert report["probes"]["browser"]["caption_fetch"]["ok"] is False
+        assert report["probes"]["browser"]["caption_fetch"]["via_proxy"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +630,32 @@ class TestRemediation:
                 "direct", GATE_ERROR, False,
                 ["not an egress verdict", "re-run"],
             ),
+            (
+                "browser", "ip_blocked", True,
+                [
+                    "browser-primary caption path is down",
+                    "silently falling back to yt-dlp",
+                    "YTT_BROWSER_WS_URL",
+                    "declarative-config",
+                    "NetworkPolicy",
+                ],
+            ),
+            (
+                "browser", "empty_body", True,
+                [
+                    "PO token was missing or rejected",
+                    "revert the tag pin",
+                    "re-gate on the previous tag",
+                ],
+            ),
+            (
+                "browser", "rate_limited", True,
+                [
+                    "rate-limited by YouTube",
+                    "rollback will not fix it",
+                    "escalate to the egress owner",
+                ],
+            ),
         ],
     )
     def test_directive_names_the_concrete_action(
@@ -523,6 +675,9 @@ class TestRemediation:
             ("direct", "ip_blocked", False),
             ("direct", "empty_body", False),
             ("via_proxy", "rate_limited", True),
+            ("browser", "ip_blocked", True),
+            ("browser", "empty_body", True),
+            ("browser", "rate_limited", True),
             ("direct", GATE_ERROR, True),
         ],
     )
@@ -648,6 +803,41 @@ class TestRunbookRemediationMirror:
                     "if it persists",
                 ],
             ),
+            # §3.1 rows 6–8 — the browser-primary probe (bead ytt-e94ce5ee)
+            (
+                "browser", "ip_blocked", True,
+                [
+                    "browser-primary caption path is down",
+                    "silently falling back to yt-dlp",
+                    "YTT_BROWSER_WS_URL",
+                    "declarative-config",
+                    "re-run the gate",
+                    "NetworkPolicy",
+                    "ytt-browser pod",
+                    "ytt-1e4c448b",
+                    "to the maintainers with the evidence JSON",
+                ],
+            ),
+            (
+                "browser", "empty_body", True,
+                [
+                    "empty body",
+                    "PO token was missing or rejected",
+                    "revert the tag pin in declarative-config",
+                    "re-gate on the previous tag",
+                    "to the maintainers with the evidence JSON",
+                ],
+            ),
+            (
+                "browser", "rate_limited", True,
+                [
+                    "rate-limited by YouTube",
+                    "shared egress IP is burned",
+                    "rollback will not fix it",
+                    "to the egress owner with the evidence JSON",
+                    "whether to keep or revert the tag",
+                ],
+            ),
         ],
     )
     def test_runbook_31_carries_every_directive_phrase(
@@ -672,7 +862,7 @@ class TestRunbookRemediationMirror:
         row 5's own fix-and-rerun) and is §3.1's stated rule above the
         table."""
         for outcome in ("ip_blocked", "empty_body", "rate_limited"):
-            for probe, proxy in (("direct", False), ("via_proxy", True)):
+            for probe, proxy in (("direct", False), ("via_proxy", True), ("browser", True)):
                 directive = remediation_for(probe, outcome, proxy_configured=proxy)
                 assert "re-run the gate once before acting" in directive
         assert "re-run the gate once before acting" in runbook_31
@@ -757,6 +947,13 @@ class TestCli:
         worst (the gate derives the probe set from YTT_PROXY_URL itself)."""
         with pytest.raises(SystemExit) as excinfo:
             cli_main(["canary", "--gate", "--via-proxy"])
+        assert excinfo.value.code == 2
+
+    def test_gate_rejects_explicit_browser(self):
+        """Same contract as --via-proxy: the gate derives the probe set from
+        YTT_BROWSER_WS_URL itself; an explicit --browser would lie."""
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main(["canary", "--gate", "--browser"])
         assert excinfo.value.code == 2
 
     def test_evidence_dir_requires_gate(self):

@@ -11,6 +11,15 @@ What it runs:
 2. ``ytt canary --once --via-proxy`` — **only when ``YTT_PROXY_URL`` is
    configured**: the end-to-end proof that the configured proxy carries
    YouTube traffic (``docs/notes/proxy-egress.md``).
+3. ``ytt canary --once --browser`` — **only when the browser-primary path is
+   configured** (``YTT_BROWSER_WS_URL`` set, ``YTT_FETCH_MODE`` not
+   ``ytdlp``): the PO-token proof that the *primary* caption path works —
+   fresh context, the player's own caption request, a non-empty timedtext
+   body (``docs/notes/browser-fetch.md``).  A gate pass must not be
+   reachable with the primary path down: before this probe, a release could
+   pass on the yt-dlp fallback alone while every fetch silently degraded
+   (open bead ``ytt-1e4c448b`` was exactly that shape).  A browser failure
+   reports a real failing outcome, never a skip.
 
 The gate passes only when every probe it ran reports ``outcome=ok``.  It
 writes the combined JSON report to an evidence file (default
@@ -55,8 +64,10 @@ DEFAULT_EVIDENCE_DIR = "/tmp/ytt-canary-evidence"
 
 _EVIDENCE_FILENAME_PREFIX = "ytt-canary-gate"
 
-#: Probe order — also the order failing probes are reported in.
-PROBE_ORDER: tuple[str, ...] = ("direct", "via_proxy")
+#: Probe order — also the order failing probes are reported in.  ``browser``
+#: names the browser-primary caption path; it is probed only when the browser
+#: path is configured (the same shape as ``via_proxy`` and ``YTT_PROXY_URL``).
+PROBE_ORDER: tuple[str, ...] = ("direct", "via_proxy", "browser")
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +124,48 @@ def remediation_for(
             "this as a canary result: fix the gate environment and re-run "
             "(check the traceback on stderr); escalate to the maintainers "
             "with the evidence JSON if it persists."
+        )
+
+    if failed_probe == "browser":
+        # The primary path — its failures get browser-specific directives,
+        # never the yt-dlp/extractor wording the direct/via_proxy rows use.
+        if outcome == "rate_limited":
+            return (
+                lead
+                + "the browser-primary caption path was rate-limited by "
+                "YouTube — the browser pod's shared egress IP is burned or "
+                "its quota is exhausted. A rollback will not fix it: "
+                "escalate to the egress owner with the evidence JSON, and "
+                "decide explicitly whether to keep or revert the tag while "
+                "the browser path is throttled (fetches still serve through "
+                "the yt-dlp fallback, at reduced caption coverage)."
+            )
+        if outcome == "empty_body":
+            return (
+                lead
+                + "the browser player's caption request came back with an "
+                "empty body — the PO token was missing or rejected (the "
+                "detected-as-automation class). If this release touched "
+                "the browser launch options, the stealth settings, or "
+                "fetch code, revert the tag pin in declarative-config and "
+                "push (RUNBOOK §5), then re-gate on the previous tag. If "
+                "it did not, the browser Deployment's Chromium or its "
+                "launch config drifted — escalate to the maintainers with "
+                "the evidence JSON."
+            )
+        return (
+            lead
+            + "the browser-primary caption path is down "
+            f"({outcome}) — every transcript fetch is silently falling "
+            "back to yt-dlp, and the gate no longer calls that a pass. "
+            "If this release changed YTT_BROWSER_WS_URL, the browser "
+            "Deployment, or its NetworkPolicy, revert that manifest "
+            "change in declarative-config and push (RUNBOOK §5), then "
+            "re-run the gate. If it did not, the browser server is "
+            "unreachable or refusing connections — check the "
+            "ytt-browser pod and its egress NetworkPolicy (the "
+            "connect-refused shape of bead ytt-1e4c448b) and escalate "
+            "to the maintainers with the evidence JSON."
         )
 
     if outcome == "ip_blocked":
@@ -172,7 +225,9 @@ def remediation_for(
 # ---------------------------------------------------------------------------
 
 
-def _gate_error_probe(video_id: str | None, *, via_proxy: bool, exc: Exception) -> dict:
+def _gate_error_probe(
+    video_id: str | None, *, via_proxy: bool = False, exc: Exception
+) -> dict:
     """Synthesize a ``run_once``-shaped report after an unexpected crash."""
     return {
         "mode": "once",
@@ -191,7 +246,7 @@ def _gate_error_probe(video_id: str | None, *, via_proxy: bool, exc: Exception) 
     }
 
 
-def _run_probe(video_id: str | None, *, via_proxy: bool) -> dict:
+def _run_probe(video_id: str | None, *, via_proxy: bool = False, browser: bool = False) -> dict:
     """Run one ``run_once`` probe; a crash becomes a ``gate_error`` report.
 
     Probes stay ``run_once``-shaped so consumers never branch on missing
@@ -199,13 +254,19 @@ def _run_probe(video_id: str | None, *, via_proxy: bool) -> dict:
     report is scrubbed before it is embedded (see :func:`_scrub_secrets`).
     """
     try:
-        return _scrub_secrets(run_once(video_id=video_id, via_proxy=via_proxy))
+        return _scrub_secrets(
+            run_once(video_id=video_id, via_proxy=via_proxy, browser=browser)
+        )
     except Exception as exc:  # noqa: BLE001 — the gate reports, not raises
-        log.exception("Canary gate: %s probe crashed", _probe_label(via_proxy))
+        log.exception(
+            "Canary gate: %s probe crashed", _probe_label(via_proxy, browser)
+        )
         return _gate_error_probe(video_id, via_proxy=via_proxy, exc=exc)
 
 
-def _probe_label(via_proxy: bool) -> str:
+def _probe_label(via_proxy: bool, browser: bool = False) -> str:
+    if browser:
+        return "browser"
     return "via_proxy" if via_proxy else "direct"
 
 
@@ -264,10 +325,14 @@ def run_gate(
     """Run the post-deploy canary acceptance gate and return its report.
 
     Runs the direct one-shot canary, plus the ``--via-proxy`` probe when a
-    proxy is configured (``YTT_PROXY_URL``).  Pass only on a full ``ok``:
-    every probe's ``verdict`` must be ``"ok"`` for ``gate == "pass"``.  The
-    returned report is JSON-serializable (it is written to the evidence file
-    and printed verbatim) and contains no secrets — probe reports carry
+    proxy is configured (``YTT_PROXY_URL``), plus the browser-primary probe
+    when the browser path is configured (``YTT_BROWSER_WS_URL`` with
+    ``YTT_FETCH_MODE`` not ``ytdlp``).  Pass only on a full ``ok``:
+    every probe's ``verdict`` must be ``"ok"`` for ``gate == "pass"`` —
+    including the browser probe, so a release cannot pass on the yt-dlp
+    fallback while the primary path is down.  The returned report is
+    JSON-serializable (it is written to the evidence file and printed
+    verbatim) and contains no secrets — probe reports carry
     credential-redacted error strings, and the proxy URL itself never
     appears.  Every run writes a fresh timestamped artifact and nothing is
     ever deleted: a re-run appends evidence, it does not replace it.
@@ -275,9 +340,12 @@ def run_gate(
     Failure reports carry ``remediation`` — the rollback/escalation directive
     from :func:`remediation_for` — and the CLI exits 1.
     """
+    from ytt.browser_fetch import browser_fetch_enabled
     from ytt.config import get_settings
 
-    proxy_configured = get_settings().proxy_url is not None
+    settings = get_settings()
+    proxy_configured = settings.proxy_url is not None
+    browser_configured = browser_fetch_enabled(settings)
     ran_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     probes: dict[str, dict] = {
@@ -285,6 +353,8 @@ def run_gate(
     }
     if proxy_configured:
         probes["via_proxy"] = _run_probe(video_id, via_proxy=True)
+    if browser_configured:
+        probes["browser"] = _run_probe(video_id, browser=True)
 
     failed_probe = next(
         (name for name in PROBE_ORDER if name in probes and probes[name]["verdict"] != "ok"),
@@ -298,6 +368,7 @@ def run_gate(
         "ran_at": ran_at,
         "video_id": video_id or CANARY_VIDEO_IDS[0],
         "proxy_configured": proxy_configured,
+        "browser_configured": browser_configured,
         "probes": probes,
         "verdict": verdict,
         "gate": "pass" if passed else "fail",

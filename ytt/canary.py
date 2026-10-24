@@ -52,6 +52,7 @@ Usage (within the canary Deployment):
 One-shot mode (lightweight Proof-Obligation canary):
     ytt canary --once               # egress report + caption fetch, JSON, exit 0/1
     python -m ytt.canary --once     # same, no CLI dependency
+    ytt canary --once --browser     # probe the browser-primary path instead
 """
 
 from __future__ import annotations
@@ -93,9 +94,15 @@ CANARY_VIDEO_IDS: tuple[str, ...] = (
 #: gate and the continuous metrics, so an alert, a remediation directive and
 #: a log line always name a path the same way.  Pinned equal to
 #: ``ytt.canary_gate.PROBE_ORDER`` by tests/unit/test_canary_monitoring.py.
+#: ``browser`` names the browser-primary caption path (``YTT_BROWSER_WS_URL``)
+#: — exercised by the one-shot/gate probe (``probe_browser_once_detail``);
+#: the continuous loop probes only direct/via_proxy, so a ``browser`` series
+#: from the loop's registry means this file changed and the loop did not
+#: follow (the vocabulary is shared, the loop's probe set is not).
 PROBE_DIRECT = "direct"
 PROBE_VIA_PROXY = "via_proxy"
-PROBE_LABELS: tuple[str, ...] = (PROBE_DIRECT, PROBE_VIA_PROXY)
+PROBE_BROWSER = "browser"
+PROBE_LABELS: tuple[str, ...] = (PROBE_DIRECT, PROBE_VIA_PROXY, PROBE_BROWSER)
 
 # All four metrics live here rather than in ytt.observability (the home of
 # the server's own series) because only this module's probe loop emits them:
@@ -239,6 +246,123 @@ def probe_once_detail(video_id: str, proxy: str | None = None) -> dict:
     }
 
 
+def _browser_fetch_outcome(exc: BaseException) -> str:
+    """Map a browser-fetch failure onto the canary's stable outcome vocabulary.
+
+    The one-shot report's ``outcome`` is ``"ok"`` or a :mod:`ytt.errors`
+    code (docs/notes/canary-gate-evidence.md §2) — the browser path's
+    :class:`~ytt.browser_fetch.BrowserInfraError` therefore folds onto the
+    closest code: a rate-limited player request is ``rate_limited``, a
+    zero/garbage body (the PO-token rejection class) is ``empty_body``, and
+    every unreachable or undrivable browser (connect refused, navigation,
+    timeout, …) is ``ip_blocked`` — this vocabulary's "the path is blocked"
+    code.  Video-level :class:`~ytt.errors.YttError` codes pass through; an
+    unrecognized exception is ``empty_body`` (same fallback
+    :func:`probe_once_detail` uses).  The report's ``error`` string still
+    carries the specific cause, and the gate's remediation table keys on the
+    probe name, not just the outcome.
+    """
+    from ytt import errors
+    from ytt.browser_fetch import BrowserInfraError
+
+    if isinstance(exc, BrowserInfraError):
+        if exc.reason == "rate_limited":
+            return errors.RATE_LIMITED
+        if exc.reason in ("empty_body", "empty_parse", "bad_body"):
+            return errors.EMPTY_BODY
+        return errors.IP_BLOCKED
+    if isinstance(exc, errors.YttError):
+        return exc.error_code
+    return errors.EMPTY_BODY
+
+
+def probe_browser_once_detail(video_id: str) -> dict:
+    """Probe the browser-primary caption path for ``video_id``.
+
+    The primary-path counterpart of :func:`probe_once_detail`
+    (bead ``ytt-e94ce5ee``): connects to ``YTT_BROWSER_WS_URL``, opens a
+    fresh context, drives YouTube's own player into issuing its caption
+    request, and requires a non-empty timedtext body — the PO-token proof
+    that the primary path actually works (``docs/notes/browser-fetch.md``).
+    yt-dlp is deliberately not involved and a browser failure is never
+    converted into a fallback attempt: a release gate that could pass while
+    the primary path is down is exactly the blind spot this probe closes
+    (open bead ``ytt-1e4c448b`` — browser fetch refused at connect,
+    silent yt-dlp fallback, canary green).
+
+    Returns the same shape as :func:`probe_once_detail`.  ``via_proxy`` is
+    always ``False`` — the browser path does not dial through
+    ``YTT_PROXY_URL``; its egress is the browser pod's.  With the browser
+    path not enabled the outcome is ``unavailable`` — a real failing
+    outcome, never a skip: a caller that asked for this path explicitly
+    must see it fail, not disappear.
+
+    Synchronous; network-bound (the fetch honors
+    ``YTT_BROWSER_TIMEOUT_SEC`` as its whole-fetch budget).
+    """
+    started = time.monotonic()
+    from ytt import errors
+    from ytt.browser_fetch import browser_fetch_enabled, browser_fetch_transcript
+    from ytt.config import get_settings
+
+    settings = get_settings()
+    if not browser_fetch_enabled(settings):
+        log.warning(
+            "Canary browser probe for %s: browser path not enabled "
+            "(YTT_BROWSER_WS_URL unset or YTT_FETCH_MODE=ytdlp)",
+            video_id,
+        )
+        return {
+            "ok": False,
+            "outcome": errors.UNAVAILABLE,
+            "langs": [],
+            "duration_sec": 0.0,
+            "via_proxy": False,
+            "error": (
+                "browser path not enabled "
+                "(YTT_BROWSER_WS_URL unset or YTT_FETCH_MODE=ytdlp)"
+            ),
+        }
+    try:
+        result = asyncio.run(browser_fetch_transcript(video_id, None, settings))
+    except Exception as exc:
+        duration = round(time.monotonic() - started, 2)
+        outcome = _browser_fetch_outcome(exc)
+        # Error strings may quote infra addresses — sanitize before the
+        # report lands in the printed/JSON evidence (same rule as
+        # probe_once_detail).
+        error_text = redact_credentials(str(exc))
+        log.error(
+            "Canary browser probe error for %s: %s (outcome=%s)",
+            video_id,
+            error_text,
+            outcome,
+        )
+        return {
+            "ok": False,
+            "outcome": outcome,
+            "langs": [],
+            "duration_sec": duration,
+            "via_proxy": False,
+            "error": error_text,
+        }
+
+    duration = round(time.monotonic() - started, 2)
+    log.info(
+        "Canary browser probe succeeded for %s (%d caption segments)",
+        video_id,
+        len(result.segments),
+    )
+    return {
+        "ok": True,
+        "outcome": "ok",
+        "langs": list(result.available_langs),
+        "duration_sec": duration,
+        "via_proxy": False,
+        "error": None,
+    }
+
+
 def _probe_all_once(proxy: str | None = None) -> list[dict]:
     """Probe **every** configured video once and return the per-video reports.
 
@@ -370,7 +494,9 @@ async def run_probe_loop(interval_sec: int = 600) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
+def run_once(
+    video_id: str | None = None, *, via_proxy: bool = False, browser: bool = False
+) -> dict:
     """Run the canary once: egress report + one caption fetch.
 
     The lightweight Proof-Obligation canary (plan §Proof Obligations —
@@ -388,6 +514,15 @@ def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
     classification half always dials through the proxy when one is set
     (it classifies the proxy's egress, the effective fallback path).
 
+    ``browser=True`` (``ytt canary --once --browser``) swaps the fetch leg
+    to :func:`probe_browser_once_detail` — the end-to-end check that the
+    browser-primary path (``YTT_BROWSER_WS_URL``) mints a PO token and gets
+    a non-empty caption body.  ``via_proxy`` and ``browser`` are mutually
+    exclusive (one probe exercises one path); the browser leg reports
+    ``egress: {}`` because its traffic egresses from the browser pod, so
+    classifying *this* process's egress would not describe the path that
+    carried it.
+
     Returns a JSON-serializable report with ``verdict`` set to the caption
     fetch ``outcome`` (``"ok"`` or a stable error_code) and ``ran_at`` stamped
     UTC — the report is meant to be pasted somewhere durable as evidence.
@@ -395,12 +530,30 @@ def run_once(video_id: str | None = None, *, via_proxy: bool = False) -> dict:
     """
     from datetime import datetime, timezone
 
-    from ytt.config import get_settings
     from ytt.observability import redact_credentials
+
+    vid = video_id or CANARY_VIDEO_IDS[0]
+
+    if browser:
+        if via_proxy:
+            raise ValueError(
+                "browser and via_proxy are mutually exclusive: one probe "
+                "exercises one path"
+            )
+        fetch_report = probe_browser_once_detail(vid)
+        return {
+            "mode": "once",
+            "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "video_id": vid,
+            "egress": {},
+            "caption_fetch": fetch_report,
+            "verdict": fetch_report["outcome"],
+        }
+
+    from ytt.config import get_settings
     from ytt.selftest import probe_egress
 
     settings = get_settings()
-    vid = video_id or CANARY_VIDEO_IDS[0]
 
     # Egress classification is context, not the verdict — if ipinfo.io is
     # unreachable the caption fetch is still the ground truth.
@@ -470,7 +623,9 @@ if __name__ == "__main__":
         if "--video-id" in _sys.argv:
             _vid = _sys.argv[_sys.argv.index("--video-id") + 1]
         _report = run_once(
-            video_id=_vid, via_proxy="--via-proxy" in _sys.argv
+            video_id=_vid,
+            via_proxy="--via-proxy" in _sys.argv,
+            browser="--browser" in _sys.argv,
         )
         print(_json.dumps(_report, indent=2))
         _sys.exit(0 if _report["verdict"] == "ok" else 1)

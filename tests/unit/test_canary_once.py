@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 import yt_dlp
@@ -25,10 +25,14 @@ import yt_dlp
 from ytt.canary import (
     CANARY_VIDEO_IDS,
     _probe_all_once,
+    probe_browser_once_detail,
     probe_once_detail,
     run_once,
 )
+from ytt.browser_fetch import BrowserInfraError
 from ytt.cli import main as cli_main
+from ytt.errors import YttError
+from ytt.fetch import FetchResult
 from ytt.models import EgressReport
 
 
@@ -124,6 +128,152 @@ class TestProbeOnceDetail:
 
         for key, value in YDL_BASE_OPTS.items():
             assert captured.get(key) == value, f"canary dropped {key!r} from YDL opts"
+
+
+# ---------------------------------------------------------------------------
+# probe_browser_once_detail (the browser-primary probe — bead ytt-e94ce5ee)
+# ---------------------------------------------------------------------------
+
+_BROWSER_WS_URL = "ws://browser:3001/ytt"
+
+
+def _browser_settings(browser_ws_url: str = _BROWSER_WS_URL) -> MagicMock:
+    settings = MagicMock()
+    settings.fetch_mode = "auto"
+    settings.browser_ws_url = browser_ws_url
+    settings.proxy_url = None
+    return settings
+
+
+def _browser_fetch_ok() -> FetchResult:
+    return FetchResult(
+        segments=[{"start": 0.0, "duration": 1.0, "text": "hello"}],
+        source="caption_auto",
+        served_lang="en",
+        requested_lang=None,
+        available_langs=["en"],
+    )
+
+
+class TestProbeBrowserOnceDetail:
+    def test_ok_reports_the_po_token_proof(self):
+        """Success means the player's own timedtext request carried a PO
+        token and a non-empty body (browser_fetch_transcript raises on an
+        empty/failed body, so reaching a FetchResult IS the proof)."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(return_value=_browser_fetch_ok()),
+            ),
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        assert report["ok"] is True
+        assert report["outcome"] == "ok"
+        assert report["langs"] == ["en"]
+        assert report["error"] is None
+        assert report["duration_sec"] >= 0
+
+    def test_connect_refused_is_a_real_failing_outcome_never_a_skip(self):
+        """The ytt-1e4c448b shape: the browser server unreachable must fail
+        the probe — silently reporting success (or a skip) would let a
+        release pass with the primary path down."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(
+                    side_effect=BrowserInfraError(
+                        "cannot reach browser server: ConnectionRefusedError",
+                        reason="connect",
+                    )
+                ),
+            ),
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        assert report["ok"] is False
+        assert report["outcome"] == "ip_blocked"
+        assert "ConnectionRefusedError" in report["error"]
+        assert report["langs"] == []
+
+    def test_empty_body_maps_to_empty_body(self):
+        """The PO-token rejection class — a 200 with a zero-byte body."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(
+                    side_effect=BrowserInfraError(
+                        "player's caption request returned an empty body",
+                        reason="empty_body",
+                    )
+                ),
+            ),
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        assert report["ok"] is False
+        assert report["outcome"] == "empty_body"
+
+    def test_rate_limited_maps_to_rate_limited(self):
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(
+                    side_effect=BrowserInfraError(
+                        "player's caption request was rate limited",
+                        reason="rate_limited",
+                    )
+                ),
+            ),
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        assert report["ok"] is False
+        assert report["outcome"] == "rate_limited"
+
+    def test_video_level_error_passes_through(self):
+        """A video-level verdict (private, unavailable, …) is authoritative
+        on the known-good canary video — it is reported, not reclassified."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(side_effect=YttError("private", "This video is private.")),
+            ),
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        assert report["ok"] is False
+        assert report["outcome"] == "private"
+
+    def test_disabled_path_is_unavailable_not_a_skip(self):
+        """Asking for the browser probe with the path disabled reports a
+        real failing outcome — a probe that vanishes when misconfigured is
+        the silent-fallback shape this bead exists to kill."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings("")),
+            patch("ytt.browser_fetch.browser_fetch_transcript") as fetch,
+        ):
+            report = probe_browser_once_detail("jNQXAC9IVRw")
+        fetch.assert_not_called()
+        assert report["ok"] is False
+        assert report["outcome"] == "unavailable"
+        assert "YTT_BROWSER_WS_URL" in report["error"]
+
+    def test_report_shape_matches_probe_once_detail(self):
+        """One schema for every probe path — the gate's probe reports never
+        branch on missing keys."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(return_value=_browser_fetch_ok()),
+            ),
+        ):
+            browser_report = probe_browser_once_detail("jNQXAC9IVRw")
+        with patch("yt_dlp.YoutubeDL", return_value=_ydl_returning(_caption_info())):
+            ytdlp_report = probe_once_detail("jNQXAC9IVRw")
+        assert set(browser_report) == set(ytdlp_report)
+        assert browser_report["via_proxy"] is False  # browser egress ≠ YTT_PROXY_URL
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +436,71 @@ class TestRunOnce:
 
 
 # ---------------------------------------------------------------------------
+# run_once — the browser leg (--once --browser; the gate's third probe)
+# ---------------------------------------------------------------------------
+
+
+class TestRunOnceBrowserLeg:
+    def test_verdict_mirrors_the_browser_probe(self):
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(
+                    side_effect=BrowserInfraError(
+                        "cannot reach browser server", reason="connect"
+                    )
+                ),
+            ),
+        ):
+            report = run_once(browser=True)
+        assert report["verdict"] == report["caption_fetch"]["outcome"] == "ip_blocked"
+        assert report["caption_fetch"]["ok"] is False
+
+    def test_browser_report_keeps_the_once_shape(self):
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(return_value=_browser_fetch_ok()),
+            ),
+        ):
+            report = run_once()
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(return_value=_browser_fetch_ok()),
+            ),
+        ):
+            browser_report = run_once(browser=True)
+        assert set(browser_report) == set(report) == {
+            "mode", "ran_at", "video_id", "egress", "caption_fetch", "verdict",
+        }
+        assert browser_report["mode"] == "once"
+
+    def test_browser_leg_carries_no_egress_classification(self):
+        """The browser fetch egresses from the browser pod — classifying
+        this process's egress would not describe the path that carried the
+        traffic, so the leg ships an empty context (the gate_error shape)."""
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch(
+                "ytt.browser_fetch.browser_fetch_transcript",
+                AsyncMock(return_value=_browser_fetch_ok()),
+            ),
+            patch("ytt.selftest.probe_egress") as probe_egress,
+        ):
+            report = run_once(browser=True)
+        probe_egress.assert_not_called()
+        assert report["egress"] == {}
+
+    def test_browser_and_via_proxy_are_rejected(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            run_once(browser=True, via_proxy=True)
+
+
+# ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
 
@@ -322,7 +537,31 @@ class TestCli:
         with patch("ytt.canary.run_once") as run_once_mock:
             run_once_mock.return_value = {"verdict": "ok", "video_id": "x"}
             cli_main(["canary", "--once", "--video-id", "x"])
-        run_once_mock.assert_called_once_with(video_id="x", via_proxy=False)
+        run_once_mock.assert_called_once_with(
+            video_id="x", via_proxy=False, browser=False
+        )
+
+    def test_canary_once_browser_flag_forwarded(self):
+        with patch("ytt.canary.run_once") as run_once_mock:
+            run_once_mock.return_value = {"verdict": "ok", "video_id": "x"}
+            cli_main(["canary", "--once", "--browser"])
+        run_once_mock.assert_called_once_with(
+            video_id=None, via_proxy=False, browser=True
+        )
+
+    def test_browser_with_gate_is_a_usage_error(self):
+        """--gate runs the browser leg itself when the path is configured —
+        an explicit flag would lie about what was probed."""
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main(["canary", "--gate", "--browser"])
+        assert excinfo.value.code == 2
+
+    def test_browser_and_via_proxy_together_is_a_usage_error(self):
+        """One one-shot probe exercises one path; asking for both would make
+        the verdict ambiguous."""
+        with pytest.raises(SystemExit) as excinfo:
+            cli_main(["canary", "--once", "--browser", "--via-proxy"])
+        assert excinfo.value.code == 2
 
     def test_canary_without_once_uses_loop_main(self):
         with patch("ytt.canary.main", return_value=0) as loop_main:
@@ -380,6 +619,17 @@ def _run_once_blocked() -> dict:
         return run_once()
 
 
+def _run_once_browser_ok() -> dict:
+    with (
+        patch("ytt.config.get_settings", return_value=_browser_settings()),
+        patch(
+            "ytt.browser_fetch.browser_fetch_transcript",
+            AsyncMock(return_value=_browser_fetch_ok()),
+        ),
+    ):
+        return run_once(browser=True)
+
+
 class TestReportSchema:
     def test_probe_schema_is_stable_across_outcomes(self):
         """Success and every failure shape share one schema, discriminated by
@@ -421,6 +671,19 @@ class TestReportSchema:
         assert ok_report["verdict"] == ok_report["caption_fetch"]["outcome"] == "ok"
         blocked = _run_once_blocked()
         assert blocked["verdict"] == blocked["caption_fetch"]["outcome"] == "ip_blocked"
+
+    def test_run_once_browser_leg_schema(self):
+        """The browser leg keeps the once schema — the gate's probe reports
+        never branch on the path — with the deliberate empty egress context
+        (the fetch egresses from the browser pod, not this process)."""
+        report = _run_once_browser_ok()
+        assert set(report) == _REPORT_KEYS
+        assert set(report["caption_fetch"]) == _PROBE_KEYS
+        assert report["egress"] == {}
+        assert report["verdict"] == report["caption_fetch"]["outcome"] == "ok"
+
+    def test_browser_leg_round_trips_through_json_losslessly(self):
+        assert json.loads(json.dumps(_run_once_browser_ok())) == _run_once_browser_ok()
 
     def test_report_round_trips_through_json_losslessly(self):
         """Pasted-as-evidence means ``json.dumps`` is lossless: no datetimes,

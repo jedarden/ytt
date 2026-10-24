@@ -32,10 +32,11 @@ Top-level keys (exact set, pinned by `TestGateReportSchema`):
 | `ran_at` | ISO-8601 UTC, second resolution | Gate start time; also the filename timestamp source |
 | `video_id` | string | The video every probe fetched (the first `CANARY_VIDEO_IDS` entry unless `--video-id`) |
 | `proxy_configured` | bool | Whether `YTT_PROXY_URL` is set — i.e. whether a `via_proxy` probe exists |
-| `probes` | object | One `run_once`-shaped report per probe, keyed `direct` and (only when `proxy_configured`) `via_proxy` |
+| `browser_configured` | bool | Whether the browser-primary path is enabled (`YTT_BROWSER_WS_URL` set, `YTT_FETCH_MODE` not `ytdlp`) — i.e. whether a `browser` probe exists (bead `ytt-e94ce5ee`) |
+| `probes` | object | One `run_once`-shaped report per probe, keyed `direct`, (only when `proxy_configured`) `via_proxy`, and (only when `browser_configured`) `browser` |
 | `verdict` | string | The first failing probe's outcome, else `"ok"` |
-| `gate` | `"pass"` \| `"fail"` | The release decision — `"pass"` only when **every** probe's `verdict` is `ok` |
-| `failed_probe` | `null` \| `"direct"` \| `"via_proxy"` | First failing probe in run order; `null` on a pass |
+| `gate` | `"pass"` \| `"fail"` | The release decision — `"pass"` only when **every** probe's `verdict` is `ok`, so a pass requires the browser-primary path when it is configured, not just the yt-dlp fallback |
+| `failed_probe` | `null` \| `"direct"` \| `"via_proxy"` \| `"browser"` | First failing probe in run order (direct → via_proxy → browser); `null` on a pass |
 | `remediation` | `null` \| string | The rollback/escalation directive (`remediation_for`); `null` on a pass. Mirrors `deploy/RUNBOOK.md` §3.1 — the two are updated together |
 | `evidence_file` | `null` \| string | Absolute path of the artifact; the value embedded **inside** the file equals the path it was written to |
 
@@ -50,7 +51,11 @@ Each entry of `probes` keeps the full `ytt canary --once` shape (pinned by
 - `egress` is the ipinfo classification context: `ip`, `asn`, `org`,
   `via_proxy`, `is_residential` — or, when the ipinfo probe itself failed,
   `error` (credential-redacted) plus `via_proxy`. It is context, never the
-  verdict: the gate passes or fails on `caption_fetch` alone.
+  verdict: the gate passes or fails on `caption_fetch` alone. The `browser`
+  probe's `egress` is `{}`: its fetch runs in the browser pod, so
+  classifying the exec pod's egress would not describe the path that
+  actually carried the traffic (the same empty-context shape a
+  `gate_error` report carries).
 - `caption_fetch` carries:
 
 | Key | Meaning |
@@ -149,8 +154,9 @@ is the evidence.
 | exit code | `0` | `1` |
 
 Exit `2` is argparse usage rejection only (`--gate` with `--once`, `--gate`
-with `--via-proxy`, `--evidence-dir` without `--gate`, `--video-id` without
-`--once`/`--gate`). Any outcome the gate could not classify is a *failure*,
+with `--via-proxy`, `--gate` with `--browser`, `--once` with both `--browser`
+and `--via-proxy` (one probe, one path), `--evidence-dir` without `--gate`,
+`--video-id` without `--once`/`--gate`). Any outcome the gate could not classify is a *failure*,
 not a crash: a probe that raises is reported as `gate_error` with exit `1`,
 because a tooling/environment failure must block a release the same way a
 real egress failure does — it just tells the operator not to read it as an

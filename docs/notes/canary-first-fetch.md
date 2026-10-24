@@ -157,3 +157,24 @@ correlate on the in-message stamp (procedure now in
 and the one-shot/gate evidence surfaces stamp their stderr diagnostics the
 same way.  Everything above the 2026-09-26 postscript is a 2026-09-18
 evidence record for 0.2.20 and is unchanged.
+
+## Postscript — 2026-10-24 (bead `ytt-e94ce5ee`)
+
+The probe family this note describes has a sibling. `probe_once_detail`
+remains exactly what the record above pins — the yt-dlp fetch, and the
+"Each 'succeeded' line means `probe_once_detail` ran `yt_dlp.extract_info`"
+reading stays true of the `direct`/`via_proxy` paths. What changed: since
+bead `ytt-204947b5` the browser fetch is the *primary* caption path, so a
+canary that only exercised yt-dlp could pass while the primary path was
+completely down (open bead `ytt-1e4c448b` was prod failing in exactly that
+shape — browser fetch refused at connect, silent yt-dlp fallback, canary
+green). `probe_browser_once_detail` now exercises the primary path itself:
+connect to `YTT_BROWSER_WS_URL`, fresh context, drive the player into its
+own caption request, require a non-empty timedtext body (the PO-token
+proof). The one-shot report can carry that leg (`ytt canary --once
+--browser`), and the gate runs it as its own probe key (`browser`, alongside
+`direct`/`via_proxy`) whenever the browser path is configured — so
+`gate: pass` now requires the primary path, and a browser failure reports a
+real failing outcome, never a skip. The continuous probe loop is unchanged
+(its probe set stays direct/via_proxy; `browser` exists in the shared
+vocabulary but no loop gauge carries it).

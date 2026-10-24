@@ -1069,7 +1069,7 @@ class TestCliViaProxy:
         with patch("ytt.canary.run_once") as run_once_mock:
             run_once_mock.return_value = {"verdict": "ok", "caption_fetch": {"outcome": "ok"}}
             cli_main(["canary", "--once", "--via-proxy"])
-        run_once_mock.assert_called_once_with(video_id=None, via_proxy=True)
+        run_once_mock.assert_called_once_with(video_id=None, via_proxy=True, browser=False)
 
     def test_via_proxy_without_once_is_a_usage_error(self):
         from ytt.cli import main as cli_main

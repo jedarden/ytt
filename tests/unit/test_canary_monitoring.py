@@ -302,8 +302,11 @@ class TestRecordProbe:
 
 def test_probe_vocabulary_pinned_to_gate_order():
     """canary.PROBE_LABELS == canary_gate.PROBE_ORDER — an alert, a
-    remediation directive and a log line must name a path the same way."""
-    assert tuple(canary.PROBE_LABELS) == ("direct", "via_proxy")
+    remediation directive and a log line must name a path the same way.
+    ``browser`` names the browser-primary path, exercised by the one-shot
+    and the gate (bead ytt-e94ce5ee); the continuous loop's probe set stays
+    direct/via_proxy (the loop boots no ``browser`` gauge child)."""
+    assert tuple(canary.PROBE_LABELS) == ("direct", "via_proxy", "browser")
     assert canary_gate.PROBE_ORDER == tuple(canary.PROBE_LABELS)
 
 

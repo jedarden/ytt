@@ -10,10 +10,12 @@ Subcommands (plan: Deliverables / CLI):
 - ``ytt canary``    run the residential-egress canary — long-running probe loop
                     by default, a one-shot caption fetch + JSON report with
                     ``--once`` (exit 0 on ok, 1 on ip_blocked/other failure),
-                    or the post-deploy acceptance gate with ``--gate``: both
+                    or the post-deploy acceptance gate with ``--gate``: the
                     one-shot probes (direct + ``--via-proxy`` when a proxy is
-                    configured), JSON evidence file, remediation directive on
-                    failure (deploy/RUNBOOK.md §3)
+                    configured + the browser-primary probe when
+                    ``YTT_BROWSER_WS_URL`` is configured), JSON evidence
+                    file, remediation directive on failure
+                    (deploy/RUNBOOK.md §3)
 
 Exit code is 0 on success, non-zero on failure.
 """
@@ -79,13 +81,26 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_can.add_argument(
+        "--browser",
+        action="store_true",
+        help=(
+            "one-shot mode only: probe the browser-primary caption path "
+            "(YTT_BROWSER_WS_URL) end to end — fresh context, the player's "
+            "own caption request, non-empty timedtext body (the PO-token "
+            "proof; docs/notes/browser-fetch.md). A browser failure is a "
+            "real failing outcome, never a silent yt-dlp fallback"
+        ),
+    )
+    p_can.add_argument(
         "--gate",
         action="store_true",
         help=(
             "post-deploy acceptance gate: run the one-shot canary direct AND "
-            "via the proxy when YTT_PROXY_URL is configured, require "
-            "outcome=ok on both, write JSON evidence, exit 0 only on a full "
-            "pass (rollback/escalation directive on failure — RUNBOOK §3)"
+            "via the proxy when YTT_PROXY_URL is configured AND the "
+            "browser-primary path when YTT_BROWSER_WS_URL is configured, "
+            "require outcome=ok on every probe, write JSON evidence, exit 0 "
+            "only on a full pass (rollback/escalation directive on failure "
+            "— RUNBOOK §3)"
         ),
     )
     p_can.add_argument(
@@ -146,6 +161,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--via-proxy is only valid with --once (--gate runs it itself "
                 "when a proxy is configured)"
             )
+        if args.browser and not args.once:
+            parser.error(
+                "--browser is only valid with --once (--gate runs it itself "
+                "when the browser path is configured)"
+            )
+        if args.browser and args.via_proxy:
+            parser.error(
+                "--browser and --via-proxy are mutually exclusive: each "
+                "one-shot probe exercises one path"
+            )
         if args.evidence_dir and not args.gate:
             parser.error("--evidence-dir is only valid with --gate")
         if args.gate and args.once:
@@ -153,7 +178,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.gate:
             return _run_canary_gate(video_id=args.video_id, evidence_dir=args.evidence_dir)
         if args.once:
-            return _run_canary_once(video_id=args.video_id, via_proxy=args.via_proxy)
+            return _run_canary_once(
+                video_id=args.video_id, via_proxy=args.via_proxy, browser=args.browser
+            )
         from ytt.canary import main as canary_main
 
         return canary_main()
@@ -162,7 +189,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _run_canary_once(video_id: str | None, via_proxy: bool = False) -> int:
+def _run_canary_once(
+    video_id: str | None, via_proxy: bool = False, browser: bool = False
+) -> int:
     """Run the one-shot canary and print its JSON report; exit 0 iff verdict is ok."""
     import json
 
@@ -172,7 +201,7 @@ def _run_canary_once(video_id: str | None, via_proxy: bool = False) -> int:
     # The report is retained as evidence (RUNBOOK §3) — its stderr
     # diagnostics get the same in-message UTC stamps as the probe loop.
     configure_stdlib_logging()
-    report = run_once(video_id=video_id, via_proxy=via_proxy)
+    report = run_once(video_id=video_id, via_proxy=via_proxy, browser=browser)
     print(json.dumps(report, indent=2))
     if report["verdict"] != "ok":
         print(

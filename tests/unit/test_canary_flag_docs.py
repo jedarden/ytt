@@ -36,6 +36,7 @@ CLI_SOURCE = (REPO_ROOT / "ytt" / "cli.py").read_text(encoding="utf-8")
 _MODE_VALID: dict[str, frozenset[str]] = {
     "--video-id": frozenset({"--once", "--gate"}),
     "--via-proxy": frozenset({"--once"}),
+    "--browser": frozenset({"--once"}),
     "--evidence-dir": frozenset({"--gate"}),
 }
 
