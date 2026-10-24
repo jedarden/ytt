@@ -55,8 +55,10 @@ The Forgejo webhook → `ytt-sensor` (argo-events, fires on every push to
 1. **resolve-version** — the sensor passes the pushed commit's SHA as the
    `revision` parameter; this step checks out exactly that commit and
    validates that it bumps `VERSION` to a semver tag.  CI never auto-bumps,
-   auto-commits, or pushes; a push without a `VERSION` change fails the run
-   by design.
+   auto-commits, or pushes; a push that does not itself advance `VERSION`
+   skips the run with nothing to build (bead ytt-0e6b7331) — releases are
+   explicit cuts, so such a run ends Succeeded with its steps skipped,
+   not failed.
 2. **docker-build** — kaniko build of that exact commit (an initContainer
    checks out the SHA into a directory context).  The Dockerfile's `test`
    stage runs `pytest -m "not integration"` as a build gate (a red suite
