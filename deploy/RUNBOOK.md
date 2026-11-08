@@ -420,11 +420,47 @@ no kubectl writes):
 `k8s/ardenone-cluster/ytt/deployment.yml` in declarative-config, push, let
 ArgoCD sync.  ytt then behaves exactly as before the browser path existed.
 
-**Upgrading Playwright:** the server image tag
-(`mcr.microsoft.com/playwright/python:vX.Y.Z-noble`), its `pip3 install
-playwright==X.Y.Z` line, and ytt's `playwright==X.Y.Z` pin in `pyproject.toml`
-must move together — client and server must share major.minor.  A mismatch
-shows up as every fetch failing with `reason=connect`.
+### Coordinated Playwright bump
+
+The browser client and server are one release unit.  The current pair is
+`playwright==1.63.0` with
+`mcr.microsoft.com/playwright/python:v1.63.0-noble`; the image tag is a full
+patch tag, never `latest` or a floating major/minor tag.  Client and server
+must share major.minor, and the startup wheel pin must match the full image
+version.  A mismatch can make every browser fetch fail at connect (and leaves
+the ytt client falling back to yt-dlp).
+
+For a future `X.Y.Z` bump, do these steps as one coordinated release:
+
+1. In ytt, update the exact `playwright==X.Y.Z` dependency, regenerate
+   `uv.lock`, and update the current pair in `docs/notes/browser-fetch.md` and
+   the self-hosting example.
+2. In `declarative-config`, update the ytt-browser Deployment's image to
+   `mcr.microsoft.com/playwright/python:vX.Y.Z-noble` and its startup line to
+   `pip3 install --quiet playwright==X.Y.Z`.  Update any enabled browser
+   retest manifest in the same change.  Do not use a floating tag.
+3. Refresh the ytt `deploy/` mirror from that exact declarative-config commit
+   using the commands in [`deploy/README.md`](README.md), then run:
+
+   ```bash
+   uv run pytest tests/unit/test_browser_release_contract.py -q
+   uv run pytest tests/unit/test_deploy_parity.py -q
+   ```
+
+   The first command is the version-match/release drift guard: it derives the
+   expected pair from the client wheel and checks the image, startup pin,
+   `uv.lock`, docs, deploy mirror, and available applied manifests together.
+   A version bump must not bypass or weaken that guard; change the guard in the
+   same release only when the contract shape itself changes.
+4. Commit and push the ytt release and declarative-config manifest change,
+   let ArgoCD sync, and confirm the new ytt-browser pod has the exact image
+   tag.  Before calling the rollout complete, run the post-deploy
+   `ytt canary --gate` in §3 step 4 and retain its JSON evidence.  The gate's
+   browser leg must pass; a green yt-dlp fallback alone is not sufficient.
+
+If any version-match guard or browser canary check fails, stop the rollout and
+reconcile the pair before retrying.  Roll back through the GitOps revert path
+in §5, not with `kubectl rollout undo` or a live pod mutation.
 
 **Never expose it.**  The server is unauthenticated and can browse from the
 home IP.  No IngressRoute, no `tailscale.com/expose`, no external-dns

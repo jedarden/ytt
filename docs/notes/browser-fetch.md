@@ -47,6 +47,7 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
   stock `mcr.microsoft.com/playwright/python` image; ytt only needs the small client
   wheel (no Dockerfile base change). Client and server Playwright versions must match
   major.minor.
+
 - **`launch-server --config`, not `run-server`.** Since Playwright 1.6x, `run-server`
   silently drops client-supplied `args` / `ignoreDefaultArgs` (the very options that make
   the browser look un-automated) unless started with `--unsafe` — which lets any client
@@ -95,6 +96,24 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
 - **Source/language are what the player actually fetched.** `FetchResult.source` and
   `served_lang` come from the captured request's `kind`/`lang` parameters, not from
   what we asked for.
+
+### Release contract
+
+The current release pair is pinned to Playwright **1.63.0**:
+
+- ytt's client wheel: `playwright==1.63.0` in `pyproject.toml` and `uv.lock`;
+- ytt-browser's stock server image: `mcr.microsoft.com/playwright/python:v1.63.0-noble`;
+- the server startup install: `pip3 install --quiet playwright==1.63.0`.
+
+The image tag is a full `vX.Y.Z-noble` tag, never `latest`, a floating
+major/minor tag, or an untagged image.  The release guard in
+`tests/unit/test_browser_release_contract.py` derives the expected server pair
+from the client dependency, checks both the `deploy/` mirror and an available
+`declarative-config` checkout, and checks this note and the self-hosting example.
+When the client wheel or server image is bumped, update all three pins in one
+release change and run that guard before the deployment can proceed.  The
+operator sequence, including mirror refresh and the browser-primary canary, is
+in [`deploy/RUNBOOK.md` §8](../../deploy/RUNBOOK.md#8-the-browser-server-ytt-browser).
 
 ## Failure contract
 

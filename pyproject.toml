@@ -35,7 +35,8 @@ dependencies = [
     # pod (never `run-server`: since Playwright 1.6x it drops the stealth
     # options, and with --unsafe any client gets executablePath). The
     # server image tag (mcr.microsoft.com/playwright/python:v1.63.0-noble) must
-    # match this major.minor.
+    # match this exact release pair; tests/unit/test_browser_release_contract.py
+    # guards the dependency, lockfile, image tag, startup install and manifests.
     "playwright==1.63.0",
 ]
 
