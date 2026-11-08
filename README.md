@@ -31,6 +31,13 @@ docker run --rm \
   ghcr.io/jedarden/ytt:0.2.49
 ```
 
+This single-container quick start leaves `YTT_BROWSER_WS_URL` unset, so captions
+use the yt-dlp fallback only. That path still returned HTTP 429 on 31 of 36
+known-bad videos in the [browser-fetch retest](docs/notes/browser-fetch.md).
+For browser-primary captions, follow the [browser sidecar recipe](docs/usage/self-hosting.md#step-5--configure-and-start-ytt)
+and set `YTT_BROWSER_WS_URL` to its private `ws://` Playwright
+`launch-server` endpoint. Browser infrastructure failures fall back to yt-dlp.
+
 `YTT_WHISPER_URL` is optional for captioned videos, so the quick start above
 leaves it out. Leaving it unset selects the project-operated reference service
 at `http://whisper-openai.whisper-stt.svc.cluster.local:8000` when a
@@ -156,6 +163,7 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_CACHE_MAX_BYTES` | `2Gi` | Max cache size. Must be ≤ the volume size. |
 | `YTT_SCRATCH_DIR` | `/scratch` | Scratch directory for temporary Whisper audio. Must be a dedicated volume (emptyDir recommended) — see the warning below. |
 | `YTT_PROXY_URL` | *(unset)* | Optional residential proxy URL (e.g. `http://user:pass@proxy.example.com:port`). |
+| `YTT_BROWSER_WS_URL` | *(unset)* | Private `ws://` or `wss://` Playwright `launch-server` endpoint. With the default `YTT_FETCH_MODE=auto`, setting it makes browser-player captions primary; browser infrastructure failures fall back to yt-dlp. Unset selects yt-dlp only, which returned HTTP 429 on 31 of 36 known-bad videos in the [retest](docs/notes/browser-fetch.md). `YTT_FETCH_MODE=ytdlp` disables the browser even when a URL is set. See the [browser sidecar recipe](docs/usage/self-hosting.md#step-5--configure-and-start-ytt). |
 | `YTT_CANARY_INTERVAL_SEC` | `600` | Seconds between canary probe-loop cycles. Consumed by the canary Deployment only — the main server never probes. The loop reuses `YTT_PROXY_URL`: a `via_proxy` path is probed only while a proxy is set. |
 
 Per-subject limits apply **after** the allowlist: `YTT_ALLOWED_SUBJECTS`

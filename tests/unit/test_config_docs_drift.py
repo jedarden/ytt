@@ -210,6 +210,26 @@ def test_documented_marker_matches_the_model(doc_name, var):
         )
 
 
+def test_readme_explains_browser_path_selection():
+    """The curated README must surface the modeled browser switch where a
+    self-hoster chooses a quick-start deployment, not only in the full guide.
+
+    The default-marker check above checks a row only if one exists, so pin the
+    README row's presence and the fallback warning explicitly.
+    """
+    assert "YTT_BROWSER_WS_URL" in _ENV_NAMES
+    row = re.search(r"^\| `YTT_BROWSER_WS_URL` \|.*$", _README, re.MULTILINE)
+    assert row is not None, "README lost its YTT_BROWSER_WS_URL table row"
+    for detail in ("launch-server", "yt-dlp", "429", "YTT_FETCH_MODE=auto"):
+        assert detail in row.group(0), f"README browser row omits {detail}"
+
+    quick_start = _README.split("## Quick start (self-hosted)\n", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    assert "YTT_BROWSER_WS_URL" in quick_start
+    assert "docs/usage/self-hosting.md#step-5--configure-and-start-ytt" in quick_start
+
+
 def test_readme_reference_markers_point_at_the_baked_in_defaults():
     """``*(reference …)*`` cells stay truthful about the baked-in defaults.
 
