@@ -128,6 +128,12 @@ drifting — the fallback is hiding it from users, not from the dashboard.
 - **Sizing:** the shared browser idles near 0.7 GiB and each in-flight page adds memory;
   size the server for `YTT_BROWSER_MAX_CONCURRENCY` pages plus headroom (deployed: 1 GiB
   request, 3 GiB limit).
+- **Pod alerts:** `YttBrowserContainerRestarted`, `YttBrowserOOMKilled`, and
+  `YttBrowserMemoryNearLimit` live in
+  `declarative-config/k8s/ardenone-cluster/ytt/prometheusrule.yml`. They use the
+  existing kube-state-metrics and kubelet cAdvisor scrapes because the browser
+  WebSocket server has no HTTP metrics endpoint. The six-hour recycle restarts
+  the browser *process* inside the container; a container restart is abnormal.
 - **First-fetch race:** a client that starts before the server is Ready gets a connect
   failure and falls back to yt-dlp (observed once in the acceptance run: the first fetch
   came 27 s after the server pod started). Retry-before-fallback is the known gap.
@@ -136,6 +142,39 @@ drifting — the fallback is hiding it from users, not from the dashboard.
   only two clients and is not reachable from pods without extra plumbing.
 - **Not covered:** `YTT_PROXY_URL` applies to the yt-dlp path only; the browser's egress
   is the server pod's.
+
+### Verify the production recycle and memory bound
+
+On `ardenone-cluster`, use read-only pod inspection and the Prometheus VPN
+endpoint (`https://prometheus-ardenone-cluster-ts.ardenone.com:8444`):
+
+1. Get `ytt-browser` pod logs with timestamps and confirm consecutive
+   `ws://0.0.0.0:3001/ytt` startup lines are about 21,601 seconds apart while
+   the container restart count stays at zero. Each line is a new browser-server
+   process after the `timeout 21600` loop in `browser-deployment.yml`.
+2. Query `container_memory_rss{namespace="ytt",container="browser",pod=~"ytt-browser-[^-]+-[^-]+"}`
+   and `container_memory_working_set_bytes` with the same selector through
+   `/api/v1/query_range` at a 60-second step across at least 72 hours. Compare
+   the sample before and after each six-hour startup, then the peak and end of
+   each cycle. RSS should fall on recycle and cycle peaks should stay below the
+   pod's 3 GiB limit without an upward staircase. Query
+   `kube_pod_container_resource_limits{namespace="ytt",container="browser",resource="memory",unit="byte"}`
+   to confirm the deployed limit rather than relying on this note.
+3. Query `sum(increase(ytt_browser_fetch_total[72h]))` over the same window.
+   If the result is low, repeat the memory comparison after representative
+   browser traffic; an idle plateau does not establish the peak under load.
+
+**Production observation, 2026-11-08 (bead `ytt-ca6da0e2`):** the deployed
+`ytt-browser-6b44ff69bd-p7kkj` container had been running 19 days with zero
+restarts and a 3 GiB memory limit. Its log startup lines were six hours plus
+about one second apart. Across 12 recycle boundaries in the last 72 hours,
+cAdvisor RSS fell from 186–196 MiB before recycle to 172–180 MiB after;
+the full-window RSS range was 172–196 MiB and working set was 292–317 MiB.
+The 14-day maxima were 611 MiB RSS and 745 MiB working set, below the
+3 GiB limit. This confirms the recycle and bounded baseline on the deployed
+pod over the observed window. There were zero browser fetches in the last
+72 hours and about nine in 14 days, so the sustained-load bound remains to
+be checked when production traffic supplies a representative window.
 
 ## What this does not change
 
