@@ -1,0 +1,274 @@
+---
+# One-pass diagnostic (v2) for ytt-daefe30b / ytt-96bb54f6: the caption-track
+# HTTP 429 that yt-dlp's ydl.urlopen(track_url) gets in production.
+#
+# v1 (20260929) was INCONCLUSIVE: it fetched captionTracks[].baseUrl directly,
+# which lacks the PO token the player adds, so YouTube answered 200 + 0 bytes
+# even for control videos yt-dlp fetches fine.  v2 observes the REAL request
+# the player itself issues (CC enabled via the player API, English track
+# picked explicitly), records status/body-length/param-presence only, then
+# replays that exact URL (PO token included) with Playwright's NON-browser
+# HTTP client.  That separates "token rejected / browser flagged as
+# automation" (browser also 200+0 bytes) from "request fingerprint flagged"
+# (browser gets bytes, replay 429s/empty).  Two browser flavors: "plain"
+# (headless shell) and "stealth" (full Chromium new-headless, automation
+# switches removed).  No transcript text, URLs or signatures are logged.
+#
+# Existing public image, standalone: does not touch ytt's code, dependencies
+# or the egress-boundary contract (tests/unit/test_egress_boundary.py).
+# Deployment, not Job (Jobs are banned); anonymous context (no login);
+# idles after its single pass.  Same residential egress as the ytt pod.
+#
+# Videos: 6 of the 31 still-failing in ytt-caption-retest run 20260928-v1 plus
+# 2 controls that succeeded there (8zHUvixZAtg, SCBJVRFX_D8).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytt-browser-caption-retest
+  namespace: ytt
+  labels:
+    app: ytt-browser-caption-retest
+    app.kubernetes.io/name: ytt
+    app.kubernetes.io/component: diagnostic
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytt-browser-caption-retest
+  template:
+    metadata:
+      labels:
+        app: ytt-browser-caption-retest
+        app.kubernetes.io/name: ytt
+        app.kubernetes.io/component: diagnostic
+      annotations:
+        ytt.ardenone.com/browser-caption-test-run: "20261006-v2"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: browser-caption-retest
+          # Pinned, public image -- no imagePullSecrets needed. This image
+          # bakes in the Chromium/Firefox/WebKit BINARIES at /ms-playwright
+          # (PLAYWRIGHT_BROWSERS_PATH already points there) but is a CI base
+          # image, not a ready-to-run one -- it does NOT include the
+          # `playwright` Python package itself (verified: `pip3 show
+          # playwright` finds nothing in the unmodified image). `pip install`
+          # at container start (not an image build/publish step) picks up the
+          # pre-baked browsers automatically, so no `playwright install`
+          # download is needed. Pinned to the exact SDK version matching the
+          # image tag, per the image's own compatibility requirement.
+          image: mcr.microsoft.com/playwright/python:v1.63.0-noble
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              pip3 install --quiet playwright==1.63.0
+              python3 -u <<'PYEOF'
+              import asyncio
+              import json
+              import os
+              import threading
+              from urllib.parse import parse_qs, urlparse
+
+              from playwright.async_api import async_playwright
+
+              RUN_ID = "20261006-v2"
+              CASES = [
+                  ("failing", "zlit6xVbf_o"),
+                  ("failing", "1DaMkTuiCEQ"),
+                  ("failing", "3lUyMZpAb6g"),
+                  ("failing", "75tja_RxKn4"),
+                  ("failing", "82u2qUjnJ6E"),
+                  ("failing", "86ptx1cYv5c"),
+                  ("control", "8zHUvixZAtg"),
+                  ("control", "SCBJVRFX_D8"),
+              ]
+              ONLY = os.environ.get("ONLY")
+              if ONLY:
+                  CASES = [c for c in CASES if c[1] in ONLY.split(",")]
+              DELAY_SEC = 8
+
+              TRACKS_JS = """() => {
+                  const p = document.getElementById("movie_player");
+                  try { p.loadModule("captions"); } catch (e) {}
+                  try {
+                      return (p.getOption("captions", "tracklist") || []).map(
+                          t => ({lang: t.languageCode, kind: t.kind || ""}));
+                  } catch (e) { return null; }
+              }"""
+
+              PICK_JS = """(want) => {
+                  const p = document.getElementById("movie_player");
+                  const tl = p.getOption("captions", "tracklist") || [];
+                  const t = tl.find(x => x.languageCode === want) || tl[0];
+                  if (!t) return null;
+                  p.setOption("captions", "track", t);
+                  try { p.mute(); p.playVideo(); } catch (e) {}
+                  return {lang: t.languageCode, kind: t.kind || ""};
+              }"""
+
+
+              def emit(rec):
+                  print(json.dumps(rec, sort_keys=True), flush=True)
+
+
+              def shape(url):
+                  # Parameter PRESENCE only -- never the URL or any signature value.
+                  q = parse_qs(urlparse(url).query)
+                  return {
+                      "lang": (q.get("lang") or [None])[0],
+                      "kind": (q.get("kind") or [""])[0],
+                      "fmt": (q.get("fmt") or [None])[0],
+                      "has_pot": "pot" in q,
+                  }
+
+
+              async def run_case(context, group, video_id):
+                  rec = {"event": "browser_v2_result", "run_id": RUN_ID, "group": group,
+                         "video_id": video_id}
+                  seen = []
+
+                  async def on_response(resp):
+                      if "/api/timedtext" not in resp.url:
+                          return
+                      try:
+                          n = len(await resp.body())
+                      except Exception:
+                          n = -1
+                      seen.append({"url": resp.url, "status": resp.status, "bytes": n,
+                                   **shape(resp.url)})
+
+                  page = await context.new_page()
+                  page.on("response", lambda r: asyncio.ensure_future(on_response(r)))
+                  try:
+                      await page.goto(f"https://www.youtube.com/watch?v={video_id}",
+                                      wait_until="domcontentloaded", timeout=45000)
+                      await page.wait_for_selector("#movie_player", timeout=20000)
+                      await page.wait_for_timeout(2500)
+                      rec["tracklist"] = await page.evaluate(TRACKS_JS)
+                      await page.wait_for_timeout(1500)
+                      rec["picked"] = await page.evaluate(PICK_JS, "en")
+
+                      for i in range(15):
+                          if seen:
+                              break
+                          if i == 6:
+                              try:
+                                  await page.click(".ytp-subtitles-button", timeout=2000)
+                              except Exception:
+                                  pass
+                          await page.wait_for_timeout(1000)
+                      await page.wait_for_timeout(1500)
+
+                      rec["browser_requests"] = [
+                          {k: v for k, v in s.items() if k != "url"} for s in seen]
+                      if not seen:
+                          rec["status"] = "no_timedtext_request_observed"
+                      else:
+                          rec["status"] = "observed"
+                          # Replay the EXACT URL (incl. the player's PO token) with
+                          # Playwright's non-browser HTTP client: same cookies, no Chromium
+                          # network stack.  Separates "token missing" from "client flagged".
+                          try:
+                              r = await context.request.get(
+                                  seen[0]["url"], headers={"referer": page.url})
+                              body = await r.body()
+                              rec["replay_non_browser"] = {"status": r.status,
+                                                           "bytes": len(body)}
+                          except Exception as exc:
+                              rec["replay_non_browser"] = {"error": str(exc)[:200]}
+                  except Exception as exc:
+                      rec["status"] = "error"
+                      rec["error"] = str(exc)[:300]
+                  finally:
+                      await page.close()
+                  return rec
+
+
+              STEALTH_JS = """
+              Object.defineProperty(navigator, "webdriver", {get: () => undefined});
+              window.chrome = window.chrome || {runtime: {}};
+              """
+
+              UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+
+
+              async def new_browser(p, flavor):
+                  ws = os.environ.get("BROWSER_WS")
+                  if ws:
+                      return await p.chromium.connect(ws)
+                  if flavor == "stealth":
+                      # Full Chromium (new headless), automation switches removed.
+                      return await p.chromium.launch(
+                          channel="chromium", headless=True,
+                          ignore_default_args=["--enable-automation"],
+                          args=["--no-sandbox", "--disable-dev-shm-usage",
+                                "--disable-blink-features=AutomationControlled"])
+                  return await p.chromium.launch(
+                      headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+
+
+              async def main():
+                  flavors = ["plain"] if os.environ.get("BROWSER_WS") else ["plain", "stealth"]
+                  emit({"event": "browser_v2_started", "run_id": RUN_ID,
+                        "case_count": len(CASES), "flavors": flavors})
+                  outcomes = {}
+                  async with async_playwright() as p:
+                      for flavor in flavors:
+                          browser = await new_browser(p, flavor)
+                          context = await browser.new_context(locale="en-US", user_agent=UA)
+                          if flavor == "stealth":
+                              await context.add_init_script(STEALTH_JS)
+                          for idx, (group, video_id) in enumerate(CASES):
+                              rec = await run_case(context, group, video_id)
+                              rec["flavor"] = flavor
+                              emit(rec)
+                              br = rec.get("browser_requests") or [{}]
+                              rp = rec.get("replay_non_browser") or {}
+                              outcomes[f"{flavor}:{group}:{video_id}"] = (
+                                  f"{rec.get('status')}|browser={br[0].get('status')}/"
+                                  f"{br[0].get('bytes')}b|replay={rp.get('status')}/"
+                                  f"{rp.get('bytes')}b")
+                              if idx != len(CASES) - 1:
+                                  await asyncio.sleep(DELAY_SEC)
+                          await browser.close()
+                  emit({"event": "browser_v2_completed", "run_id": RUN_ID,
+                        "outcomes": outcomes})
+
+
+              asyncio.run(main())
+              if not os.environ.get("NO_WAIT"):
+                  # Deployment pods must stay up; idle after the single pass.
+                  threading.Event().wait()
+              PYEOF
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+              ephemeral-storage: "200Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1536Mi"
+              ephemeral-storage: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        # Chromium's shared-memory needs -- same pattern as the ibeam and
+        # meeting-bot headless-Chrome deployments elsewhere in this cluster.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
