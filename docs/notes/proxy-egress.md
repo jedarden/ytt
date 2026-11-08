@@ -129,7 +129,8 @@ in-cluster only (datacenter IPs outside the cluster are blocked by design):
    invoke it directly: **`ytt canary --gate`** (the post-deploy release gate,
    `deploy/RUNBOOK.md` §3) runs this probe *and* the direct one whenever
    `YTT_PROXY_URL` is configured *and* the browser-primary probe whenever
-   `YTT_BROWSER_WS_URL` is, requires `outcome=ok` on every probe, retains the
+   `YTT_BROWSER_WS_URL` is set and `YTT_FETCH_MODE` is not `ytdlp`, requires
+   `outcome=ok` on every probe, retains the
    JSON evidence, and emits the rollback/escalation directive on failure.
 2. **`tests/integration/test_proxy_live.py`** — pytest integration suite
    (`-m integration`): asserts `/admin/egress` reports `via_proxy: true` with a
