@@ -195,6 +195,15 @@ pod over the observed window. There were zero browser fetches in the last
 72 hours and about nine in 14 days, so the sustained-load bound remains to
 be checked when production traffic supplies a representative window.
 
+**Follow-up observation, 2026-11-08 20:24 UTC:** a fresh 72-hour
+`query_range` (4,321 one-minute samples) on the same pod found the twelve
+startup lines 21,601 seconds apart. RSS immediately before those recycle
+boundaries was 186–294 MiB and immediately after was 173–181 MiB. One brief
+transient during the window reached 668 MiB RSS and 810 MiB working set, still
+well below the 3 GiB limit; the next recycle returned RSS to 175 MiB. The
+series showed no upward staircase, and `sum(increase(ytt_browser_fetch_total[72h]))`
+was 0, so representative sustained browser-traffic load remains unproven.
+
 ## What this does not change
 
 Whisper audio download, the cache, auth, rate limits and the error taxonomy are untouched.
