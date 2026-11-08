@@ -340,6 +340,71 @@ git push
   `kubectl logs` — read it before reverting; it names the exact violated
   constraint.
 
+### 5.1 Paired ytt/ytt-browser rollback
+
+The Playwright client is part of the `ytt` image, while the Playwright server
+is a separate `ytt-browser` image.  A production rollback therefore restores
+the **two deployment pins as one pair**:
+
+```text
+ytt image                         contains playwright==X.Y.Z
+ytt-browser image                 .../playwright/python:vX.Y.Z-noble
+ytt-browser startup install       playwright==X.Y.Z
+```
+
+The exact patch versions must agree, and the client/server versions must at
+least share `major.minor` (the release guard in §8 requires the stronger exact
+match).  Never roll back only the browser image or only the ytt image: that
+can leave the WebSocket transport on an unsupported client/server pair.
+
+#### Before ArgoCD sync
+
+If `tests/unit/test_browser_release_contract.py` or the deploy-parity check
+fails, **do not push or sync the new pair**.  The failure means the release is
+not a valid unit; correct the client wheel, lockfile, browser image, startup
+pin, and mirror together, then rerun the guards in §8.  Keep the last known
+good pair in place while doing so.
+
+#### After sync: transport or compatibility failure
+
+If the pair has already synced and the browser leg of `ytt canary --gate`
+fails (especially `reason=connect`, repeated transport errors, or a
+client/server major.minor mismatch), retain the gate JSON and browser pod
+logs, then:
+
+1. Identify the applied versions before changing anything:
+
+   ```bash
+   $KS get deploy ytt -n ytt -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+   $KS get deploy ytt-browser -n ytt -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
+   $KS get pods -n ytt -o wide
+   ```
+
+2. In `declarative-config`, create **one rollback commit** that restores both
+   `k8s/ardenone-cluster/ytt/deployment.yml` and
+   `k8s/ardenone-cluster/ytt/browser-deployment.yml` to the last known good
+   pair.  If the release was a single, pair-only commit, `git revert` that
+   commit.  If the two pins came from separate commits, prepare both reversions
+   with `git revert --no-commit` and commit them together.  Do not push an
+   intermediate state that restores only one leg.
+
+3. Push the single rollback commit and let ArgoCD reconcile.  Confirm both
+   deployments report the previous exact pins and that `ytt-browser` is Ready;
+   do not use `kubectl rollout undo`, `apply`, or a live pod mutation.
+
+4. Re-run the full `ytt canary --gate` from §3 step 4 against the restored
+   ytt pod and retain new JSON evidence.  The browser probe must pass; green
+   direct/yt-dlp probes do not prove that the restored WebSocket pair works.
+   If the known-good pair still fails, stop repeated rollbacks and escalate as
+   an incident with both gate reports and the browser logs.
+
+If users need service while a browser transport failure is being rolled back,
+temporarily set `YTT_FETCH_MODE: "ytdlp"` through the same GitOps path described
+in §8.  Mark the service degraded: this disables the browser-primary probe and
+is not evidence that the Playwright pair is healthy.  Restore `browser` mode
+and pass the browser leg of the gate before declaring the paired release
+recovered.
+
 ## 6. Alerts that can fire around an upgrade
 
 | Alert | Fires during an upgrade? | Note |
@@ -419,6 +484,10 @@ no kubectl writes):
 **Rollback (no image change):** set `YTT_FETCH_MODE: "ytdlp"` in
 `k8s/ardenone-cluster/ytt/deployment.yml` in declarative-config, push, let
 ArgoCD sync.  ytt then behaves exactly as before the browser path existed.
+
+For a bad browser image, a transport failure after a coordinated bump, or a
+client/server compatibility failure, use the paired rollback in §5.1 so the
+ytt and ytt-browser pins return to the same known-good release together.
 
 ### Coordinated Playwright bump
 
