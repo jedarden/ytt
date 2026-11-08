@@ -571,20 +571,19 @@ async def fetch_transcript(
     - a **video-level** error (private, unavailable, live, no captions, ...)
       → raised as-is; yt-dlp would only repeat it;
     - a **browser/infrastructure** failure (server down, timeout, token
-      rejected, bot wall) → log it and fall back to yt-dlp, whose own errors
-      then name the browser failure so the operator sees both.
+      rejected, bot wall) → after bounded outage retries
+      (:mod:`ytt.browser_outage`, docs/notes/browser-outage-recovery.md) log
+      it and fall back to yt-dlp, whose own errors then name the browser
+      failure so the operator sees both.
     """
-    from ytt.browser_fetch import (
-        BrowserInfraError,
-        browser_fetch_enabled,
-        browser_fetch_transcript,
-    )
+    from ytt.browser_fetch import BrowserInfraError, browser_fetch_enabled
+    from ytt.browser_outage import fetch_with_outage_recovery
 
     if not browser_fetch_enabled(settings):
         return await fetch_transcript_ytdlp(video_id, lang, settings)
 
     try:
-        return await browser_fetch_transcript(video_id, lang, settings)
+        return await fetch_with_outage_recovery(video_id, lang, settings)
     except BrowserInfraError as browser_exc:
         log.warning(
             "browser caption fetch failed (%s: %s); falling back to yt-dlp for %s",
