@@ -406,14 +406,19 @@ class Settings(BaseSettings):
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     jwt_signing_secret: str | None = None
-    # Unauthenticated DCR abuse bounds (docs/notes/auth.md). The request
-    # threshold uses a strict rolling 60-second window; the proxy hop count
-    # identifies the visitor address in the trusted X-Forwarded-For chain.
+    # Unauthenticated OAuth endpoint abuse bounds (docs/notes/auth.md).
+    # Request thresholds use strict rolling 60-second windows; the proxy hop
+    # count identifies the visitor address in the trusted X-Forwarded-For
+    # chain (shared by /register and /authorize).
     oauth_trusted_proxy_count: int = 2
     oauth_trusted_proxy_cidrs: str = "10.42.0.0/16"
     oauth_endpoint_rate_per_min: int = 10
     oauth_registration_cap: int = 256
     oauth_registration_ttl_sec: int = 2_592_000
+    # /authorize initiation throttle: per (source IP, client_id) and per
+    # source IP, enforced before any authorization state is written.
+    oauth_authorize_rate_per_client_per_min: int = 30
+    oauth_authorize_rate_per_ip_per_min: int = 120
     # Upstream IdP location: the reference Authentik by default, any generic
     # OIDC provider via env (docs/usage/self-hosting.md). The issuer is
     # matched byte-for-byte against the id token's iss claim, so it is
@@ -436,6 +441,8 @@ class Settings(BaseSettings):
         "oauth_endpoint_rate_per_min",
         "oauth_registration_cap",
         "oauth_registration_ttl_sec",
+        "oauth_authorize_rate_per_client_per_min",
+        "oauth_authorize_rate_per_ip_per_min",
     )
     @classmethod
     def _rate_limits_non_negative(cls, v: int | None, info) -> int | None:

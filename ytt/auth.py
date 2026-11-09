@@ -65,6 +65,8 @@ from ytt.config import (
 from ytt.oauth_abuse import (
     REGISTRATION_INDEX_COLLECTION,
     REGISTRATION_INDEX_KEY,
+    AuthorizationThrottle,
+    AuthorizationThrottleMiddleware,
     RegistrationThrottle,
     RegistrationThrottleMiddleware,
     RegistrationTTLStore,
@@ -223,6 +225,8 @@ class YttOIDCProvider(OIDCProxy):
         self,
         *,
         registration_rate_per_min: int = 10,
+        authorize_rate_per_client_per_min: int = 30,
+        authorize_rate_per_ip_per_min: int = 120,
         trusted_proxy_count: int = 2,
         trusted_proxy_cidrs: str = "10.42.0.0/16",
         registration_cap: int = 256,
@@ -240,6 +244,16 @@ class YttOIDCProvider(OIDCProxy):
         self._registration_clock = registration_clock
         self._registration_throttle = RegistrationThrottle(
             limit=registration_rate_per_min,
+            window_seconds=60,
+            clock=throttle_clock,
+        )
+        # /authorize initiation bounds (docs/notes/auth.md): per (source IP,
+        # client_id) plus a per-source-IP ceiling that still binds a client_id
+        # rotator. Enforced in front of the handler, so a rejected attempt
+        # writes no OAuth transaction and can never yield a code.
+        self._authorization_throttle = AuthorizationThrottle(
+            per_client_limit=authorize_rate_per_client_per_min,
+            per_ip_limit=authorize_rate_per_ip_per_min,
             window_seconds=60,
             clock=throttle_clock,
         )
@@ -297,6 +311,37 @@ class YttOIDCProvider(OIDCProxy):
                 base_routes[index] = Route(
                     route.path,
                     endpoint=endpoint,
+                    methods=route.methods,
+                    name=route.name,
+                    include_in_schema=route.include_in_schema,
+                )
+                break
+
+        # Same placement for /authorize: wrap the bare route before path
+        # insertion so both spellings share one throttle, keyed by the same
+        # trusted-proxy source rule plus the request's client_id. The SDK
+        # mounts this endpoint as a plain handler (no CORS wrapper), unlike
+        # /register.
+        for index, route in enumerate(base_routes):
+            if (
+                isinstance(route, Route)
+                and route.path.rstrip("/") == "/authorize"
+                and (route.methods or set()) & {"GET", "POST"}
+            ):
+                endpoint = route.endpoint
+                app = (
+                    request_response(endpoint)
+                    if inspect.isfunction(endpoint) or inspect.ismethod(endpoint)
+                    else endpoint
+                )
+                base_routes[index] = Route(
+                    route.path,
+                    endpoint=AuthorizationThrottleMiddleware(
+                        app,
+                        throttle=self._authorization_throttle,
+                        trusted_proxy_count=self._trusted_proxy_count,
+                        trusted_proxy_cidrs=self._trusted_proxy_cidrs,
+                    ),
                     methods=route.methods,
                     name=route.name,
                     include_in_schema=route.include_in_schema,
@@ -748,6 +793,10 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
         fastmcp_access_token_expiry_seconds=ONE_WEEK_SECONDS,
         fallback_refresh_token_expiry_seconds=TWELVE_WEEKS_SECONDS,
         registration_rate_per_min=settings.oauth_endpoint_rate_per_min,
+        authorize_rate_per_client_per_min=(
+            settings.oauth_authorize_rate_per_client_per_min
+        ),
+        authorize_rate_per_ip_per_min=settings.oauth_authorize_rate_per_ip_per_min,
         trusted_proxy_count=settings.oauth_trusted_proxy_count,
         trusted_proxy_cidrs=settings.oauth_trusted_proxy_cidrs,
         registration_cap=settings.oauth_registration_cap,

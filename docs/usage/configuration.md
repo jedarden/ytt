@@ -49,6 +49,18 @@ JWKS (e.g. Keycloak's default) is not yet supported; see the note in
 | `YTT_OAUTH_REGISTRATION_CAP` | `256` | Maximum live persisted OAuth client rows. Expired rows are deleted before the cap check; live rows are never evicted. `0` disables registration. |
 | `YTT_OAUTH_REGISTRATION_TTL_SEC` | `2592000` | Absolute lifetime of a persisted OAuth client row (30 days). Use does not extend the TTL, so a client must register again after expiry. |
 
+## Unauthenticated authorization requests
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTT_OAUTH_AUTHORIZE_RATE_PER_CLIENT_PER_MIN` | `30` | `/authorize` initiations allowed per (source IP, `client_id`) in a strict rolling 60-second window, counted before the handler runs — a denied attempt writes no authorization state and issues no code. Excess attempts receive a direct `429` with `Retry-After` and an OAuth-shaped `rate_limited` JSON body (never a redirect). `0` denies every initiation. |
+| `YTT_OAUTH_AUTHORIZE_RATE_PER_IP_PER_MIN` | `120` | `/authorize` initiations allowed per source IP across all clients in the same window, so `client_id` rotation cannot escape the bound. `0` denies every initiation. |
+
+Source IPs use the same trusted-proxy rule as `/register`
+(`YTT_OAUTH_TRUSTED_PROXY_CIDRS` / `YTT_OAUTH_TRUSTED_PROXY_COUNT` in the
+table above). Denied attempts are not recorded, so `Retry-After` decreases
+predictably to zero.
+
 ## Authorization
 
 | Variable | Default | Description |

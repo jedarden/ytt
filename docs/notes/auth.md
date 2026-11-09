@@ -77,6 +77,63 @@ Discovery metadata is not throttled. Focused regression coverage is in
 
 **Upstream IdP:** this doc is deliberately IdP-agnostic — the MCP-facing requirements above hold regardless of which upstream identity provider ytt federates to. The actual choice (currently the org's self-hosted Authentik, `sso.ardenone.com`; previously Google) is recorded as a decided ADR in `docs/plan/plan.md` (ADR-003, superseding an undocumented earlier pivot to Google) — check there for the current provider and the implementation in `ytt/auth.py`.
 
+## Unauthenticated authorization-request throttling
+
+The authorization endpoint (`GET`/`POST` `/authorize`, also served under the
+issuer path) accepts unauthenticated requests — that is its job — so a flood
+of authorization-code initiations is bounded before the handler ever runs. A
+wrapper around the route endpoint admits or denies each request *before* any
+handler logic: a rejected attempt writes no OAuth transaction, stores no
+authorization state, and cannot yield an authorization code. Both route
+spellings (bare and path-inserted) share one budget.
+
+Defaults (each a strict rolling 60-second window counting *admitted*
+attempts):
+
+- **Per client:** `YTT_OAUTH_AUTHORIZE_RATE_PER_CLIENT_PER_MIN=30` admitted
+  initiations per (source IP, `client_id`). Binds one client as seen from one
+  address.
+- **Per source IP:** `YTT_OAUTH_AUTHORIZE_RATE_PER_IP_PER_MIN=120` admitted
+  initiations per source IP across *all* clients, so rotating `client_id`
+  values does not escape the bound.
+
+The `client_id` is read from the query string, or for form-encoded `POST`
+bodies from the body (the body is replayed to the handler untouched); a
+request without one keys under the empty string and remains IP-bounded. Every
+request that reaches the endpoint counts — GET, POST, or HEAD, and valid or
+invalid parameters — exactly as invalid registration attempts count against
+`/register`. A denied attempt is not recorded in either window, so the
+`Retry-After` value the server reports decreases predictably to zero; it is
+never refreshed by hammering. Each in-memory key table holds at most 4,096
+entries per dimension; when a table is full, a new key is denied until some
+window expires. `0` for either limit denies everything (fail-closed).
+
+**Rejection:** HTTP `429` with a `Retry-After` header (seconds) and an
+OAuth-shaped JSON error body:
+
+```json
+{"error": "rate_limited", "error_description": "Too many authorization requests; retry later."}
+```
+
+The rejection is a *direct* response, never a redirect: the throttle fires
+before the handler validates `redirect_uri`, and RFC 6749 §4.1.2.1 forbids
+redirecting a request whose redirection URI has not been verified (that would
+make ytt an open redirector). A compliant client treats the 429 plus
+`Retry-After` as "slow down and retry"; the OAuth error response shape keeps
+the body machine-parseable for clients that inspect it.
+
+**Source IP rule:** identical to `/register` above —
+`YTT_OAUTH_TRUSTED_PROXY_CIDRS` (default `10.42.0.0/16`) restricts which
+socket peers may supply a trusted `X-Forwarded-For`, and
+`YTT_OAUTH_TRUSTED_PROXY_COUNT` (default `2`) selects the Nth address from
+the right of that chain as the source key; untrusted peers, or short or
+malformed chains, key by the socket peer. `0` ignores the header entirely.
+Set both to match the ingress chain in front of a self-hosted deployment.
+
+Like the registration throttle, these windows are process-local, which the
+supported single-replica, single-worker deployment makes authoritative.
+Focused regression coverage is in `tests/unit/test_oauth_abuse.py`.
+
 ## Job ownership — Whisper ASR handles are per-subject
 
 Starting a Whisper ASR job records the caller's authenticated subject — the

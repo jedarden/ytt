@@ -160,6 +160,8 @@ All config is environment-variable-based. Nothing ardenone-specific is
 | `YTT_OAUTH_ENDPOINT_RATE_PER_MIN` | `10` | POST /register requests per source in a strict rolling 60-second window. Excess requests receive `429` with `Retry-After`. `0` denies every registration. |
 | `YTT_OAUTH_REGISTRATION_CAP` | `256` | Maximum live persisted OAuth client records. Expired rows are deleted before admission; the server rejects at capacity without evicting live clients. `0` disables registration. |
 | `YTT_OAUTH_REGISTRATION_TTL_SEC` | `2592000` (30 days) | Absolute lifetime of each persisted OAuth client record. Active use does not extend this lifetime; after expiry, the client registers again. |
+| `YTT_OAUTH_AUTHORIZE_RATE_PER_CLIENT_PER_MIN` | `30` | `/authorize` initiations per (source IP, client ID) in a rolling 60-second window, enforced before any authorization state is written; excess attempts get `429` + `Retry-After` (direct response, never a redirect). `0` denies all. |
+| `YTT_OAUTH_AUTHORIZE_RATE_PER_IP_PER_MIN` | `120` | `/authorize` initiations per source IP across all clients in the same window — bounds `client_id` rotation. `0` denies all. |
 | `YTT_OAUTH_CLIENT_ID` | *(required)* | OAuth2 client ID of the `ytt` application on the upstream IdP. Startup exits 1 if unset. |
 | `YTT_OAUTH_CLIENT_SECRET` | *(required)* | OAuth2 client secret of the same application. Inject by reference, never in a manifest or log. |
 | `YTT_OIDC_ISSUER` | *(reference Authentik)* | Issuer URL of the upstream OIDC provider — matched byte-for-byte against the id token's `iss` claim, so set it to exactly what your IdP advertises. Validated at startup (https, no whitespace/query/fragment). |
