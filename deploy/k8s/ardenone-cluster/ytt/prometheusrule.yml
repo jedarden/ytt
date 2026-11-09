@@ -15,12 +15,16 @@
 #                           unavailable, no user impact yet
 #   YttCanaryProbeFlapping — >50% of a path's probes failing over 30 min → the
 #                           intermittent pattern both staleness alerts miss
+#   YttBrowserContainerRestarted — browser container restarted, regardless of cause
+#   YttBrowserOOMKilled   — last browser container termination was an OOM kill
+#   YttBrowserMemoryNearLimit — browser working set sustained above 80% of its limit
 #
 # The four YttCanary* rules, their expressions and severities are bound to
 # deploy/CANARY-MONITORING-RUNBOOK.md §2 and to ytt/canary.py's metrics by
 # tests/unit/test_canary_monitoring.py — edit the three together.
 #
-# Route: via the cluster's existing Alertmanager receiver (ardenone-cluster norm).
+# The three YttBrowser pod-health alerts route to ntfy through monitoring/
+# alertmanager-config-externalsecret.yml's exact alertname matcher.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -92,6 +96,62 @@ spec:
               automation); connect/timeout = server down or overloaded.
               deploy/RUNBOOK.md has the response; YTT_FETCH_MODE=ytdlp is the
               rollback.
+
+        # --- Browser pod health (bead ytt-ca6da0e2) ---
+        # The WebSocket server has no HTTP metrics endpoint. These series are
+        # already scraped from kube-state-metrics (restart/reason/limit) and
+        # kubelet cAdvisor (working set), independently of the ytt process.
+        # Match only the Deployment's two-suffix pod name, excluding the
+        # ytt-browser-caption-retest workload in this namespace.
+        - alert: YttBrowserContainerRestarted
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="ytt",pod=~"ytt-browser-[^-]+-[^-]+",container="browser"}[15m]) > 0
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt-browser container {{ $labels.pod }} restarted"
+            description: >
+              The browser container restarted in the last 15 minutes. The
+              six-hour browser-process recycle stays inside one container and
+              must not increment this counter. Check the pod's termination
+              reason, events, and logs; caption fetches may have fallen back
+              to yt-dlp while the browser was unavailable.
+
+        - alert: YttBrowserOOMKilled
+          expr: |
+            (increase(kube_pod_container_status_restarts_total{namespace="ytt",pod=~"ytt-browser-[^-]+-[^-]+",container="browser"}[30m]) > 0)
+              and on (namespace, pod, container)
+            (kube_pod_container_status_last_terminated_reason{namespace="ytt",pod=~"ytt-browser-[^-]+-[^-]+",container="browser",reason="OOMKilled"} == 1)
+          labels:
+            severity: critical
+            namespace: ytt
+          annotations:
+            summary: "ytt-browser container {{ $labels.pod }} was OOMKilled"
+            description: >
+              The browser container restarted after an OOM kill in the last
+              30 minutes. Check browser concurrency, in-flight pages, and
+              container_memory_working_set_bytes against its memory limit.
+              The six-hour process recycle should keep baseline RSS bounded.
+
+        - alert: YttBrowserMemoryNearLimit
+          expr: |
+            (
+              container_memory_working_set_bytes{namespace="ytt",pod=~"ytt-browser-[^-]+-[^-]+",container="browser"}
+                / on (namespace, pod, container)
+              kube_pod_container_resource_limits{namespace="ytt",pod=~"ytt-browser-[^-]+-[^-]+",container="browser",resource="memory",unit="byte"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            namespace: ytt
+          annotations:
+            summary: "ytt-browser {{ $labels.pod }} working set exceeds 80% of its memory limit"
+            description: >
+              The browser working set has been above 80% of its pod limit for
+              five minutes. Check current fetch concurrency and RSS across
+              six-hour recycle boundaries before raising the limit or changing
+              the recycle cadence; see docs/notes/browser-fetch.md.
 
         # --- Whisper service down ---
         - alert: YttWhisperDown
