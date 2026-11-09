@@ -58,6 +58,7 @@ is expected.
 from __future__ import annotations
 
 import os
+import ipaddress
 import re
 from functools import lru_cache
 from typing import Annotated, Literal
@@ -405,6 +406,14 @@ class Settings(BaseSettings):
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     jwt_signing_secret: str | None = None
+    # Unauthenticated DCR abuse bounds (docs/notes/auth.md). The request
+    # threshold uses a strict rolling 60-second window; the proxy hop count
+    # identifies the visitor address in the trusted X-Forwarded-For chain.
+    oauth_trusted_proxy_count: int = 2
+    oauth_trusted_proxy_cidrs: str = "10.42.0.0/16"
+    oauth_endpoint_rate_per_min: int = 10
+    oauth_registration_cap: int = 256
+    oauth_registration_ttl_sec: int = 2_592_000
     # Upstream IdP location: the reference Authentik by default, any generic
     # OIDC provider via env (docs/usage/self-hosting.md). The issuer is
     # matched byte-for-byte against the id token's iss claim, so it is
@@ -423,6 +432,10 @@ class Settings(BaseSettings):
         "rate_limit_burst",
         "whisper_jobs_per_hour",
         "max_pending_whisper_jobs",
+        "oauth_trusted_proxy_count",
+        "oauth_endpoint_rate_per_min",
+        "oauth_registration_cap",
+        "oauth_registration_ttl_sec",
     )
     @classmethod
     def _rate_limits_non_negative(cls, v: int | None, info) -> int | None:
@@ -430,10 +443,27 @@ class Settings(BaseSettings):
         it denies everything the limit guards (fail-closed)."""
         if v is not None and v < 0:
             raise ValueError(
-                f"YTT_{info.field_name.upper()} must be >= 0 (0 = deny all), "
-                f"got {v}"
+                f"YTT_{info.field_name.upper()} must be >= 0 (0 = deny all), got {v}"
             )
         return v
+
+    @field_validator("oauth_trusted_proxy_cidrs")
+    @classmethod
+    def _oauth_trusted_proxy_cidrs_valid(cls, value: str) -> str:
+        if not value:
+            return value
+        try:
+            networks = [part.strip() for part in value.split(",")]
+            if any(not part for part in networks):
+                raise ValueError("empty CIDR entry")
+            for network in networks:
+                ipaddress.ip_network(network, strict=False)
+        except ValueError as exc:
+            raise ValueError(
+                "YTT_OAUTH_TRUSTED_PROXY_CIDRS must be a comma-separated list "
+                "of IP networks"
+            ) from exc
+        return value
 
     @field_validator("path_prefix")
     @classmethod

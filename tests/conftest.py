@@ -39,6 +39,16 @@ os.environ.setdefault("YTT_OAUTH_CLIENT_SECRET", "test-client-secret")
 # run driving this suite) in charge.
 os.environ.setdefault("YTT_PUBLIC_URL", "https://mcp.ardenone.com/ytt")
 
+# The unauthenticated /register bounds (ytt/oauth_abuse.py and
+# docs/notes/auth.md) default to 10 requests/minute per source and 256 live
+# client rows. The conformance and end-to-end suites exercise many full DCR
+# flows against the module-level app from one TestClient source, and their
+# persistent OAuth rows survive across test runs. Raise these limits only
+# for the unit-test process; tests/unit/test_oauth_abuse.py pins the actual
+# threshold, window, cap, TTL, and persistence behavior using isolated stores.
+os.environ.setdefault("YTT_OAUTH_ENDPOINT_RATE_PER_MIN", "100000")
+os.environ.setdefault("YTT_OAUTH_REGISTRATION_CAP", "100000")
+
 _FAKE_OIDC_CONFIG = OIDCConfiguration(
     issuer="https://sso.ardenone.com/application/o/ytt/",
     authorization_endpoint="https://sso.ardenone.com/application/o/authorize/",

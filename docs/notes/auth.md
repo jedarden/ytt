@@ -16,6 +16,7 @@ Authorization is therefore a separate, required control:
 - **Subject allowlist (`YTT_ALLOWED_SUBJECTS`)** checked on every tool call after token validation; non-allowlisted subject → `403`. **Empty allowlist = deny all** (fail-closed).
 - **DCR on ytt's client-facing AS is redirect-pinned, not open** — a registration that names any callback outside Claude's own two URIs (`CLAUDE_REDIRECT_URIS` in `ytt/auth.py`; see the registration bullet below) is refused at `/register` with RFC 7591 `invalid_redirect_uri` (400), and `/authorize` independently re-enforces the same allowlist before issuing a code — an unapproved (or loopback-http) callback can therefore never obtain an authorization code, and a registration alone grants nothing. Both enforcement points are pinned by `tests/unit/test_oauth_conformance.py` (`TestDCRRestrictedToClaudeRedirects`), the full-grant shape by `tests/unit/test_oauth_end_to_end.py` (`TestRejectedGrantsNeverMintTokens`, `TestRegistrationGrantsNoSubjectAuthorization`). Authorize on the token **subject**, not the client name — the Claude apps register as `client_name: "claudeai"`, so never allowlist by an exact `"Claude"` string (the claudeai-named full-flow denial is pinned end-to-end).
 - **Per-subject rate limiting** + Whisper quota so even an allowlisted caller can't exhaust the home IP / shared Whisper service.
+- **Unauthenticated registration bounds** — POST `/register` is limited to 10 requests per source in a rolling 60-second window; persisted DCR records expire after 30 days and are capped at 256 live records. The source-key rule, migration, cleanup, and at-cap behavior are specified below.
 - **Job ownership** — a Whisper ASR job's poll handle is bound to the subject that started it; see [§Job ownership](#job-ownership--whisper-asr-handles-are-per-subject) below.
 
 ## What this means for the build
@@ -26,6 +27,53 @@ Authorization is therefore a separate, required control:
 - Inbound IP-allowlisting of Anthropic's egress ranges (`160.79.104.0/21`, `2607:6bc0::/48`) can only live at the **Cloudflare edge** (the origin pod can't see the client IP behind the tunnel) — as a **WAF custom rule**, never Access (an identity gate that would challenge Anthropic's unattended backend). It is **optional defense-in-depth, not a substitute for the subject allowlist**, and is **deliberately not adopted for now** — declined with the full rationale and adoption recipe on bead `ytt-761fb151` (no agent-editable WAF credential; zone-wide `http_request_firewall_custom` phase ownership risks unverifiable clobber on the shared host; the egress range drifts). Adopt only if the operator explicitly opts in, per `docs/plan/plan.md` ("only if explicitly chosen").
 
 See `docs/research/mcp-oauth-authentication.md` for the spec details and exactly what the server must expose.
+
+## Unauthenticated dynamic registration bounds
+
+The client-facing `POST /register` endpoint accepts unauthenticated requests.
+It uses two bounds so a flood cannot continuously create OAuth client rows or
+keep abandoned rows forever:
+
+- **Request limit:** 10 registration requests per source in any rolling
+  60-second window. The eleventh request receives HTTP `429` with a
+  `Retry-After` header. Attempts count even when the submitted registration
+  is invalid. The in-memory source table holds at most 4,096 active sources;
+  when full, a new source is denied until a window expires.
+- **Source key:** by default, `YTT_OAUTH_TRUSTED_PROXY_CIDRS=10.42.0.0/16`
+  restricts trusted header senders to the reference k3s pod network, and
+  `YTT_OAUTH_TRUSTED_PROXY_COUNT=2` selects the forwarded hop. A peer outside
+  the configured CIDRs always keys by its socket IP. For a trusted peer, if
+  the request contains at least two
+  comma-separated `X-Forwarded-For` addresses and the second-from-right
+  value parses as an IP address, that value is the source key. A missing,
+  short, or malformed chain falls back to the socket peer. Set the count to
+  `0` to ignore `X-Forwarded-For`. This rule assumes the public service is
+  reachable only through the trusted ingress, which appends the configured
+  number of proxy addresses; self-hosters must set the count to their own
+  proxy chain.
+- **Persistent records:** `YTT_OAUTH_REGISTRATION_TTL_SEC=2592000` gives
+  each persisted OAuth client row an absolute 30-day lifetime. Use does not
+  extend the TTL; clients must register again after it expires. A durable
+  index in the same encrypted OAuth-state store tracks client IDs and expiry
+  times. The storage layer applies that expiry to every client-row write, so
+  a crash after row creation cannot leave an unbounded record.
+- **Capacity:** `YTT_OAUTH_REGISTRATION_CAP=256` limits live indexed OAuth
+  client rows. Before checking capacity, the server deletes expired client rows and
+  removes their index entries. At capacity, it rejects the new registration
+  with `invalid_client_metadata`; it never evicts an unexpired row. The
+  index is reserved before writing the client row, making interrupted
+  registrations consume at most one expiring slot. Existing rows from before
+  this bound was introduced are indexed and given their first 30-day TTL on
+  the first registration attempt; if they already fill the cap, new
+  registrations wait for expiry. Client metadata URL records use the same
+  cap and TTL, so that alternate client path cannot add uncounted rows.
+
+The admission lock makes index cleanup, capacity check, reservation, and row
+write serial within the supported one-worker server process. The backing
+FastMCP file store does not provide cross-process transactions; ytt's
+single-replica and single-worker deployment is part of this guarantee.
+Discovery metadata is not throttled. Focused regression coverage is in
+`tests/unit/test_oauth_abuse.py`.
 
 **Upstream IdP:** this doc is deliberately IdP-agnostic — the MCP-facing requirements above hold regardless of which upstream identity provider ytt federates to. The actual choice (currently the org's self-hosted Authentik, `sso.ardenone.com`; previously Google) is recorded as a decided ADR in `docs/plan/plan.md` (ADR-003, superseding an undocumented earlier pivot to Google) — check there for the current provider and the implementation in `ytt/auth.py`.
 

@@ -37,13 +37,19 @@ route that ever called the allowlist check).
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
+import math
+import inspect
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse
 
 import structlog
-from starlette.routing import Route
+from key_value.aio.adapters.pydantic import PydanticAdapter
+from starlette.middleware.cors import CORSMiddleware
+from starlette.routing import Route, request_response
 
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
@@ -55,6 +61,14 @@ from ytt.config import (
     DEFAULT_OIDC_CONFIG_URL,
     DEFAULT_OIDC_ISSUER,
     Settings,
+)
+from ytt.oauth_abuse import (
+    REGISTRATION_INDEX_COLLECTION,
+    REGISTRATION_INDEX_KEY,
+    RegistrationThrottle,
+    RegistrationThrottleMiddleware,
+    RegistrationTTLStore,
+    enumerate_client_ids,
 )
 
 log = structlog.get_logger(__name__)
@@ -205,8 +219,89 @@ class YttOIDCProvider(OIDCProxy):
     nothing routes external traffic to them without the ``/ytt`` prefix).
     """
 
+    def __init__(
+        self,
+        *,
+        registration_rate_per_min: int = 10,
+        trusted_proxy_count: int = 2,
+        trusted_proxy_cidrs: str = "10.42.0.0/16",
+        registration_cap: int = 256,
+        registration_ttl_sec: int = 2_592_000,
+        registration_clock: Callable[[], float] = time.time,
+        throttle_clock: Callable[[], float] = time.monotonic,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._registration_rate_per_min = registration_rate_per_min
+        self._trusted_proxy_count = trusted_proxy_count
+        self._trusted_proxy_cidrs = trusted_proxy_cidrs
+        self._registration_cap = registration_cap
+        self._registration_ttl_sec = registration_ttl_sec
+        self._registration_clock = registration_clock
+        self._registration_throttle = RegistrationThrottle(
+            limit=registration_rate_per_min,
+            window_seconds=60,
+            clock=throttle_clock,
+        )
+        self._registration_lock = asyncio.Lock()
+        self._registration_index: PydanticAdapter[dict[str, float]] = PydanticAdapter[
+            dict[str, float]
+        ](
+            key_value=self._client_storage,
+            pydantic_model=dict[str, float],
+            default_collection=REGISTRATION_INDEX_COLLECTION,
+            raise_on_validation_error=True,
+        )
+
+        # Keep FastMCP's encrypted backend, but attach the absolute expiry
+        # reserved in the persistent index to every DCR client write.
+        self._client_store._key_value = RegistrationTTLStore(
+            self._client_storage,
+            expiry_for=self._registration_expiry,
+            clock=registration_clock,
+        )
+
     def get_routes(self, mcp_path: str | None = None) -> list[Route]:
         base_routes = super().get_routes(mcp_path)
+
+        # Wrap the bare route before path insertion, so both route spellings
+        # share the same throttle and source key.
+        for index, route in enumerate(base_routes):
+            if (
+                isinstance(route, Route)
+                and route.path.rstrip("/") == "/register"
+                and "POST" in (route.methods or set())
+            ):
+                endpoint = route.endpoint
+                if isinstance(endpoint, CORSMiddleware):
+                    # Keep CORS outermost so 429 responses retain the same
+                    # browser headers as ordinary registration responses.
+                    endpoint.app = RegistrationThrottleMiddleware(
+                        endpoint.app,
+                        throttle=self._registration_throttle,
+                        trusted_proxy_count=self._trusted_proxy_count,
+                        trusted_proxy_cidrs=self._trusted_proxy_cidrs,
+                    )
+                else:
+                    app = (
+                        request_response(endpoint)
+                        if inspect.isfunction(endpoint) or inspect.ismethod(endpoint)
+                        else endpoint
+                    )
+                    endpoint = RegistrationThrottleMiddleware(
+                        app,
+                        throttle=self._registration_throttle,
+                        trusted_proxy_count=self._trusted_proxy_count,
+                        trusted_proxy_cidrs=self._trusted_proxy_cidrs,
+                    )
+                base_routes[index] = Route(
+                    route.path,
+                    endpoint=endpoint,
+                    methods=route.methods,
+                    name=route.name,
+                    include_in_schema=route.include_in_schema,
+                )
+                break
 
         if not self.issuer_url:
             return base_routes
@@ -273,6 +368,148 @@ class YttOIDCProvider(OIDCProxy):
 
         return base_routes
 
+    async def _registration_expiry(self, client_id: str) -> float | None:
+        entries = await self._registration_index.get(key=REGISTRATION_INDEX_KEY)
+        if entries is not None and client_id in entries:
+            return float(entries[client_id])
+
+        # FastMCP can persist client metadata fetched through CIMD as well as
+        # rows created by /register. Route every client-store write through
+        # the same cap so another client-registration path cannot bypass it.
+        async with self._registration_lock:
+            now = self._registration_clock()
+            entries = await self._live_registration_index(now=now)
+            if client_id in entries:
+                return entries[client_id]
+            if self._registration_ttl_sec <= 0:
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration is disabled.",
+                )
+            if self._registration_cap <= 0 or len(entries) >= self._registration_cap:
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration capacity reached.",
+                )
+            expiry = now + self._registration_ttl_sec
+            entries[client_id] = expiry
+            await self._persist_registration_index(entries, now=now)
+            return expiry
+
+    async def _read_registration_index(self) -> dict[str, float] | None:
+        try:
+            entries = await self._registration_index.get(key=REGISTRATION_INDEX_KEY)
+        except Exception as exc:
+            log.error(
+                "oauth_registration_index_unreadable",
+                error_type=type(exc).__name__,
+            )
+            raise RegistrationError(
+                error="temporarily_unavailable",
+                error_description="Registration storage is unavailable.",
+            ) from exc
+        if entries is None:
+            return None
+        if any(
+            not isinstance(client_id, str)
+            or isinstance(expiry, bool)
+            or not isinstance(expiry, (int, float))
+            or not math.isfinite(expiry)
+            for client_id, expiry in entries.items()
+        ):
+            log.error("oauth_registration_index_invalid")
+            raise RegistrationError(
+                error="temporarily_unavailable",
+                error_description="Registration storage is unavailable.",
+            )
+        return {client_id: float(expiry) for client_id, expiry in entries.items()}
+
+    async def _persist_registration_index(
+        self, entries: dict[str, float], *, now: float
+    ) -> None:
+        if not entries:
+            await self._registration_index.delete(key=REGISTRATION_INDEX_KEY)
+            return
+        ttl = max(entries.values()) - now
+        if ttl <= 0:
+            raise RuntimeError("registration index has no live entries")
+        await self._registration_index.put(
+            key=REGISTRATION_INDEX_KEY,
+            value=entries,
+            ttl=ttl,
+        )
+
+    async def _initialize_registration_index(self, *, now: float) -> dict[str, float]:
+        """Index existing rows and assign legacy records their first finite TTL."""
+        try:
+            client_ids = await enumerate_client_ids(self._client_storage)
+            clients = {}
+            for client_id in client_ids:
+                client = await self._client_store.get(key=client_id)
+                if client is None:
+                    # FileTreeStore hides expired records on get but leaves
+                    # their files behind until explicitly deleted.
+                    await self._client_store.delete(key=client_id)
+                    continue
+                clients[client_id] = client
+        except Exception as exc:
+            log.error(
+                "oauth_registration_index_initialization_failed",
+                error_type=type(exc).__name__,
+            )
+            raise RegistrationError(
+                error="temporarily_unavailable",
+                error_description="Registration storage is unavailable.",
+            ) from exc
+
+        if self._registration_ttl_sec <= 0:
+            if clients:
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration is disabled.",
+                )
+            return {}
+
+        expiry = now + self._registration_ttl_sec
+        entries = {client_id: expiry for client_id in clients}
+        try:
+            await self._persist_registration_index(entries, now=now)
+            for client_id, client in clients.items():
+                await self._client_store.put(key=client_id, value=client)
+        except Exception as exc:
+            log.error(
+                "oauth_registration_index_migration_failed",
+                error_type=type(exc).__name__,
+            )
+            raise RegistrationError(
+                error="temporarily_unavailable",
+                error_description="Registration storage is unavailable.",
+            ) from exc
+        return entries
+
+    async def _live_registration_index(self, *, now: float) -> dict[str, float]:
+        entries = await self._read_registration_index()
+        if entries is None:
+            entries = await self._initialize_registration_index(now=now)
+
+        expired = [client_id for client_id, expiry in entries.items() if expiry <= now]
+        if expired:
+            try:
+                for client_id in expired:
+                    await self._client_store.delete(key=client_id)
+                    del entries[client_id]
+                await self._persist_registration_index(entries, now=now)
+            except Exception as exc:
+                log.error(
+                    "oauth_registration_cleanup_failed",
+                    error_type=type(exc).__name__,
+                )
+                raise RegistrationError(
+                    error="temporarily_unavailable",
+                    error_description="Registration storage is unavailable.",
+                ) from exc
+        return entries
+
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         """Redirect-pinned DCR (docs/notes/auth.md): refuse any registration
         that asks for a callback outside :data:`CLAUDE_REDIRECT_URIS`.
@@ -307,7 +544,62 @@ class YttOIDCProvider(OIDCProxy):
                     "docs/notes/auth.md)"
                 ),
             )
-        await super().register_client(client_info)
+        client_id = client_info.client_id
+        if not client_id:
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="client_id is required.",
+            )
+
+        async with self._registration_lock:
+            now = self._registration_clock()
+            entries = await self._live_registration_index(now=now)
+            if self._registration_ttl_sec <= 0:
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration is disabled.",
+                )
+            is_new = client_id not in entries
+            if self._registration_cap <= 0 or (
+                is_new and len(entries) >= self._registration_cap
+            ):
+                raise RegistrationError(
+                    error="invalid_client_metadata",
+                    error_description="Client registration capacity reached.",
+                )
+
+            if is_new:
+                entries[client_id] = now + self._registration_ttl_sec
+                try:
+                    # Reserve first: a crash can leave a bounded ghost slot
+                    # until expiry, never an unindexed permanent client row.
+                    await self._persist_registration_index(entries, now=now)
+                except Exception as exc:
+                    log.error(
+                        "oauth_registration_reservation_failed",
+                        error_type=type(exc).__name__,
+                    )
+                    raise RegistrationError(
+                        error="temporarily_unavailable",
+                        error_description="Registration storage is unavailable.",
+                    ) from exc
+            try:
+                await super().register_client(client_info)
+            except Exception:
+                if is_new:
+                    entries.pop(client_id, None)
+                    try:
+                        await self._persist_registration_index(
+                            entries, now=self._registration_clock()
+                        )
+                    except Exception as exc:
+                        # A retained reservation fails closed and expires
+                        # with the same lifetime as an abandoned registration.
+                        log.error(
+                            "oauth_registration_reservation_rollback_failed",
+                            error_type=type(exc).__name__,
+                        )
+                raise
 
 
 def build_auth_provider(settings: Settings) -> YttOIDCProvider:
@@ -455,6 +747,11 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
         token_verifier=token_verifier,
         fastmcp_access_token_expiry_seconds=ONE_WEEK_SECONDS,
         fallback_refresh_token_expiry_seconds=TWELVE_WEEKS_SECONDS,
+        registration_rate_per_min=settings.oauth_endpoint_rate_per_min,
+        trusted_proxy_count=settings.oauth_trusted_proxy_count,
+        trusted_proxy_cidrs=settings.oauth_trusted_proxy_cidrs,
+        registration_cap=settings.oauth_registration_cap,
+        registration_ttl_sec=settings.oauth_registration_ttl_sec,
     )
 
     # Replicates OIDCProxy's own "restore scopes" step (oidc_proxy.py,

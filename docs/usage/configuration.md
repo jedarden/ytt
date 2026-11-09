@@ -39,6 +39,16 @@ JWKS (e.g. Keycloak's default) is not yet supported; see the note in
 | `YTT_OIDC_CONFIG_URL` | *(derived)* | The IdP's OIDC discovery document, fetched once at startup. Unset, it is derived from `YTT_OIDC_ISSUER` as `<issuer>/.well-known/openid-configuration` (OIDC Discovery §4). Set it only when your IdP serves the document at a non-standard path. Same startup validation as the issuer. |
 | `YTT_JWT_SIGNING_SECRET` | *(unset)* | Optional explicit signing key for the tokens ytt issues to clients. Unset, it is derived from `YTT_OAUTH_CLIENT_SECRET` (stable across restarts). Set only to rotate ytt's token key independently of the upstream client secret. |
 
+## Unauthenticated dynamic registration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTT_OAUTH_TRUSTED_PROXY_CIDRS` | `10.42.0.0/16` | Socket-peer networks allowed to supply trusted `X-Forwarded-For` headers. The reference deployment uses its k3s pod network; peers outside these networks always key by their socket IP. |
+| `YTT_OAUTH_TRUSTED_PROXY_COUNT` | `2` | For peers inside the trusted CIDRs, use the Nth valid `X-Forwarded-For` address from the right as the `/register` source key. Missing, short, or malformed chains fall back to the socket peer; `0` ignores the header. The public service must only be reachable through the trusted ingress chain. |
+| `YTT_OAUTH_ENDPOINT_RATE_PER_MIN` | `10` | POST `/register` attempts allowed per source in a strict rolling 60-second window. Excess attempts receive `429` and `Retry-After`; `0` denies every registration. Invalid registration attempts count toward the limit. |
+| `YTT_OAUTH_REGISTRATION_CAP` | `256` | Maximum live persisted OAuth client rows. Expired rows are deleted before the cap check; live rows are never evicted. `0` disables registration. |
+| `YTT_OAUTH_REGISTRATION_TTL_SEC` | `2592000` | Absolute lifetime of a persisted OAuth client row (30 days). Use does not extend the TTL, so a client must register again after expiry. |
+
 ## Authorization
 
 | Variable | Default | Description |
