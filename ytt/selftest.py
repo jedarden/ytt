@@ -21,7 +21,6 @@ on first successful auth; mode 0600; not logged to stdout (plan §Security —
 from __future__ import annotations
 
 import json
-import os
 import sys
 from typing import Any
 
@@ -141,7 +140,9 @@ def probe_egress(proxy_url: str | None = None) -> EgressReport:
     effective fallback path (plan §ip_blocked), not the native one
     (``ytt selftest`` probes direct for that).
     """
-    kwargs: dict[str, Any] = {"timeout": _PROBE_TIMEOUT_SEC}
+    # A direct probe must describe this pod's native route even when the
+    # operator has ambient HTTP(S)_PROXY variables in the environment.
+    kwargs: dict[str, Any] = {"timeout": _PROBE_TIMEOUT_SEC, "trust_env": False}
     via_proxy = False
 
     if proxy_url:
@@ -157,6 +158,11 @@ def probe_egress(proxy_url: str | None = None) -> EgressReport:
         resp.raise_for_status()
         data = resp.json()
 
+    return egress_report_from_ipinfo(data, via_proxy=via_proxy)
+
+
+def egress_report_from_ipinfo(data: dict[str, Any], *, via_proxy: bool) -> EgressReport:
+    """Classify an ipinfo response, independent of which transport fetched it."""
     ip: str = data.get("ip", "unknown")
     org_raw: str | None = data.get("org")
 
@@ -225,7 +231,7 @@ def _show_sub() -> int:
 
     print(sub)
     print(
-        f"\nAdd this value to YTT_ALLOWED_SUBJECTS to permit this user.",
+        "\nAdd this value to YTT_ALLOWED_SUBJECTS to permit this user.",
         file=sys.stderr,
     )
     return 0

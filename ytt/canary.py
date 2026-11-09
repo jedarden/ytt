@@ -60,7 +60,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
 
 from prometheus_client import REGISTRY, Counter, Gauge, start_http_server
 
@@ -103,6 +102,11 @@ PROBE_DIRECT = "direct"
 PROBE_VIA_PROXY = "via_proxy"
 PROBE_BROWSER = "browser"
 PROBE_LABELS: tuple[str, ...] = (PROBE_DIRECT, PROBE_VIA_PROXY, PROBE_BROWSER)
+
+# A browser-primary release must establish the browser pod's residential
+# route, even if one known-good video's captions happen to work on another IP.
+EGRESS_NON_RESIDENTIAL = "egress_non_residential"
+EGRESS_UNCLASSIFIED = "egress_unclassified"
 
 # All four metrics live here rather than in ytt.observability (the home of
 # the server's own series) because only this module's probe loop emits them:
@@ -363,6 +367,45 @@ def probe_browser_once_detail(video_id: str) -> dict:
     }
 
 
+async def _probe_browser_egress_async(browser_ws_url: str):
+    """Fetch ipinfo from remote Chromium, where browser captions actually exit."""
+    from ytt.browser_fetch import _playwright_factory, browser_endpoint
+    from ytt.selftest import _IPINFO_URL, _PROBE_TIMEOUT_SEC, egress_report_from_ipinfo
+
+    pw_factory = _playwright_factory()
+    async with pw_factory() as pw:
+        browser = await pw.chromium.connect(
+            browser_endpoint(browser_ws_url), timeout=int(_PROBE_TIMEOUT_SEC * 1000)
+        )
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            response = await page.goto(
+                _IPINFO_URL,
+                wait_until="domcontentloaded",
+                timeout=int(_PROBE_TIMEOUT_SEC * 1000),
+            )
+            if response is None or not response.ok:
+                raise RuntimeError("browser egress ipinfo request failed")
+            data = await response.json()
+            if not isinstance(data, dict):
+                raise ValueError("browser egress ipinfo response was not an object")
+            return egress_report_from_ipinfo(data, via_proxy=False)
+        finally:
+            await browser.close()
+
+
+def probe_browser_egress(browser_ws_url: str):
+    """Bound the browser-pod IP lookup, including its WebSocket connection."""
+    from ytt.selftest import _PROBE_TIMEOUT_SEC
+
+    return asyncio.run(
+        asyncio.wait_for(
+            _probe_browser_egress_async(browser_ws_url), timeout=_PROBE_TIMEOUT_SEC
+        )
+    )
+
+
 def _probe_all_once(proxy: str | None = None) -> list[dict]:
     """Probe **every** configured video once and return the per-video reports.
 
@@ -519,13 +562,13 @@ def run_once(
     browser-primary path (``YTT_BROWSER_WS_URL``) mints a PO token and gets
     a non-empty caption body.  ``via_proxy`` and ``browser`` are mutually
     exclusive (one probe exercises one path); the browser leg reports
-    ``egress: {}`` because its traffic egresses from the browser pod, so
-    classifying *this* process's egress would not describe the path that
-    carried it.
+    ``egress`` is measured by remote Chromium in the browser pod.  Browser
+    classification must be residential for a passing verdict; a failed lookup
+    is ``egress_unclassified`` when the caption fetch itself succeeds.
 
     Returns a JSON-serializable report with ``verdict`` set to the caption
-    fetch ``outcome`` (``"ok"`` or a stable error_code) and ``ran_at`` stamped
-    UTC — the report is meant to be pasted somewhere durable as evidence.
+    outcome, except that browser egress can supply an explicit failing verdict.
+    ``ran_at`` is stamped UTC — the report is meant to be retained as evidence.
     Contains no secrets (error strings are credential-redacted).
     """
     from datetime import datetime, timezone
@@ -541,13 +584,42 @@ def run_once(
                 "exercises one path"
             )
         fetch_report = probe_browser_once_detail(vid)
+        from ytt.config import get_settings
+
+        try:
+            report_egress = probe_browser_egress(get_settings().browser_ws_url)
+            egress = {
+                "ip": report_egress.ip,
+                "asn": report_egress.asn,
+                "org": report_egress.org,
+                "via_proxy": False,
+                "is_residential": report_egress.is_residential,
+                "path": PROBE_BROWSER,
+            }
+            classified = bool(report_egress.ip) and report_egress.ip != "unknown" and bool(
+                report_egress.asn or report_egress.org
+            )
+        except Exception as exc:
+            egress = {
+                "error": redact_credentials(str(exc)),
+                "via_proxy": False,
+                "path": PROBE_BROWSER,
+            }
+            classified = False
+
+        verdict = fetch_report["outcome"]
+        if verdict == "ok":
+            if not classified:
+                verdict = EGRESS_UNCLASSIFIED
+            elif not egress["is_residential"]:
+                verdict = EGRESS_NON_RESIDENTIAL
         return {
             "mode": "once",
             "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "video_id": vid,
-            "egress": {},
+            "egress": egress,
             "caption_fetch": fetch_report,
-            "verdict": fetch_report["outcome"],
+            "verdict": verdict,
         }
 
     from ytt.config import get_settings
@@ -555,26 +627,53 @@ def run_once(
 
     settings = get_settings()
 
-    # Egress classification is context, not the verdict — if ipinfo.io is
-    # unreachable the caption fetch is still the ground truth.
+    if via_proxy and settings.proxy_url is None:
+        from ytt import errors
+
+        return {
+            "mode": "once",
+            "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "video_id": vid,
+            "egress": {
+                "error": "YTT_PROXY_URL is not configured",
+                "via_proxy": False,
+                "path": PROBE_VIA_PROXY,
+            },
+            "caption_fetch": {
+                "ok": False,
+                "outcome": errors.UNAVAILABLE,
+                "langs": [],
+                "duration_sec": 0.0,
+                "via_proxy": False,
+                "error": "YTT_PROXY_URL is not configured",
+            },
+            "verdict": errors.UNAVAILABLE,
+        }
+
+    # The yt-dlp legs classify the same route used by their caption probes.
+    # A failed ipinfo lookup remains context; the caption result is the verdict.
+    probe_proxy = settings.proxy_url if via_proxy else None
+    path = PROBE_VIA_PROXY if via_proxy else PROBE_DIRECT
     try:
-        report_egress = probe_egress(proxy_url=settings.proxy_url)
+        report_egress = probe_egress(proxy_url=probe_proxy)
         egress: dict = {
             "ip": report_egress.ip,
             "asn": report_egress.asn,
             "org": report_egress.org,
             "via_proxy": report_egress.via_proxy,
             "is_residential": report_egress.is_residential,
+            "path": path,
         }
     except Exception as exc:
         # httpx failure strings can quote the proxy URL (creds included).
         egress = {
             "error": redact_credentials(str(exc)),
-            "via_proxy": settings.proxy_url is not None,
+            "via_proxy": probe_proxy is not None,
+            "path": path,
         }
 
     fetch_report = probe_once_detail(
-        vid, proxy=settings.proxy_url if via_proxy else None
+        vid, proxy=probe_proxy
     )
 
     return {

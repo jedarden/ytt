@@ -46,7 +46,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ytt.canary import CANARY_VIDEO_IDS, run_once
+from ytt.canary import (
+    CANARY_VIDEO_IDS,
+    EGRESS_NON_RESIDENTIAL,
+    EGRESS_UNCLASSIFIED,
+    run_once,
+)
 from ytt.observability import redact_credentials
 
 log = logging.getLogger(__name__)
@@ -129,6 +134,26 @@ def remediation_for(
     if failed_probe == "browser":
         # The primary path — its failures get browser-specific directives,
         # never the yt-dlp/extractor wording the direct/via_proxy rows use.
+        if outcome == EGRESS_NON_RESIDENTIAL:
+            return (
+                lead
+                + "the ytt-browser pod's egress IP is classified as "
+                "non-residential even though the canary caption fetched. "
+                "The PO-token path can fail on other videos from this IP. "
+                "Check the browser pod's node and outbound route; restore "
+                "residential egress, then re-run the gate. Escalate to the "
+                "egress owner with the evidence JSON. YTT_PROXY_URL does "
+                "not carry browser traffic."
+            )
+        if outcome == EGRESS_UNCLASSIFIED:
+            return (
+                lead
+                + "the browser pod's egress could not be classified. "
+                "Check its ipinfo reachability and the browser WebSocket "
+                "path, then re-run the gate. Escalate to the egress owner "
+                "with the evidence JSON if it persists; caption success "
+                "alone does not prove residential browser egress."
+            )
         if outcome == "rate_limited":
             return (
                 lead

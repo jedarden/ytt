@@ -97,6 +97,45 @@ ytt (python:3.12-slim + playwright CLIENT wheel)           ytt-browser pod (sepa
   `served_lang` come from the captured request's `kind`/`lang` parameters, not from
   what we asked for.
 
+### Egress and proxy contract
+
+The browser-primary caption request leaves **the `ytt-browser` pod**, not the
+`ytt` server pod that opened the WebSocket. The browser Deployment has no node
+placement pin or outbound proxy setting; its ingress-only NetworkPolicy leaves
+outbound HTTPS unrestricted. Its actual exit IP can therefore differ from the
+server pod's and must be measured independently. The required class for the
+browser-primary path is **residential**: a datacenter exit can cause YouTube to
+reject the player's PO token with an empty body or HTTP 429.
+
+`YTT_PROXY_URL` is a yt-dlp caption and audio fallback setting in the `ytt`
+process. It is never sent as a Playwright context proxy and does not carry
+the browser's YouTube traffic. On a browser infrastructure failure the router
+tries yt-dlp, whose `ip_blocked` retry may then use `YTT_PROXY_URL`; that does
+not repair the browser-primary route.
+
+The one-shot release gate attributes each IP lookup to its caption transport:
+
+| Gate probe | Caption request and ipinfo lookup originate from | Proxy |
+|---|---|---|
+| `direct` | `ytt` pod native route | none, even when `YTT_PROXY_URL` is set |
+| `via_proxy` | `ytt` pod through the configured proxy | `YTT_PROXY_URL` |
+| `browser` | remote Chromium in the `ytt-browser` pod | no `YTT_PROXY_URL` |
+
+Each `egress.path` field names that route. The browser leg navigates a fresh
+remote Chromium page to ipinfo, using the same ASN/org classifier as the
+server probe, then runs the PO-token caption check. Its gate verdict is
+`egress_non_residential` when captions work but the exit is classified as a
+datacenter, and `egress_unclassified` when the browser exit cannot be proved
+(including an ipinfo failure, missing IP, or missing both ASN and org). A caption failure keeps
+its own outcome so the underlying failure remains visible. Neither a green
+yt-dlp probe nor the server's `ytt_egress_is_residential` gauge establishes
+the browser pod's route. The latter is the server startup/`/admin/egress`
+probe of the configured fallback proxy, or the server's native route if no
+proxy is configured. The continuous canary loop still probes direct and
+proxy; the browser egress proof runs in `ytt canary --once --browser` and the
+post-deploy `ytt canary --gate` browser leg. A new browser pod or outbound
+route requires that gate again.
+
 ### Release contract
 
 The current release pair is pinned to Playwright **1.63.0**:
@@ -159,8 +198,8 @@ drifting — the fallback is hiding it from users, not from the dashboard.
 - **bench:** `ws://bench:3001/` is a `run-server` (1.59) that happens to honour client
   launch options, so ytt works against it unchanged (verified 2026-10-07) — but it allows
   only two clients and is not reachable from pods without extra plumbing.
-- **Not covered:** `YTT_PROXY_URL` applies to the yt-dlp path only; the browser's egress
-  is the server pod's.
+- **Egress:** use the browser leg of `ytt canary --gate` after a browser pod or
+  route change; it reports the browser pod's own exit class as described above.
 
 ### Verify the production recycle and memory bound
 

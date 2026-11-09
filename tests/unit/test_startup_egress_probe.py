@@ -315,6 +315,7 @@ def test_probe_hands_httpx_a_finite_bounded_timeout():
         with patch("ytt.selftest.httpx.Client", return_value=client) as client_cls:
             selftest.probe_egress(proxy_url)
         timeout = client_cls.call_args[1]["timeout"]
+        assert client_cls.call_args[1]["trust_env"] is False
         assert timeout == selftest._PROBE_TIMEOUT_SEC
         assert math.isfinite(timeout) and timeout > 0
 

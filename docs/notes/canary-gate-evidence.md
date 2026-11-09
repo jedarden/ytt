@@ -34,7 +34,7 @@ Top-level keys (exact set, pinned by `TestGateReportSchema`):
 | `proxy_configured` | bool | Whether `YTT_PROXY_URL` is set — i.e. whether a `via_proxy` probe exists |
 | `browser_configured` | bool | Whether the browser-primary path is enabled (`YTT_BROWSER_WS_URL` set, `YTT_FETCH_MODE` not `ytdlp`) — i.e. whether a `browser` probe exists (bead `ytt-e94ce5ee`) |
 | `probes` | object | One `run_once`-shaped report per probe, keyed `direct`, (only when `proxy_configured`) `via_proxy`, and (only when `browser_configured`) `browser` |
-| `verdict` | string | The first failing probe's outcome, else `"ok"` |
+| `verdict` | string | The first failing probe's verdict (caption outcome or browser egress failure), else `"ok"` |
 | `gate` | `"pass"` \| `"fail"` | The release decision — `"pass"` only when **every** probe's `verdict` is `ok`, so a pass requires the browser-primary path when it is configured, not just the yt-dlp fallback |
 | `failed_probe` | `null` \| `"direct"` \| `"via_proxy"` \| `"browser"` | First failing probe in run order (direct → via_proxy → browser); `null` on a pass |
 | `remediation` | `null` \| string | The rollback/escalation directive (`remediation_for`); `null` on a pass. Mirrors `deploy/RUNBOOK.md` §3.1 — the two are updated together |
@@ -48,14 +48,19 @@ Each entry of `probes` keeps the full `ytt canary --once` shape (pinned by
 `tests/unit/test_canary_once.py`): `mode` (`"once"`), `ran_at`, `video_id`,
 `egress`, `caption_fetch`, `verdict`.
 
-- `egress` is the ipinfo classification context: `ip`, `asn`, `org`,
-  `via_proxy`, `is_residential` — or, when the ipinfo probe itself failed,
-  `error` (credential-redacted) plus `via_proxy`. It is context, never the
-  verdict: the gate passes or fails on `caption_fetch` alone. The `browser`
-  probe's `egress` is `{}`: its fetch runs in the browser pod, so
-  classifying the exec pod's egress would not describe the path that
-  actually carried the traffic (the same empty-context shape a
-  `gate_error` report carries).
+- `egress` is the ipinfo classification from the **same route** as that
+  probe's caption fetch: `ip`, `asn`, `org`, `via_proxy`, `is_residential`,
+  and `path` (`direct`, `via_proxy`, or `browser`). A failed lookup has
+  credential-redacted `error`, `via_proxy`, and `path`. `direct` measures the
+  `ytt` pod natively; `via_proxy` measures its configured proxy exit;
+  `browser` measures remote Chromium in the `ytt-browser` pod. The browser
+  leg does not use `YTT_PROXY_URL`. For the two yt-dlp legs, classification
+  is context and the caption outcome is the verdict. The browser leg also
+  requires a residential classification: a successful caption fetch with
+  datacenter egress returns `egress_non_residential`; a successful fetch
+  with an unproved exit returns `egress_unclassified`. If its caption fetch
+  failed, that failure remains the verdict. A `gate_error` report, produced
+  before the probe completed, still carries `egress: {}`.
 - `caption_fetch` carries:
 
 | Key | Meaning |

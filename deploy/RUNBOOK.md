@@ -213,9 +213,13 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    ```
    The gate runs `ytt canary --once` (direct) **and** `--via-proxy` when
    `YTT_PROXY_URL` is configured **and** the browser-primary probe when
-   `YTT_BROWSER_WS_URL` is configured, requires `outcome=ok` on every
-   probe (a pass therefore requires the primary browser path, not just the
-   yt-dlp fallback), writes the combined JSON evidence (default
+   `YTT_BROWSER_WS_URL` is configured. Each leg's `egress.path` identifies
+   the route it classified: `direct` is the server pod's native exit,
+   `via_proxy` is the proxy exit, and `browser` is measured by Chromium in
+   the `ytt-browser` pod. A browser pass requires both a working PO-token
+   caption fetch and residential browser egress; the server's startup
+   egress gauge does not classify the browser pod. The gate writes the
+   combined JSON evidence (default
    `/tmp/ytt-canary-evidence/`), and exits 0 **only** on a full pass.
    Exit 1 = gate failed: the report's `remediation` field names the
    rollback/escalation path (§3.1 below) and the report's `probes` half
@@ -231,9 +235,9 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
    **never substitutes for the gate**: only the gate exercises the *new*
    image's fetch code end to end.
    ```bash
-   # the new pod's own egress classification (the gate's egress half):
+   # the server's startup classification (proxy exit when configured):
    $KS logs -n ytt deploy/ytt --timestamps | grep -m1 'Startup egress probe'
-   #   → "is_residential": true for this pod
+   #   → "is_residential": true for that classified route
    # the standing loop (same probe code, separately pinned image) kept
    # succeeding through the swap — continuity, not the new image:
    $KS logs -n ytt deploy/ytt-canary --timestamps | tail -5
@@ -254,8 +258,9 @@ KS="kubectl --server=http://traefik-ardenone-cluster:8001"
 6. **Metrics + egress classification** — `curl -s
    https://mcp.ardenone.com/ytt/metrics | grep -E 'ytt_egress_is_residential'`
    must read `1.0`.  `YttEgressNotResidential` firing after an upgrade means
-   the new pod is egressing from somewhere unexpected — check the startup
-   egress log line on the new pod.
+   the server's classified route (configured proxy exit, otherwise native)
+   is unexpected — check the startup egress log. The browser pod's class is
+   in the gate's `probes.browser.egress`, not this gauge.
 7. **Optional, heavier** — in-cluster integration suite from a pod with a
    checkout: `ytt test --integration` (see `docs/usage/deploy-ardenone.md`).
    Needs residential egress; never chases these from a datacenter machine.
@@ -285,6 +290,8 @@ on the **first failing probe** (`report.failed_probe`) and its
 | `browser` (browser path configured) | `ip_blocked` or another path-down outcome | The browser-primary caption path is down — every transcript fetch is silently falling back to yt-dlp. If the release changed `YTT_BROWSER_WS_URL`, the browser Deployment, or its NetworkPolicy → **roll back** (revert that manifest change in declarative-config, push; §5) and re-run the gate. Otherwise the browser server is unreachable or refusing connections — check the ytt-browser pod and its egress NetworkPolicy (the connect-refused shape of bead `ytt-1e4c448b`) → **escalate** to the maintainers with the evidence JSON. |
 | `browser` | `empty_body` | The browser player's caption request came back with an empty body — the PO token was missing or rejected (the detected-as-automation class). If the release touched the browser launch options, the stealth settings, or fetch code → **roll back** (revert the tag pin in declarative-config; §5) and re-gate on the previous tag. Otherwise the browser Deployment's Chromium or its launch config drifted → **escalate** to the maintainers with the evidence JSON. |
 | `browser` | `rate_limited` | The browser-primary caption path was rate-limited by YouTube — the browser pod's shared egress IP is burned or its quota is exhausted. **Rollback will not fix it**; **escalate** to the egress owner with the evidence JSON, and decide explicitly whether to keep or revert the tag (fetches still serve through the yt-dlp fallback, at reduced caption coverage). |
+| `browser` | `egress_non_residential` | The ytt-browser pod's egress IP is classified as non-residential even though the canary caption fetched. The PO-token path can fail on other videos from this IP. Check the browser pod's node and outbound route; restore residential egress, then re-run the gate. **Escalate** to the egress owner with the evidence JSON. `YTT_PROXY_URL` does not carry browser traffic. |
+| `browser` | `egress_unclassified` | The browser pod's egress could not be classified. Check its ipinfo reachability and the browser WebSocket path, then re-run the gate. **Escalate** to the egress owner with the evidence JSON if it persists; caption success alone does not prove residential browser egress. |
 | any probe except `browser` | anything else (`empty_body`, `private`, `rate_limited`, …) | Not an egress verdict — on the known-good canary video this is most likely a yt-dlp/extractor regression shipped in the new image → **roll back** (§5) and re-gate. If the release changed no fetch code → **escalate** to the maintainers with the evidence (the fixed canary video list itself may need updating). |
 | any probe | `gate_error` | The gate crashed before a verdict — a tooling failure, **not** a canary result. Fix the gate environment and re-run; escalate with the evidence only if it persists. |
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -375,9 +376,48 @@ _RESIDENTIAL = EgressReport(
     ip="203.0.113.7", asn="AS7922", org="Comcast Cable",
     via_proxy=False, is_residential=True,
 )
+_DATACENTER = EgressReport(
+    ip="198.51.100.10", asn="AS16509", org="Amazon AWS",
+    via_proxy=False, is_residential=False,
+)
 
 
 class TestRunOnce:
+    def test_via_proxy_without_config_does_not_claim_a_proxied_fetch(self):
+        settings = _browser_settings()
+        with (
+            patch("ytt.config.get_settings", return_value=settings),
+            patch("ytt.selftest.probe_egress") as probe,
+            patch("ytt.canary.probe_once_detail") as fetch,
+        ):
+            report = run_once(via_proxy=True)
+        probe.assert_not_called()
+        fetch.assert_not_called()
+        assert report["verdict"] == "unavailable"
+        assert report["egress"]["path"] == "via_proxy"
+        assert report["egress"]["via_proxy"] is False
+
+    def test_egress_report_tracks_the_caption_route_with_proxy_configured(self):
+        settings = _browser_settings()
+        settings.proxy_url = "http://proxy.example:3128"
+        with (
+            patch("ytt.config.get_settings", return_value=settings),
+            patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL) as probe,
+            patch("ytt.canary.probe_once_detail", return_value={"outcome": "ok"}) as fetch,
+        ):
+            direct = run_once()
+            proxied = run_once(via_proxy=True)
+        assert probe.call_args_list == [
+            call(proxy_url=None), call(proxy_url=settings.proxy_url)
+        ]
+        assert fetch.call_args_list == [
+            call(CANARY_VIDEO_IDS[0], proxy=None),
+            call(CANARY_VIDEO_IDS[0], proxy=settings.proxy_url),
+        ]
+        assert direct["egress"]["path"] == "direct"
+        assert direct["egress"]["via_proxy"] is False
+        assert proxied["egress"]["path"] == "via_proxy"
+
     def test_report_is_self_dating_utc(self):
         """The report is pasted somewhere durable as evidence — it must carry
         its own UTC timestamp."""
@@ -452,6 +492,7 @@ class TestRunOnceBrowserLeg:
                     )
                 ),
             ),
+            patch("ytt.canary.probe_browser_egress", return_value=_RESIDENTIAL),
         ):
             report = run_once(browser=True)
         assert report["verdict"] == report["caption_fetch"]["outcome"] == "ip_blocked"
@@ -459,11 +500,8 @@ class TestRunOnceBrowserLeg:
 
     def test_browser_report_keeps_the_once_shape(self):
         with (
-            patch("ytt.config.get_settings", return_value=_browser_settings()),
-            patch(
-                "ytt.browser_fetch.browser_fetch_transcript",
-                AsyncMock(return_value=_browser_fetch_ok()),
-            ),
+            patch("ytt.selftest.probe_egress", return_value=_RESIDENTIAL),
+            patch("ytt.canary.probe_once_detail", return_value={"outcome": "ok"}),
         ):
             report = run_once()
         with (
@@ -472,6 +510,7 @@ class TestRunOnceBrowserLeg:
                 "ytt.browser_fetch.browser_fetch_transcript",
                 AsyncMock(return_value=_browser_fetch_ok()),
             ),
+            patch("ytt.canary.probe_browser_egress", return_value=_RESIDENTIAL),
         ):
             browser_report = run_once(browser=True)
         assert set(browser_report) == set(report) == {
@@ -479,25 +518,130 @@ class TestRunOnceBrowserLeg:
         }
         assert browser_report["mode"] == "once"
 
-    def test_browser_leg_carries_no_egress_classification(self):
-        """The browser fetch egresses from the browser pod — classifying
-        this process's egress would not describe the path that carried the
-        traffic, so the leg ships an empty context (the gate_error shape)."""
+    def test_browser_leg_classifies_the_browser_pod_without_ytt_proxy(self):
+        """The report must name the remote browser route, never the ytt pod."""
+        settings = _browser_settings()
+        settings.proxy_url = "http://proxy.example:3128"
         with (
-            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch("ytt.config.get_settings", return_value=settings),
             patch(
                 "ytt.browser_fetch.browser_fetch_transcript",
                 AsyncMock(return_value=_browser_fetch_ok()),
             ),
             patch("ytt.selftest.probe_egress") as probe_egress,
+            patch("ytt.canary.probe_browser_egress", return_value=_RESIDENTIAL) as browser_probe,
         ):
             report = run_once(browser=True)
         probe_egress.assert_not_called()
-        assert report["egress"] == {}
+        browser_probe.assert_called_once_with(_BROWSER_WS_URL)
+        assert report["egress"]["path"] == "browser"
+        assert report["egress"]["via_proxy"] is False
+        assert report["egress"]["is_residential"] is True
+        assert report["verdict"] == "ok"
+
+    def test_datacenter_browser_egress_fails_even_when_captions_work(self):
+        from ytt.canary import EGRESS_NON_RESIDENTIAL
+
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch("ytt.canary.probe_browser_once_detail", return_value={"outcome": "ok"}),
+            patch("ytt.canary.probe_browser_egress", return_value=_DATACENTER),
+        ):
+            report = run_once(browser=True)
+        assert report["caption_fetch"]["outcome"] == "ok"
+        assert report["egress"]["is_residential"] is False
+        assert report["verdict"] == EGRESS_NON_RESIDENTIAL
+
+    def test_unclassified_browser_egress_fails_a_successful_caption_probe(self):
+        from ytt.canary import EGRESS_UNCLASSIFIED
+
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch("ytt.canary.probe_browser_once_detail", return_value={"outcome": "ok"}),
+            patch("ytt.canary.probe_browser_egress", side_effect=RuntimeError("dns fail")),
+        ):
+            report = run_once(browser=True)
+        assert report["egress"] == {"error": "dns fail", "via_proxy": False, "path": "browser"}
+        assert report["verdict"] == EGRESS_UNCLASSIFIED
+
+    def test_missing_ipinfo_identity_is_unclassified(self):
+        from ytt.canary import EGRESS_UNCLASSIFIED
+
+        unknown = EgressReport(ip="unknown", via_proxy=False, is_residential=True)
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch("ytt.canary.probe_browser_once_detail", return_value={"outcome": "ok"}),
+            patch("ytt.canary.probe_browser_egress", return_value=unknown),
+        ):
+            report = run_once(browser=True)
+        assert report["verdict"] == EGRESS_UNCLASSIFIED
+
+    def test_caption_failure_keeps_its_outcome_when_egress_is_unclassified(self):
+        with (
+            patch("ytt.config.get_settings", return_value=_browser_settings()),
+            patch("ytt.canary.probe_browser_once_detail", return_value={"outcome": "rate_limited"}),
+            patch("ytt.canary.probe_browser_egress", side_effect=RuntimeError("dns fail")),
+        ):
+            report = run_once(browser=True)
+        assert report["verdict"] == "rate_limited"
+        assert report["egress"]["path"] == "browser"
 
     def test_browser_and_via_proxy_are_rejected(self):
         with pytest.raises(ValueError, match="mutually exclusive"):
             run_once(browser=True, via_proxy=True)
+
+
+def test_browser_egress_lookup_runs_inside_remote_chromium():
+    """The IP request must originate in the browser pod, not ytt/httpx."""
+    from ytt.canary import _probe_browser_egress_async
+    from ytt.selftest import _IPINFO_URL
+
+    response = MagicMock(ok=True)
+    response.json = AsyncMock(return_value={
+        "ip": "198.51.100.10", "org": "AS16509 Amazon AWS"
+    })
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=response)
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock()
+    pw = MagicMock()
+    pw.chromium.connect = AsyncMock(return_value=browser)
+    manager = MagicMock()
+    manager.__aenter__ = AsyncMock(return_value=pw)
+    manager.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("ytt.browser_fetch._playwright_factory", return_value=lambda: manager),
+        patch("ytt.selftest.httpx.Client") as local_http,
+    ):
+        report = asyncio.run(_probe_browser_egress_async(_BROWSER_WS_URL))
+
+    local_http.assert_not_called()
+    pw.chromium.connect.assert_awaited_once()
+    browser.new_context.assert_awaited_once_with()  # no YTT_PROXY_URL context proxy
+    page.goto.assert_awaited_once()
+    assert page.goto.call_args.args == (_IPINFO_URL,)
+    browser.close.assert_awaited_once_with()
+    assert report.ip == "198.51.100.10"
+    assert report.is_residential is False
+
+
+def test_browser_egress_note_names_each_measured_route_and_gate_outcome():
+    from ytt.canary import EGRESS_NON_RESIDENTIAL, EGRESS_UNCLASSIFIED
+
+    note = (Path(__file__).resolve().parents[2] / "docs/notes/browser-fetch.md").read_text()
+    for phrase in (
+        "`direct` | `ytt` pod native route",
+        "`via_proxy` | `ytt` pod through the configured proxy",
+        "`browser` | remote Chromium in the `ytt-browser` pod",
+        "`YTT_PROXY_URL` is a yt-dlp caption and audio fallback setting",
+        EGRESS_NON_RESIDENTIAL,
+        EGRESS_UNCLASSIFIED,
+    ):
+        assert phrase in note
 
 
 # ---------------------------------------------------------------------------
@@ -591,8 +735,8 @@ class TestCli:
 
 _PROBE_KEYS = {"ok", "outcome", "langs", "duration_sec", "via_proxy", "error"}
 _REPORT_KEYS = {"mode", "ran_at", "video_id", "egress", "caption_fetch", "verdict"}
-_EGRESS_OK_KEYS = {"ip", "asn", "org", "via_proxy", "is_residential"}
-_EGRESS_ERROR_KEYS = {"error", "via_proxy"}
+_EGRESS_OK_KEYS = {"ip", "asn", "org", "via_proxy", "is_residential", "path"}
+_EGRESS_ERROR_KEYS = {"error", "via_proxy", "path"}
 
 
 def _probe_ok() -> dict:
@@ -634,6 +778,7 @@ def _run_once_browser_ok() -> dict:
             "ytt.browser_fetch.browser_fetch_transcript",
             AsyncMock(return_value=_browser_fetch_ok()),
         ),
+        patch("ytt.canary.probe_browser_egress", return_value=_RESIDENTIAL),
     ):
         return run_once(browser=True)
 
@@ -681,13 +826,12 @@ class TestReportSchema:
         assert blocked["verdict"] == blocked["caption_fetch"]["outcome"] == "ip_blocked"
 
     def test_run_once_browser_leg_schema(self):
-        """The browser leg keeps the once schema — the gate's probe reports
-        never branch on the path — with the deliberate empty egress context
-        (the fetch egresses from the browser pod, not this process)."""
+        """The browser leg keeps the once schema with a remote egress report."""
         report = _run_once_browser_ok()
         assert set(report) == _REPORT_KEYS
         assert set(report["caption_fetch"]) == _PROBE_KEYS
-        assert report["egress"] == {}
+        assert set(report["egress"]) == _EGRESS_OK_KEYS
+        assert report["egress"]["path"] == "browser"
         assert report["verdict"] == report["caption_fetch"]["outcome"] == "ok"
 
     def test_browser_leg_round_trips_through_json_losslessly(self):

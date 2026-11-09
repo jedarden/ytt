@@ -562,6 +562,7 @@ class TestEgressProbeProxyKwarg:
             report = probe_egress(_PROXY)
         kwargs = client_cls.call_args[1]
         assert kwargs.get("proxy") == _PROXY
+        assert kwargs["trust_env"] is False
         assert "proxies" not in kwargs
         assert report.via_proxy is True
 
@@ -573,6 +574,7 @@ class TestEgressProbeProxyKwarg:
         kwargs = client_cls.call_args[1]
         assert "proxy" not in kwargs
         assert "proxies" not in kwargs
+        assert kwargs["trust_env"] is False
         assert report.via_proxy is False
 
 
@@ -641,21 +643,22 @@ class TestCanaryViaProxy:
         assert captured[0].get("proxy") == _PROXY
         assert report["caption_fetch"]["via_proxy"] is True
 
-    def test_default_run_once_fetches_direct_but_probes_the_proxy(self):
+    def test_default_run_once_fetches_and_probes_direct(self):
         from ytt.canary import run_once
 
         settings = _make_fetch_settings(proxy_url=_PROXY)
         factory, captured = _capturing_ydl([_make_info()])
-        probe_mock = MagicMock(return_value=_egress_report())
+        probe_mock = MagicMock(return_value=_egress_report().model_copy(update={"via_proxy": False}))
         with patch("ytt.config.get_settings", return_value=settings):
             with patch("ytt.selftest.probe_egress", probe_mock):
                 with patch("yt_dlp.YoutubeDL", side_effect=factory):
                     report = run_once()
-        # Default: caption probe dials direct (matches the caption path);
-        # the egress half still classifies the proxy's egress.
+        # Both halves describe the direct route, even with a fallback proxy configured.
         assert "proxy" not in captured[0]
+        probe_mock.assert_called_once_with(proxy_url=None)
         assert report["caption_fetch"]["via_proxy"] is False
-        assert report["egress"]["via_proxy"] is True
+        assert report["egress"]["via_proxy"] is False
+        assert report["egress"]["path"] == "direct"
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +962,7 @@ class TestHttpxFailureRedaction:
         with patch("ytt.config.get_settings", return_value=settings):
             with patch("ytt.selftest.probe_egress", probe_mock):
                 with patch("yt_dlp.YoutubeDL", side_effect=factory):
-                    report = run_once()
+                    report = run_once(via_proxy=True)
 
         egress = report["egress"]
         _assert_credential_free(egress["error"])

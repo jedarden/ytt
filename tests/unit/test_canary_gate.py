@@ -39,6 +39,7 @@ from ytt.canary_gate import (
     remediation_for,
     run_gate,
 )
+from ytt.canary import EGRESS_NON_RESIDENTIAL, EGRESS_UNCLASSIFIED
 from ytt.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -263,6 +264,23 @@ class TestBrowserProbeSelection:
         assert report["verdict"] == "ok"
         assert report["failed_probe"] is None
         assert report["remediation"] is None
+
+    def test_residential_browser_egress_is_required_even_when_caption_passes(self, tmp_path):
+        browser = _once_report("ok")
+        browser["egress"] = {
+            "ip": "198.51.100.10", "asn": "AS16509", "org": "Amazon AWS",
+            "via_proxy": False, "is_residential": False, "path": "browser",
+        }
+        browser["verdict"] = EGRESS_NON_RESIDENTIAL
+        report = _gate(
+            browser_url="ws://browser:3001/ytt", browser=browser,
+            evidence_dir=tmp_path,
+        )
+        report.pop("_calls")
+        assert report["probes"]["browser"]["caption_fetch"]["outcome"] == "ok"
+        assert report["gate"] == "fail"
+        assert report["failed_probe"] == "browser"
+        assert report["verdict"] == EGRESS_NON_RESIDENTIAL
 
     def test_direct_failure_still_wins_when_all_three_probes_fail(self, tmp_path):
         """Run order stays deterministic with three probes: direct, then
@@ -656,6 +674,14 @@ class TestRemediation:
                     "escalate to the egress owner",
                 ],
             ),
+            (
+                "browser", EGRESS_NON_RESIDENTIAL, True,
+                ["ytt-browser pod", "non-residential", "YTT_PROXY_URL", "egress owner"],
+            ),
+            (
+                "browser", EGRESS_UNCLASSIFIED, True,
+                ["could not be classified", "ipinfo", "egress owner"],
+            ),
         ],
     )
     def test_directive_names_the_concrete_action(
@@ -678,6 +704,8 @@ class TestRemediation:
             ("browser", "ip_blocked", True),
             ("browser", "empty_body", True),
             ("browser", "rate_limited", True),
+            ("browser", EGRESS_NON_RESIDENTIAL, True),
+            ("browser", EGRESS_UNCLASSIFIED, True),
             ("direct", GATE_ERROR, True),
         ],
     )
@@ -837,6 +865,14 @@ class TestRunbookRemediationMirror:
                     "to the egress owner with the evidence JSON",
                     "whether to keep or revert the tag",
                 ],
+            ),
+            (
+                "browser", EGRESS_NON_RESIDENTIAL, True,
+                ["ytt-browser pod", "non-residential", "YTT_PROXY_URL", "egress owner"],
+            ),
+            (
+                "browser", EGRESS_UNCLASSIFIED, True,
+                ["could not be classified", "ipinfo", "egress owner"],
             ),
         ],
     )

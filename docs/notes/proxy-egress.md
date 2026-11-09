@@ -20,7 +20,9 @@ rules below are identical for both configurations.
 |---|---|---|
 | Caption extraction (`ytt.fetch._do_fetch`: `extract_info` + json3 `urlopen`) | **direct first; one proxied retry on `ip_blocked`** | The datacenter IP usually works (player-client pin, `docs/notes/yt-dlp-player-client.md`); the proxy is the fallback, and dialing it on every request wastes residential bandwidth and incurs per-GB cost. |
 | Whisper audio download (`ytt.whisper._do_download_audio`) | **direct first; one proxied retry on `ip_blocked`** | Plan §ip_blocked: "the proxy retry applies equally to caption fetches and Whisper audio downloads." Both paths share `ytt.fetch.run_with_proxy_retry`. |
-| Egress probe (`ytt.selftest.probe_egress` — startup log, `GET /admin/egress`, canary egress half) | **always through the proxy when set** | Deliberate: the probe classifies the *effective fallback path's* egress (is the proxy's IP residential?), not the native one. `ytt selftest` probes direct for that. |
+| Egress probe (`ytt.selftest.probe_egress` — startup log, `GET /admin/egress`) | **always through the proxy when set** | This server-side gauge/report classifies the fallback path, not the native or browser route. `ytt selftest` probes direct. Ambient proxy environment variables are ignored. |
+| One-shot canary egress half (`direct`, `via_proxy`) | **same route as that leg's caption fetch** | `direct` classifies the `ytt` pod's native exit even with a proxy configured; `via_proxy` classifies the proxy exit. `--via-proxy` without a configured proxy fails as `unavailable`. |
+| Browser-primary captions and browser canary egress half | **never use `YTT_PROXY_URL`** | Remote Chromium in `ytt-browser` fetches both YouTube captions and its own ipinfo classification; the browser pod must have residential egress independently. See [browser-fetch.md](browser-fetch.md#egress-and-proxy-contract). |
 | `ytt canary --once --via-proxy` | **the caption probe dials through the proxy** | The end-to-end check that the configured proxy actually carries YouTube traffic (run in-cluster; see "Verifying in-cluster"). The default `ytt canary --once` probes direct, matching the caption path. |
 | Whisper ASR POST (`/v1/audio/transcriptions`) | **never proxied** | The Whisper service is on the tailnet; proxying an internal call would leak it to a third party and break. |
 | OAuth / OIDC discovery, JWKS, token calls | **never proxied** | Identity traffic must not traverse a third-party proxy. |
@@ -130,7 +132,7 @@ in-cluster only (datacenter IPs outside the cluster are blocked by design):
    `deploy/RUNBOOK.md` §3) runs this probe *and* the direct one whenever
    `YTT_PROXY_URL` is configured *and* the browser-primary probe whenever
    `YTT_BROWSER_WS_URL` is set and `YTT_FETCH_MODE` is not `ytdlp`, requires
-   `outcome=ok` on every probe, retains the
+   `verdict="ok"` on every probe, retains the
    JSON evidence, and emits the rollback/escalation directive on failure.
 2. **`tests/integration/test_proxy_live.py`** — pytest integration suite
    (`-m integration`): asserts `/admin/egress` reports `via_proxy: true` with a

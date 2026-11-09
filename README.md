@@ -102,9 +102,10 @@ ytt canary --once    # fetches captions for one known-good video; JSON report,
 After changing the image or the egress config, run the acceptance gate
 instead — it runs the direct probe **and** `--via-proxy` when `YTT_PROXY_URL`
 is set **and** the browser-primary probe when `YTT_BROWSER_WS_URL` is set
-and `YTT_FETCH_MODE` is not `ytdlp`, requires `outcome=ok` on every probe
-(a pass therefore requires the primary browser path, not just the yt-dlp
-fallback), retains the JSON
+and `YTT_FETCH_MODE` is not `ytdlp`, requires `verdict="ok"` on every probe
+(a pass therefore requires the primary browser path and a residential
+classification from the browser pod, not just the yt-dlp fallback), retains
+the JSON
 evidence (`report.evidence_file` — pod-local by default; what survives where
 is the durability contract in `docs/notes/canary-gate-evidence.md` §4), and
 prints the rollback/escalation directive on failure:
@@ -122,7 +123,7 @@ The full `ytt canary` flag surface (drift-guarded by
 | `--gate` | off | Post-deploy acceptance gate (above); mutually exclusive with `--once`. |
 | `--video-id <ID>` | first `CANARY_VIDEO_IDS` entry | Probe target override; valid with `--once` or `--gate` (every gate probe fetches it). |
 | `--via-proxy` | off | Valid with `--once` only: dial the probe through `YTT_PROXY_URL` — the end-to-end check that the configured proxy actually carries YouTube traffic ([docs/notes/proxy-egress.md](docs/notes/proxy-egress.md)). The gate runs its own proxy leg when `YTT_PROXY_URL` is set, so passing `--via-proxy` to it is a usage error. |
-| `--browser` | off | Valid with `--once` only: probe the browser-primary caption path (`YTT_BROWSER_WS_URL`) end to end — fresh context, the player's own caption request, a non-empty timedtext body ([docs/notes/browser-fetch.md](docs/notes/browser-fetch.md)). A browser failure is a real failing outcome, never a silent yt-dlp fallback. The gate runs its own browser leg when the browser path is configured, so passing `--browser` to it is a usage error. |
+| `--browser` | off | Valid with `--once` only: probe the browser-primary caption path (`YTT_BROWSER_WS_URL`) end to end and classify its exit from remote Chromium in the browser pod ([docs/notes/browser-fetch.md](docs/notes/browser-fetch.md#egress-and-proxy-contract)). A pass requires a non-empty caption body and residential browser egress. The gate runs its own browser leg when configured, so passing `--browser` to it is a usage error. |
 | `--evidence-dir <DIR>` | `/tmp/ytt-canary-evidence` | Valid with `--gate` only: directory for the JSON evidence artifact (what survives where: `docs/notes/canary-gate-evidence.md` §4). |
 
 With no flag at all, `ytt canary` is the long-running probe loop the canary
