@@ -134,6 +134,61 @@ Like the registration throttle, these windows are process-local, which the
 supported single-replica, single-worker deployment makes authoritative.
 Focused regression coverage is in `tests/unit/test_oauth_abuse.py`.
 
+## Unauthenticated token-request throttling
+
+The token endpoint (`POST` `/token`, also served under the issuer path) is
+unauthenticated by design: it must accept a client’s authorization-code or
+refresh-token exchange before ytt has a bearer token to validate. It is
+therefore throttled *before* FastMCP validates the grant, calls the upstream
+IdP, exchanges a code, refreshes a session, or mints a ytt token. Both bare and
+issuer-path route spellings share the same counters.
+
+Defaults are strict rolling 60-second windows. Only requests admitted to the
+token handler consume a slot; a request rejected by the throttle does not
+refresh either window. The in-memory tables hold at most 4,096 active keys per
+dimension, and `0` for either ceiling denies every token request (fail-closed):
+
+- **Per OAuth client and source IP:**
+  `YTT_OAUTH_TOKEN_RATE_PER_CLIENT_PER_MIN=30` admitted requests per
+  `(source IP, client_id)`.
+- **Per source IP:** `YTT_OAUTH_TOKEN_RATE_PER_IP_PER_MIN=120` admitted
+  requests across all OAuth clients. This second ceiling prevents rotating
+  `client_id` values from bypassing the source limit.
+
+The `client_id` key is read from the form body first, then the query string,
+then the userinfo of an RFC 6749 Basic `Authorization` header. Requests with no
+usable client ID use the empty client key and remain covered by the per-IP
+ceiling. The form body is replayed unchanged to the token handler after the
+throttle inspects it.
+
+**Source IP:** the same trusted-proxy rule as `/register` and `/authorize`
+applies. `YTT_OAUTH_TRUSTED_PROXY_CIDRS=10.42.0.0/16` (default) identifies
+socket peers allowed to supply `X-Forwarded-For`; peers outside those networks
+always use their socket IP. For a trusted peer,
+`YTT_OAUTH_TRUSTED_PROXY_COUNT=2` (default) selects the second address from the
+right of the comma-separated header, matching the visitor address before the
+two-hop reference ingress chain. A missing, short, or malformed chain falls
+back to the socket peer. Set the count to `0` to ignore the header entirely;
+self-hosters must set the CIDRs and hop count to their actual proxy chain.
+
+**Rejection:** an excess request receives a direct HTTP `429` response with
+`Retry-After` (seconds), `Cache-Control: no-store`, and this OAuth-shaped JSON
+body:
+
+```json
+{"error": "rate_limited", "error_description": "Too many token requests; retry later."}
+```
+
+The response is returned before token processing, so it contains no access or
+refresh token and causes no upstream exchange or token issuance. The stable
+error body and `Retry-After` make the result predictable for OAuth clients;
+clients should wait and retry after the advertised window.
+
+Like the other unauthenticated OAuth throttles, the token windows are
+process-local; the supported single-replica, single-worker deployment makes
+that scope explicit. Focused regression coverage is in
+`tests/unit/test_oauth_abuse.py`.
+
 ## Job ownership — Whisper ASR handles are per-subject
 
 Starting a Whisper ASR job records the caller's authenticated subject — the

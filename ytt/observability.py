@@ -16,6 +16,7 @@ Metrics (all registered against the default CollectorRegistry):
     ytt_cache_evictions_total            — Counter
     ytt_queue_depth                      — Gauge
     ytt_rate_limited_total{subject_hash} — Counter
+    ytt_oauth_throttled_total{scope}     — Counter  (unauthenticated OAuth endpoints)
     ytt_egress_is_residential            — Gauge
 
 Logging:
@@ -148,6 +149,17 @@ ytt_rate_limited_total = Counter(
     ["subject_hash"],
 )
 
+#: Unauthenticated OAuth endpoint requests denied by the throttle
+#: (ytt.oauth_abuse) — ``scope`` is the refusing layer (``per_key``,
+#: ``global``, ``registry_full``), a static taxonomy value; the client key
+#: itself is only ever hashed into the paired log line, never a label.
+ytt_oauth_throttled_total = Counter(
+    "ytt_oauth_throttled_total",
+    "Total unauthenticated OAuth endpoint requests denied by the throttle, "
+    "by refusing layer.",
+    ["scope"],
+)
+
 #: 1 when the egress IP is non-datacenter (residential), 0 otherwise.
 ytt_egress_is_residential = Gauge(
     "ytt_egress_is_residential",
@@ -264,6 +276,7 @@ def redaction_processor(
 # Logging configuration
 # ---------------------------------------------------------------------------
 
+
 def configure_logging() -> None:
     """Configure structlog for JSON-to-stdout output with redaction.
 
@@ -318,12 +331,10 @@ class UTCISO8601Formatter(logging.Formatter):
     log shapes recorded in the notes and runbooks keep matching.
     """
 
-    def formatTime(
-        self, record: logging.LogRecord, datefmt: str | None = None
-    ) -> str:
-        return datetime.fromtimestamp(
-            record.created, tz=timezone.utc
-        ).isoformat(timespec="milliseconds")
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        return datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
 
 
 class CurrentStderrHandler(logging.StreamHandler):

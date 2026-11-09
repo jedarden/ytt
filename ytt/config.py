@@ -409,7 +409,7 @@ class Settings(BaseSettings):
     # Unauthenticated OAuth endpoint abuse bounds (docs/notes/auth.md).
     # Request thresholds use strict rolling 60-second windows; the proxy hop
     # count identifies the visitor address in the trusted X-Forwarded-For
-    # chain (shared by /register and /authorize).
+    # chain (shared by /register, /authorize, and /token).
     oauth_trusted_proxy_count: int = 2
     oauth_trusted_proxy_cidrs: str = "10.42.0.0/16"
     oauth_endpoint_rate_per_min: int = 10
@@ -419,6 +419,10 @@ class Settings(BaseSettings):
     # source IP, enforced before any authorization state is written.
     oauth_authorize_rate_per_client_per_min: int = 30
     oauth_authorize_rate_per_ip_per_min: int = 120
+    # /token redemption throttle: same two-window shape, enforced before any
+    # grant is exchanged or token minted.
+    oauth_token_rate_per_client_per_min: int = 30
+    oauth_token_rate_per_ip_per_min: int = 120
     # Upstream IdP location: the reference Authentik by default, any generic
     # OIDC provider via env (docs/usage/self-hosting.md). The issuer is
     # matched byte-for-byte against the id token's iss claim, so it is
@@ -443,6 +447,8 @@ class Settings(BaseSettings):
         "oauth_registration_ttl_sec",
         "oauth_authorize_rate_per_client_per_min",
         "oauth_authorize_rate_per_ip_per_min",
+        "oauth_token_rate_per_client_per_min",
+        "oauth_token_rate_per_ip_per_min",
     )
     @classmethod
     def _rate_limits_non_negative(cls, v: int | None, info) -> int | None:

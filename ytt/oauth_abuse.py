@@ -1,13 +1,16 @@
 """Bounds for unauthenticated OAuth endpoints.
 
-Two endpoint families are guarded here:
+Three endpoint families are guarded here:
 
 - dynamic client registration (``POST /register``) — request throttle plus a
   persistent capacity bound;
 - authorization-code initiation (``GET``/``POST /authorize``) — a request
   throttle keyed by source IP *and* OAuth client, enforced before the
   handler runs, so a rejected attempt never issues a code or writes any
-  authorization state (transactions, codes).
+  authorization state (transactions, codes);
+- token redemption (``POST /token``) — the same two-window throttle shape,
+  enforced before the handler runs, so a rejected attempt never exchanges,
+  refreshes, or mints any token.
 
 The ASGI process is single-worker in the supported deployment. The limiters are
 therefore process-local, while client registration accounting is persisted in
@@ -16,6 +19,7 @@ the encrypted OAuth store so restarts do not reset the capacity bound.
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import math
 import threading
@@ -23,7 +27,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, SupportsFloat
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote
 
 from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import FileTreeStore
@@ -360,6 +364,135 @@ class AuthorizationThrottleMiddleware:
             },
             status_code=429,
             headers={"Retry-After": str(retry_after)},
+        )
+        await response(scope, receive, send)
+
+
+class TokenThrottle(AuthorizationThrottle):
+    """Bound ``/token`` requests per (source, client) and per source.
+
+    The two-window admission core is exactly the authorization throttle's —
+    strict rolling windows keyed ``(source IP, client_id)`` and source IP
+    alone — instantiated separately so the token endpoint carries its own
+    configurable ceilings (typically tighter than ``/authorize``'s, since a
+    legitimate client redeems a code once and refreshes rarely) and its own
+    counters, and stays an ``AuthorizationThrottle`` for every caller that
+    only needs the window semantics.
+    """
+
+
+def _basic_auth_client_id(request: Request) -> str | None:
+    """Return the client_id of an RFC 6749 §2.3.1 Basic Authorization header.
+
+    The client_id is the userinfo part, percent-encoded as a
+    ``application/x-www-form-urlencoded`` value — decoded here the same way
+    the SDK's client authenticator decodes it. Malformed headers (bad
+    base64, no ``:`` separator) key under nothing; the request stays bounded
+    by the per-IP window either way.
+    """
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(header[6:].strip()).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if ":" not in decoded:
+        return None
+    client_id = unquote(decoded.split(":", 1)[0])
+    return client_id or None
+
+
+class TokenThrottleMiddleware:
+    """ASGI wrapper for the token endpoint; runs before its handler.
+
+    Every ``POST`` that reaches the endpoint is counted, whatever its grant
+    type and whether the handler would later accept or reject it — exactly as
+    invalid registration and authorization attempts count. (``OPTIONS`` CORS
+    preflights pass through uncounted, like ``/register``.) The
+    ``client_id`` key is read the way token requests carry it: the form body
+    first (the SDK's client authenticator requires it there), then the query
+    string, then the userinfo of a Basic ``Authorization`` header; a request
+    with none of those keys under the empty string (still IP-bounded). The
+    consumed body is replayed untouched so the wrapped handler sees it.
+
+    A rejected request is answered directly with ``429``, ``Retry-After``,
+    ``Cache-Control: no-store``, and an OAuth-shaped JSON error body — before
+    any token is issued, exchanged, or refreshed. The OAuth error-code shape
+    (RFC 6749 §5.2's ``error``/``error_description`` fields) keeps the body
+    machine-parseable; ``rate_limited`` is not one of §5.2's enumerated
+    grant errors, and 429 (not 400) is the correct HTTP-level signal for
+    "retry later", so compliant clients slow down instead of treating the
+    response as a permanent grant failure.
+    """
+
+    def __init__(
+        self,
+        app,
+        *,
+        throttle: TokenThrottle,
+        trusted_proxy_count: int,
+        trusted_proxy_cidrs: str,
+    ) -> None:
+        self.app = app
+        self.throttle = throttle
+        self.trusted_proxy_count = trusted_proxy_count
+        self.trusted_proxy_cidrs = trusted_proxy_cidrs
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["method"].upper() != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        client_id = request.query_params.get("client_id")
+        if (
+            client_id is None
+            and request.headers.get("content-type", "").split(";")[0].strip().lower()
+            == "application/x-www-form-urlencoded"
+        ):
+            body = await request.body()
+            client_id = FormData(parse_qsl(body.decode("utf-8", "replace"))).get(
+                "client_id"
+            )
+            # Replay the consumed body so the wrapped handler still sees it.
+            sent = False
+
+            async def replay() -> dict:
+                nonlocal sent
+                if not sent:
+                    sent = True
+                    return {
+                        "type": "http.request",
+                        "body": body,
+                        "more_body": False,
+                    }
+                return {"type": "http.disconnect"}
+
+            receive = replay
+        if not isinstance(client_id, str) or not client_id:
+            client_id = _basic_auth_client_id(request)
+
+        source = registration_source_address(
+            request,
+            trusted_proxy_count=self.trusted_proxy_count,
+            trusted_proxy_cidrs=self.trusted_proxy_cidrs,
+        )
+        retry_after = self.throttle.retry_after(source, client_id or "")
+        if retry_after is None:
+            await self.app(scope, receive, send)
+            return
+
+        response = JSONResponse(
+            {
+                "error": "rate_limited",
+                "error_description": "Too many token requests; retry later.",
+            },
+            status_code=429,
+            headers={
+                "Retry-After": str(retry_after),
+                "Cache-Control": "no-store",
+            },
         )
         await response(scope, receive, send)
 

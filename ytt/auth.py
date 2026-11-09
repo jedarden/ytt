@@ -70,6 +70,8 @@ from ytt.oauth_abuse import (
     RegistrationThrottle,
     RegistrationThrottleMiddleware,
     RegistrationTTLStore,
+    TokenThrottle,
+    TokenThrottleMiddleware,
     enumerate_client_ids,
 )
 
@@ -227,6 +229,8 @@ class YttOIDCProvider(OIDCProxy):
         registration_rate_per_min: int = 10,
         authorize_rate_per_client_per_min: int = 30,
         authorize_rate_per_ip_per_min: int = 120,
+        token_rate_per_client_per_min: int = 30,
+        token_rate_per_ip_per_min: int = 120,
         trusted_proxy_count: int = 2,
         trusted_proxy_cidrs: str = "10.42.0.0/16",
         registration_cap: int = 256,
@@ -254,6 +258,19 @@ class YttOIDCProvider(OIDCProxy):
         self._authorization_throttle = AuthorizationThrottle(
             per_client_limit=authorize_rate_per_client_per_min,
             per_ip_limit=authorize_rate_per_ip_per_min,
+            window_seconds=60,
+            clock=throttle_clock,
+        )
+        # /token redemption bounds: the same two-window shape — per (source
+        # IP, client_id) plus a per-source-IP ceiling — enforced in front of
+        # the handler, so a rejected attempt exchanges, refreshes, and mints
+        # nothing. The token endpoint answers with a JSON error body (no
+        # redirect involved), so the throttle's direct 429 needs no
+        # redirect-safety argument, only the no-store cache hygiene the
+        # handler's own error responses carry.
+        self._token_throttle = TokenThrottle(
+            per_client_limit=token_rate_per_client_per_min,
+            per_ip_limit=token_rate_per_ip_per_min,
             window_seconds=60,
             clock=throttle_clock,
         )
@@ -346,6 +363,45 @@ class YttOIDCProvider(OIDCProxy):
                     name=route.name,
                     include_in_schema=route.include_in_schema,
                 )
+                break
+
+        # Same placement for /token, wrapped before path insertion so both
+        # spellings share one throttle. The SDK mounts this endpoint inside a
+        # CORS wrapper (like /register): keep CORS outermost so a 429 retains
+        # the same browser headers as an ordinary token response.
+        for index, route in enumerate(base_routes):
+            if (
+                isinstance(route, Route)
+                and route.path.rstrip("/") == "/token"
+                and "POST" in (route.methods or set())
+            ):
+                endpoint = route.endpoint
+                if isinstance(endpoint, CORSMiddleware):
+                    endpoint.app = TokenThrottleMiddleware(
+                        endpoint.app,
+                        throttle=self._token_throttle,
+                        trusted_proxy_count=self._trusted_proxy_count,
+                        trusted_proxy_cidrs=self._trusted_proxy_cidrs,
+                    )
+                else:
+                    app = (
+                        request_response(endpoint)
+                        if inspect.isfunction(endpoint) or inspect.ismethod(endpoint)
+                        else endpoint
+                    )
+                    endpoint = TokenThrottleMiddleware(
+                        app,
+                        throttle=self._token_throttle,
+                        trusted_proxy_count=self._trusted_proxy_count,
+                        trusted_proxy_cidrs=self._trusted_proxy_cidrs,
+                    )
+                    base_routes[index] = Route(
+                        route.path,
+                        endpoint=endpoint,
+                        methods=route.methods,
+                        name=route.name,
+                        include_in_schema=route.include_in_schema,
+                    )
                 break
 
         if not self.issuer_url:
@@ -797,6 +853,8 @@ def build_auth_provider(settings: Settings) -> YttOIDCProvider:
             settings.oauth_authorize_rate_per_client_per_min
         ),
         authorize_rate_per_ip_per_min=settings.oauth_authorize_rate_per_ip_per_min,
+        token_rate_per_client_per_min=settings.oauth_token_rate_per_client_per_min,
+        token_rate_per_ip_per_min=settings.oauth_token_rate_per_ip_per_min,
         trusted_proxy_count=settings.oauth_trusted_proxy_count,
         trusted_proxy_cidrs=settings.oauth_trusted_proxy_cidrs,
         registration_cap=settings.oauth_registration_cap,

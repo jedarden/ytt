@@ -46,8 +46,13 @@ os.environ.setdefault("YTT_PUBLIC_URL", "https://mcp.ardenone.com/ytt")
 # persistent OAuth rows survive across test runs. Raise these limits only
 # for the unit-test process; tests/unit/test_oauth_abuse.py pins the actual
 # threshold, window, cap, TTL, and persistence behavior using isolated stores.
+# The /token bounds get the same treatment for the same reason: every
+# TestClient request shares one source key, and those suites redeem many
+# codes and refresh tokens against the module-level app.
 os.environ.setdefault("YTT_OAUTH_ENDPOINT_RATE_PER_MIN", "100000")
 os.environ.setdefault("YTT_OAUTH_REGISTRATION_CAP", "100000")
+os.environ.setdefault("YTT_OAUTH_TOKEN_RATE_PER_CLIENT_PER_MIN", "100000")
+os.environ.setdefault("YTT_OAUTH_TOKEN_RATE_PER_IP_PER_MIN", "100000")
 
 _FAKE_OIDC_CONFIG = OIDCConfiguration(
     issuer="https://sso.ardenone.com/application/o/ytt/",

@@ -56,6 +56,13 @@ JWKS (e.g. Keycloak's default) is not yet supported; see the note in
 | `YTT_OAUTH_AUTHORIZE_RATE_PER_CLIENT_PER_MIN` | `30` | `/authorize` initiations allowed per (source IP, `client_id`) in a strict rolling 60-second window, counted before the handler runs — a denied attempt writes no authorization state and issues no code. Excess attempts receive a direct `429` with `Retry-After` and an OAuth-shaped `rate_limited` JSON body (never a redirect). `0` denies every initiation. |
 | `YTT_OAUTH_AUTHORIZE_RATE_PER_IP_PER_MIN` | `120` | `/authorize` initiations allowed per source IP across all clients in the same window, so `client_id` rotation cannot escape the bound. `0` denies every initiation. |
 
+## Unauthenticated token requests
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTT_OAUTH_TOKEN_RATE_PER_CLIENT_PER_MIN` | `30` | `/token` requests allowed per (source IP, `client_id`) in a strict rolling 60-second window, enforced before grant validation, upstream exchange, or token issuance. Excess attempts receive a direct `429` with `Retry-After`, `Cache-Control: no-store`, and an OAuth-shaped `rate_limited` JSON body. `0` denies every token request. |
+| `YTT_OAUTH_TOKEN_RATE_PER_IP_PER_MIN` | `120` | `/token` requests allowed per source IP across all clients in the same window, so rotating `client_id` values cannot bypass the source ceiling. `0` denies every token request. |
+
 Source IPs use the same trusted-proxy rule as `/register`
 (`YTT_OAUTH_TRUSTED_PROXY_CIDRS` / `YTT_OAUTH_TRUSTED_PROXY_COUNT` in the
 table above). Denied attempts are not recorded, so `Retry-After` decreases
