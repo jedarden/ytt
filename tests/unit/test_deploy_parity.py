@@ -19,11 +19,13 @@ Mapping (``deploy/README.md`` §Layout):
   hold ~180 non-ytt neighbours, so no set equality on that side.
 
 The declarative-config checkout is located via ``$YTT_DECLARATIVE_CONFIG_DIR``
-or the sibling ``../declarative-config`` of this repo.  Without a checkout
-(CI image builds exclude ``deploy/`` and have no sibling) the whole module
-skips: the guard runs wherever the applied manifests are actually checked
-out and edits are validated (``scripts/definition-of-done.sh`` runs it
-first, separately).
+or the sibling ``../declarative-config`` of a Git checkout of this repo.
+Archive extractions have no ``.git`` and skip sibling discovery: an unrelated
+checkout or symlink beside a temporary extraction is not that archive's
+deployment source.  An explicit ``YTT_DECLARATIVE_CONFIG_DIR`` still enables
+the check there.  Without a checkout the whole module skips; the guard runs
+where the applied manifests are actually checked out and edits are validated
+(``scripts/definition-of-done.sh`` runs it first, separately).
 """
 
 from __future__ import annotations
@@ -61,6 +63,8 @@ def _find_declarative_config() -> Path | None:
                 "declarative-config checkout (no k8s/ directory)"
             )
         return root.resolve()
+    if not (REPO_ROOT / ".git").exists():
+        return None
     sibling = REPO_ROOT.parent / "declarative-config"
     if (sibling / "k8s").is_dir():
         return sibling.resolve()
