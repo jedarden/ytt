@@ -16,7 +16,6 @@ Metrics (all registered against the default CollectorRegistry):
     ytt_cache_evictions_total            — Counter
     ytt_queue_depth                      — Gauge
     ytt_rate_limited_total{subject_hash} — Counter
-    ytt_oauth_throttled_total{scope}     — Counter  (unauthenticated OAuth endpoints)
     ytt_egress_is_residential            — Gauge
 
 Logging:
@@ -147,17 +146,6 @@ ytt_rate_limited_total = Counter(
     "ytt_rate_limited_total",
     "Total requests rejected by the per-subject rate limiter, by subject hash.",
     ["subject_hash"],
-)
-
-#: Unauthenticated OAuth endpoint requests denied by the throttle
-#: (ytt.oauth_abuse) — ``scope`` is the refusing layer (``per_key``,
-#: ``global``, ``registry_full``), a static taxonomy value; the client key
-#: itself is only ever hashed into the paired log line, never a label.
-ytt_oauth_throttled_total = Counter(
-    "ytt_oauth_throttled_total",
-    "Total unauthenticated OAuth endpoint requests denied by the throttle, "
-    "by refusing layer.",
-    ["scope"],
 )
 
 #: 1 when the egress IP is non-datacenter (residential), 0 otherwise.
